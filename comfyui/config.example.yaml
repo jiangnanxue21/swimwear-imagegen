@@ -1,0 +1,24 @@
+# ComfyUI 接入配置
+#
+# 节点 ID 必须来自这里,不得散落在业务代码中(需求第六章)。
+# 下面的数字是**占位示例**,必须替换成你实际工作流中的真实 ID。
+# 怎么找到它们:见同目录 README.md 第二节。
+comfyui:
+  # ComfyUI 服务地址。与后端同网段;记得把主机名加进 DOWNLOAD_ALLOWED_HOSTS
+  base_url: http://comfyui:8188
+
+  # 工作流 JSON。必须是 ComfyUI 界面里 "Save (API Format)" 导出的那种,
+  # 普通 Save 带 UI 坐标,/prompt 接口不认
+  workflow_file: workflows/virtual_tryon.json
+
+  timeout_seconds: 300
+  poll_interval_seconds: 2
+  max_retries: 2
+
+  nodes:
+    garment_image: "12"   # TODO 待确认:载入商品图的 LoadImage 节点 ID
+    model_image: "13"     # TODO 待确认:载入模特图的 LoadImage 节点 ID
+    positive_prompt: "20" # TODO 待确认:正向提示词 CLIPTextEncode 节点 ID
+    negative_prompt: "21" # TODO 待确认:负向提示词 CLIPTextEncode 节点 ID
+    seed: "25"            # TODO 待确认:采样器 KSampler 节点 ID
+    output: "40"          # TODO 待确认:保存输出的 SaveImage 节点 ID

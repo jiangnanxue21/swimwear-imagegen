@@ -1,0 +1,221 @@
+# 通用上架模板 —— 泳衣类目(任务书阶段 2「一个渠道、一个站点、一个类目、一个模板」)
+#
+# ############################################################################
+# # PRD v2 起,这是**受众前时代的旧包**。新草稿按受众派生到                  #
+# # women_swimwear.yaml / men_swimwear.yaml(§18.1);这份保留有两个理由:    #
+# #                                                                          #
+# # 1. 存量草稿的 category_id 是 "swimwear",删掉文件它们就读不出来了;      #
+# # 2. 受众待确认的商品仍派生到这里 —— 但提交闸口会把它拦在                 #
+# #    "受众未确认"上(workbench/audience_rules.py),它只能预览,不能出门。 #
+# #                                                                          #
+# # **不要再往这份里加字段。** 字段演进发生在两份受众包里;这里只修 bug。    #
+# ############################################################################
+#
+# ############################################################################
+# # 这份 spec 里的字段名**全部是本项目自己定义的**,不是任何第三方平台的。   #
+# #                                                                          #
+# # 这是刻意的。硬规矩 1 说「第三方字段不凭记忆写代码」,而 SHEIN 的官方模板 #
+# # 与 OpenAPI 文档至今没拿到 —— app/channels/shein/spec/common.yaml 因此    #
+# # 整份是 TODO_,加载即拒绝。                                               #
+# #                                                                          #
+# # 但阶段 2 的验收要的是「运营能把一件真实商品导出成一个可用文件」,        #
+# # 不是「导出的文件能直接喂给 SHEIN」。用一份我们自己拥有、字段含义明确、  #
+# # 列头稳定的模板,这条闭环现在就能真的跑通;等官方文档到手,要做的是      #
+# # 在 app/channels/shein/ 下再写一份 spec,而不是回来改这里。               #
+# #                                                                          #
+# # 换句话说:这份模板是真的,只是它不冒充别人。                             #
+# ############################################################################
+
+channel: GENERIC
+# 1.1.0 —— 给 price / stock / lead_time_days 补了 type / minimum / decimal_places。
+#
+# 这里必须跟着涨。`spec_version` 进 `listing_drafts.source_fingerprint`,
+# 涨一次所有在旧规则下算过的草稿就重新判一次 —— 而这一版新增的正是校验规则本身。
+# 不涨的话,一份在旧规则下「校验通过、可以导出」的草稿会保持那个状态,
+# 而它的价格可能是三位小数。
+spec_version: "1.1.0"
+
+sites:
+  - MAIN
+
+# 运营在草稿页手填的字段。
+#
+# **价格、库存、备货时效一律在这里,不允许模型生成。**
+# 让大模型给一个会真的向消费者收款的数字,是这条链路里唯一不可挽回的错误。
+manual_fields:
+  - brand
+  - price
+  - currency
+  - stock
+  - lead_time_days
+
+consts:
+  channel_name: "通用模板"
+  category_path: "Swimwear"
+
+# ---------------------------------------------------------------- SPU 级字段
+header_fields:
+  - key: spu_code
+    required: true
+    source: product.spu
+    column_header: "SPU编码"
+
+  - key: product_title
+    required: true
+    source: copy.en.title
+    max_length: 120
+    transforms:
+      - name: truncate
+        max_length: 120
+    column_header: "商品标题"
+    note: "长度上限与 copy_rules.title_max 同源,改一处两边一起变"
+
+  - key: category_path
+    required: true
+    source: const.category_path
+    column_header: "类目"
+
+  - key: brand
+    required: true
+    source: manual.brand
+    max_length: 64
+    column_header: "品牌"
+
+  - key: description
+    required: true
+    source: copy.en.description
+    max_length: 2000
+    column_header: "商品描述"
+
+  - key: selling_points
+    required: false
+    source: copy.en.bullet_points
+    transforms:
+      - name: join
+        separator: " | "
+    column_header: "卖点"
+
+  - key: keywords
+    required: false
+    source: copy.en.keywords
+    transforms:
+      - name: join
+        separator: ","
+    column_header: "关键词"
+
+  - key: main_image
+    required: true
+    source: images.PRODUCT_FRONT
+    column_header: "主图"
+    note: "取的是**已批准图片集**里该角色的图,不是生成任务的产物"
+
+  - key: back_image
+    required: false
+    source: images.PRODUCT_BACK
+    column_header: "背面图"
+
+  - key: detail_image
+    required: false
+    source: images.DETAIL
+    column_header: "细节图"
+
+  - key: garment_type
+    required: true
+    source: attr.garment_type
+    column_header: "品类"
+    allowed_values:
+      - ONE_PIECE
+      - BIKINI_TOP
+      - BIKINI_BOTTOM
+      - BIKINI_SET
+      - TANKINI
+      - COVER_UP
+      - SWIM_SHORTS
+      - DRESS
+      - TOP
+      - OTHER
+
+  - key: neckline_type
+    required: false
+    source: attr.neckline_type
+    column_header: "领型"
+
+  - key: back_style
+    required: false
+    source: attr.back_style
+    column_header: "背部款式"
+
+  - key: strap_type
+    required: false
+    source: attr.strap_type
+    column_header: "肩带"
+
+  - key: pattern_type
+    required: false
+    source: attr.pattern_type
+    column_header: "图案"
+
+  - key: material
+    required: true
+    source: attr.material
+    max_length: 128
+    column_header: "材质"
+    note: "材质不参与图片识别(注册表 visual=False),只能来自商品库或人工"
+
+# ---------------------------------------------------------------- SKU 行字段
+row_fields:
+  - key: sku_code
+    required: true
+    source: variant.sku
+    column_header: "SKU编码"
+
+  - key: color
+    required: true
+    source: variant.primary_color
+    max_length: 64
+    column_header: "颜色"
+
+  - key: size
+    required: true
+    source: variant.size
+    max_length: 32
+    column_header: "尺码"
+
+  - key: price
+    required: true
+    source: manual.price
+    type: number
+    minimum: 0
+    decimal_places: 2
+    column_header: "价格"
+    note: >-
+      **不允许模型生成。**
+      三条数值约束是 required 之后的第二道闸:required 只回答「填了没有」,
+      而一个手滑成 "3.990" 或 "-39.90" 的价格是填了的。这一列会真的向
+      消费者收款,填错的代价不对称,所以宁可在导出前拦下来。
+
+  - key: currency
+    required: true
+    source: manual.currency
+    max_length: 8
+    column_header: "币种"
+
+  - key: stock
+    required: true
+    source: manual.stock
+    type: integer
+    minimum: 0
+    column_header: "库存"
+    note: "整数、非负。负库存平台侧的表现通常是整份驳回,且只说「格式错误」"
+
+  - key: lead_time_days
+    required: false
+    source: manual.lead_time_days
+    type: integer
+    minimum: 0
+    column_header: "备货天数"
+
+  - key: variant_image
+    required: false
+    source: images.PRODUCT_FRONT
+    column_header: "变体图"

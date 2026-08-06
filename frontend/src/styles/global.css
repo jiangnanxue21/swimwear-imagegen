@@ -1,0 +1,186 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--brand-canvas, #F6F7F8); -webkit-font-smoothing: antialiased; }
+
+/* 颜色全部走 var(--brand-*),值由 theme.ts 的 applyBrandCssVars() 在启动时注入。
+   fallback 是为了 JS 跑起来之前的那一帧,不是第二份事实来源——改色只改 theme.ts。
+
+   ---------------------------------------------------------------- 暗色模式
+
+   这个文件里**没有一条** `@media (prefers-color-scheme: dark)`,也没有一条
+   `[data-theme='dark']` 的颜色覆盖。这不是漏了,是这套做法的全部收益:
+
+   亮暗两份调色板都在 theme.ts,切换只改 `:root` 上那二十几个变量,浏览器负责把
+   所有引用重算一遍。要是这里再写一份暗色覆盖,就又回到了上一轮那个问题——
+   同一个颜色有两处事实来源,迟早漂移(上一轮四个灰、三个红就是这么来的)。
+
+   `<html>` 上会有 `data-theme` 属性,但它只用于调试和极少数真正**结构性**的差异
+   (目前一条都没有)。看到有人想在这里加 `[data-theme='dark'] { color: ... }`——
+   那个值应该加到 theme.ts 的 darkTokens 里。 */
+
+/* 区块标题:左侧竖条 + 全大写小字标签,用来给**区块**分组,
+   而不是靠卡片阴影堆叠。数据密度优先。
+
+   ## 走查 M-3:它不再兼任页面标题
+
+   改动前这一条同时扮演两个角色 —— `WorkbenchListPage` 顶上的「运营工作台」
+   (页面标题)和 `EvaluationDetail` 里的「问题清单」(区块标题)用的是同一个
+   样式、同一个视觉重量。后果是 20 个页面打开长得一模一样,缺少「我现在在哪一页」
+   的锚点,而运营一天要在这些页面之间跳几十次。
+   页面标题现在归 `components/PageHeader.tsx`,这里只管区块。
+
+   ## 为什么把 uppercase 拿掉
+
+   `text-transform: uppercase` 是给拉丁字母设计的,中文没有大小写 ——
+   全站几十个标签里它只对「Provider」这一个起作用。而 `letter-spacing: 0.08em`
+   套在 12px 中文上只是把字撑松,读起来更费劲(那个字距是为大写拉丁字母的
+   字形补偿设计的,汉字方块字本来就自带足够的字间留白)。
+   现在中文用 0.02em,纯拉丁标签可以显式加 `lang="en"` 恢复原样。 */
+.section-label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--brand-slate, #5B6B79);
+  border-left: 2px solid var(--brand-sand, #C8A87C);
+  padding-left: 8px;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+.section-label[lang='en'] {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ---------------------------------------------------------------- 图片位
+
+   走查 P0:这是一套图片生产系统,运营的核心动作是判断图好不好,而界面原本把所有
+   图片一律压成 150px 高。15 个硬错误码里相当一部分是手指、面料、水印这类细节,
+   150px 看不出来 —— 运营只能每张点开灯箱、关掉、再点下一张。
+
+   所以图块分两档,由 theme.ts 的 imageTile 提供数值:
+     .asset-grid              浏览档(220px),素材库、商品详情、模特模板
+     .asset-grid--review      判定档(300px),审核页的候选图与原图
+   两档共用同一套 tile 样式,只换两个变量。 */
+.asset-grid {
+  --tile-min: var(--grid-min-gallery, 190px);
+  --tile-h: var(--tile-gallery, 220px);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--tile-min), 1fr));
+  gap: 12px;
+}
+.asset-grid--review {
+  --tile-min: var(--grid-min-review, 260px);
+  --tile-h: var(--tile-review, 300px);
+}
+.asset-tile {
+  border: 1px solid var(--brand-line, #E7EAEC);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--brand-surface, #fff);
+}
+/* antd 的 <Image> 会在 img 外面包一层 span.ant-image,它默认是 inline-block、
+   宽度由内容撑。不把它拉满的话,图块在栅格里会左对齐、右边留一条白 */
+.asset-tile .ant-image { display: block; width: 100%; }
+.asset-tile img {
+  width: 100%;
+  height: var(--tile-h);
+  /* contain 而不是 cover:cover 会把画面裁掉,而裁掉的部分恰恰可能是要判的那处 */
+  object-fit: contain;
+  background: var(--brand-image-bg, #F0F2F3);
+  display: block;
+}
+.asset-tile figcaption { padding: 6px 8px; font-size: 12px; color: var(--brand-slate, #5B6B79); }
+
+.mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+
+/* 设置页:标签 / 控件 / 来源 三栏。窄屏折成一列,不做横向滚动。 */
+.settings-row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 150px;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 0;
+  border-top: 1px solid var(--brand-line-soft, #F0F2F3);
+}
+.settings-row:first-of-type { border-top: none; }
+.settings-label { font-size: 13px; padding-top: 5px; }
+.settings-key { color: var(--brand-text-muted, #9AA5AD); font-size: 12px; }
+.settings-help { color: var(--brand-slate, #5B6B79); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+.settings-meta { padding-top: 5px; text-align: right; }
+.settings-dirty { color: var(--brand-sand, #C8A87C); font-weight: 700; }
+
+@media (max-width: 860px) {
+  .settings-row { grid-template-columns: 1fr; gap: 6px; }
+  .settings-meta { text-align: left; padding-top: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+:focus-visible { outline: 2px solid var(--brand-marine, #1B4B5A); outline-offset: 2px; }
+
+/* 工作台:冲突属性行。红只用在行首细条与浅底,不整行染红——
+   一个表格里可能有好几行冲突,整行红会把旁边的正常值也读成错误。 */
+.attr-conflict-row > td { background: var(--brand-danger-bg, #FDF3F2); }
+.attr-conflict-row > td:first-child { box-shadow: inset 3px 0 0 var(--brand-danger, #CF3B34); }
+
+/* 工作台:图片集编排行。拖动中的那一行降透明度,落点显示上边界线。
+   缩略图从 56px 提到 96px(theme.ts 的 imageTile.compact):56px 下拖拽排序时
+   看不清自己在排什么,而排序的依据正是画面内容(哪张当主图、正面在前还是细节在前)。 */
+.imageset-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--brand-line, #E7EAEC);
+  border-radius: 4px;
+  background: var(--brand-surface, #fff);
+}
+.imageset-row[data-dragging='true'] { opacity: 0.45; }
+.imageset-row[data-dropbefore='true'] { border-top: 2px solid var(--brand-marine, #1B4B5A); }
+.imageset-row .ant-image { flex: none; }
+.imageset-row img {
+  width: var(--tile-compact, 96px);
+  height: var(--tile-compact, 96px);
+  object-fit: contain;
+  background: var(--brand-image-bg, #F0F2F3);
+  border-radius: 3px;
+}
+
+/* 导入预览里出错的那些行(FE-305)。
+   错误行必须在整表里一眼可辨 —— 只在「问题」列里写红字的话,
+   20 行一页翻起来仍然要逐行看。 */
+.row-error > td {
+  background: var(--brand-danger-bg, #FDF3F2);
+}
+
+/* ---------------------------------------------------------------- 原图 / 候选图对照
+
+   虚拟试穿最核心的判断是「这还是同一件衣服吗」。原本原图与候选图是两张分开的卡片,
+   等于要求运营用记忆比对。这里给两种等尺寸对照:并排、以及叠加滑块。 */
+.compare-pane {
+  position: relative;
+  width: 100%;
+  height: var(--tile-review, 300px);
+  background: var(--brand-image-bg, #F0F2F3);
+  border: 1px solid var(--brand-line, #E7EAEC);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.compare-pane img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+/* 叠加模式:上层图按百分比裁切,露出下层。分界线要看得见,否则不知道刀在哪 */
+.compare-overlay-top { border-right: 1px solid var(--brand-accent, #3F6C8F); }
+.compare-caption {
+  font-size: 12px;
+  color: var(--brand-slate, #5B6B79);
+  margin-top: 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}

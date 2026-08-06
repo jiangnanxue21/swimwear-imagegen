@@ -1,0 +1,129 @@
+# SHEIN 渠道字段规格 —— 骨架(M0)
+#
+# ############################################################################
+# # 这份文件里**没有一个字段名是真的**。                                      #
+# #                                                                          #
+# # 硬规矩 1:第三方字段不凭记忆写代码。SHEIN 的官方模板与 OpenAPI 文档       #
+# # 尚未拿到,因此所有 key 一律以 TODO_ 开头,`FieldSpec.is_todo` 会认出它们, #
+# # 生产环境加载时直接抛 CHANNEL_SPEC_INCOMPLETE 拒绝启动。                   #
+# #                                                                          #
+# # 拿到官方文档后的动作:                                                     #
+# #   1. 原样存档到 docs/vendor/shein-openapi/                                #
+# #   2. 逐项核对 §18 的 18 条待确认项                                         #
+# #   3. 用真实列头替换 TODO_,同时补 column_header                            #
+# ############################################################################
+#
+# 这份骨架**现在就有用**,即使字段名全是假的:
+#   - 它把「哪个字段该由谁提供」定了下来(§9.4 字段来源矩阵)
+#   - 于是能倒推出 M3 要识别哪些字段、M6 要生成哪些文案
+#   - source 表达式的语法可以立刻被 test_source_expr.py 校验
+#
+# 先定契约,再填实现。
+
+channel: SHEIN
+spec_version: "0.0.0-skeleton"
+
+# 站点。第一版只做一个站点 —— 一开始就要多站点会同时放大
+# spec、文案、凭证与图片集四处的复杂度(§17 超支条件)。
+sites:
+  - TODO_SITE
+
+# 运营在渠道配置页手填的字段。
+#
+# **价格、库存、备货时效一律在这里,不允许模型生成。**
+# 让大模型给一个会真的向消费者收款的数字,是这条链路里唯一不可挽回的错误。
+manual_fields:
+  - TODO_price
+  - TODO_stock
+  - TODO_lead_time_days
+  - TODO_brand
+  - TODO_ship_from
+
+# spec 内常量。不放设置页:它们属于「这个渠道这个类目怎么填」,
+# 不属于「这个部署怎么配」。
+consts:
+  TODO_const_origin: "TODO"
+
+# ---------------------------------------------------------------- SPU 级字段
+header_fields:
+  - key: TODO_spu_code
+    required: true
+    source: product.spu
+    column_header: "TODO 官方列头"
+    note: "商品编码。来源已定,列头待官方模板确认"
+
+  - key: TODO_category_id
+    required: true
+    source: manual.TODO_category_id
+    note: "类目 id。SHEIN 的类目树需要调接口取,在此之前只能手填"
+
+  - key: TODO_title
+    required: true
+    source: copy.TODO_LOCALE.title
+    transform:
+      - name: truncate
+        max_length: 120        # TODO 官方长度上限
+    note: "标题。长度上限必须从官方文档确认,不能猜"
+
+  - key: TODO_description
+    required: false
+    source: copy.TODO_LOCALE.description
+
+  - key: TODO_main_image
+    required: true
+    source: images.PRODUCT_FRONT
+    note: "主图。取的是已批准图片集里该角色的图,不是生成任务的产物"
+
+  - key: TODO_garment_type
+    required: true
+    source: attr.garment_type
+    transform:
+      - name: map
+        dict: TODO_garment_type_map    # 引用 dict/<name>.yaml,不允许内联字典
+
+  - key: TODO_neckline
+    required: false
+    source: attr.neckline_type
+    transform:
+      - name: map
+        dict: TODO_neckline_map
+
+  - key: TODO_material
+    required: true
+    source: attr.material
+    note: "材质不参与图片识别(注册表 visual=False),只能来自商品库或人工"
+
+  - key: TODO_brand
+    required: true
+    source: manual.TODO_brand
+
+# ---------------------------------------------------------------- SKU 行字段
+row_fields:
+  - key: TODO_sku_code
+    required: true
+    source: variant.sku
+
+  - key: TODO_color
+    required: true
+    source: variant.primary_color
+    transform:
+      - name: map
+        dict: TODO_color_map
+
+  - key: TODO_size
+    required: true
+    source: variant.size
+
+  - key: TODO_price
+    required: true
+    source: manual.TODO_price
+    note: "**不允许模型生成。** 见 §9.4"
+
+  - key: TODO_stock
+    required: true
+    source: manual.TODO_stock
+
+  - key: TODO_variant_image
+    required: false
+    source: images.PRODUCT_FRONT
+    note: "变体图。每个有图的颜色必须能解析出至少一张,否则 MISSING_IMAGE_FOR_VARIANT"

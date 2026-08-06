@@ -1,0 +1,260 @@
+# 中性款规则包(PRD v2 §14.3)—— category_code: unisex_swimwear
+#
+# ############################################################################
+# # **这份包的存在本身是一次复核的产物。** UNISEX 一直是合法受众(枚举里有、#
+# # 导入模板里有、前端下拉里有、模特匹配规则里也有),但它派生出的规则包    #
+# # 文件此前不存在 —— 一件中性款商品会在 `_current_draft_data` 直接抛      #
+# # ChannelSpecError,把整个工作台列表打挂。测试没抓到是因为它们只断言了    #
+# # 派生出的**字符串**,从没真正加载过这个 category_id。                    #
+# #                                                                          #
+# # 字段集按注册表的 applies_to={MEN, UNISEX} 取(§18.4:中性款共用男装那组  #
+# # 结构字段),**但必填项只有三条通用字段** —— 注册表里 waistband/inseam/  #
+# # fit 的 required_for 是 {MEN},中性款不强制。这份 yaml 的 required 必须  #
+# # 与注册表一致,否则会出现"导出要求填、属性页不要求填"的死锁。            #
+# ############################################################################
+
+audience: UNISEX
+
+# §14.3:中性款的检查项是两组的**交集**,再加防晒衣特有的开合结构。
+# 女装三条结构码(肩带/领型/背部)在这里不启用 —— 水母衣的领口不是
+# 比基尼的领型,复用会让模型在防晒衣上编一个"深 V 领"。
+enabled_hard_fail_codes:
+  - GARMENT_WRONG
+  - GARMENT_PART_MISSING
+  - GARMENT_PART_ADDED
+  - WAISTBAND_CHANGED
+  - INSEAM_CHANGED
+  - LINER_CHANGED
+  - COLOR_VARIANT_WRONG
+  - PATTERN_DISTORTED
+  - LOGO_OR_TEXT_CHANGED
+  - SKU_IMAGE_MISMATCH
+  - ANATOMY_HARD_ERROR
+  - FACE_HARD_ERROR
+  - IMAGE_CORRUPTED
+  - PRODUCT_SEVERELY_OCCLUDED
+  # 中性款下这条**很少触发**:两种受众的模特都合法(§10.5),
+  # 它只在图片与任何一种受众都对不上时才成立。保留是为了三份包的
+  # 启用清单在结构上一致 —— 少一条会让"这条码在哪些包里启用"变成
+  # 一个要逐份查的问题。
+  - AUDIENCE_MISMATCH
+  # PRD v3.1 §6.5 事实一致性清单末两项。三份包一起启用:它们描述的是
+  # **渲染塌了**,与受众无关 —— 男装泳裤一样会被生成成两侧不等宽。
+  - ASYMMETRY_INTRODUCED
+  - FUSION_DEFECT
+
+review_checks:
+  - waistband_type
+  - inseam_length
+  - fit_silhouette
+  - closure
+  - liner
+  - hem
+  - print_consistency
+
+channel: GENERIC
+# 与 women_swimwear.yaml 同步起版。这两份的版本各自独立演进:
+# spec_version 进 listing_drafts.source_fingerprint,涨一边只重判那一边的草稿。
+spec_version: "1.1.0"
+
+sites:
+  - MAIN
+
+# 价格、库存、备货时效一律手填,不允许模型生成(与女装包同一条铁律)。
+manual_fields:
+  - brand
+  - price
+  - currency
+  - stock
+  - lead_time_days
+
+consts:
+  channel_name: "通用模板"
+  category_path: "Swimwear/Unisex"
+
+# ---------------------------------------------------------------- SPU 级字段
+header_fields:
+  - key: spu_code
+    required: true
+    source: product.spu
+    column_header: "SPU编码"
+
+  - key: product_title
+    required: true
+    source: copy.en.title
+    max_length: 120
+    transforms:
+      - name: truncate
+        max_length: 120
+    column_header: "商品标题"
+    note: "长度上限与 copy_rules.title_max 同源,改一处两边一起变"
+
+  - key: category_path
+    required: true
+    source: const.category_path
+    column_header: "类目"
+
+  - key: brand
+    required: true
+    source: manual.brand
+    max_length: 64
+    column_header: "品牌"
+
+  - key: description
+    required: true
+    source: copy.en.description
+    max_length: 2000
+    column_header: "商品描述"
+
+  - key: selling_points
+    required: false
+    source: copy.en.bullet_points
+    transforms:
+      - name: join
+        separator: " | "
+    column_header: "卖点"
+
+  - key: keywords
+    required: false
+    source: copy.en.keywords
+    transforms:
+      - name: join
+        separator: ","
+    column_header: "关键词"
+
+  - key: main_image
+    required: true
+    source: images.PRODUCT_FRONT
+    column_header: "主图"
+    note: "取的是**已批准图片集**里该角色的图,不是生成任务的产物"
+
+  - key: back_image
+    required: false
+    source: images.PRODUCT_BACK
+    column_header: "背面图"
+    note: >-
+      男装背面重要性低于女装(§15:女装背部款式是核心卖点,男装背面
+      通常与正面同构),所以这里 required: false 与女装一致但语义不同 ——
+      腰头细节图才是男装的必需辅图,见 detail_image 的 note
+
+  - key: detail_image
+    required: false
+    source: images.DETAIL
+    column_header: "细节图"
+    note: >-
+      §15 男装槽位表:腰头细节在男装是必需槽位、在女装不存在。
+      槽位必需性的执行点在图片集规则层(按受众的槽位表),这里的列
+      只负责"有就导出";required 提为 true 要与槽位规则同批改,
+      单边先改会让"槽位缺失"和"导出校验失败"说两遍同一件事
+
+  - key: garment_type
+    required: true
+    source: attr.garment_type
+    column_header: "品类"
+    allowed_values:
+      - RASH_GUARD
+      - COVER_UP
+      - SWIM_SHORTS
+      - OTHER
+
+  - key: waistband_type
+    required: false
+    source: attr.waistband_type
+    column_header: "腰头形制"
+    note: "中性款不强制(注册表 required_for={MEN});取值约束在注册表 WaistbandType"
+
+  - key: inseam_length
+    required: false
+    source: attr.inseam_length
+    column_header: "裤长"
+
+  - key: fit_type
+    required: false
+    source: attr.fit_type
+    column_header: "版型"
+
+  - key: pocket_config
+    required: false
+    source: attr.pocket_config
+    column_header: "口袋"
+
+  - key: closure_type
+    required: false
+    source: attr.closure_type
+    column_header: "开合结构"
+
+  - key: liner_type
+    required: false
+    source: attr.liner_type
+    column_header: "内衬"
+    note: "看图看不出内衬(注册表 visual=False),只能来自商品库或人工"
+
+  - key: pattern_type
+    required: false
+    source: attr.pattern_type
+    column_header: "图案"
+
+  - key: material
+    required: true
+    source: attr.material
+    max_length: 128
+    column_header: "材质"
+    note: "材质不参与图片识别(注册表 visual=False),只能来自商品库或人工"
+
+# ---------------------------------------------------------------- SKU 行字段
+row_fields:
+  - key: sku_code
+    required: true
+    source: variant.sku
+    column_header: "SKU编码"
+
+  - key: color
+    required: true
+    source: variant.primary_color
+    max_length: 64
+    column_header: "颜色"
+
+  - key: size
+    required: true
+    source: variant.size
+    max_length: 32
+    column_header: "尺码"
+
+  - key: price
+    required: true
+    source: manual.price
+    type: number
+    minimum: 0
+    decimal_places: 2
+    column_header: "价格"
+    note: >-
+      **不允许模型生成。**
+      三条数值约束是 required 之后的第二道闸:required 只回答「填了没有」,
+      而一个手滑成 "3.990" 或 "-39.90" 的价格是填了的。这一列会真的向
+      消费者收款,填错的代价不对称,所以宁可在导出前拦下来。
+
+  - key: currency
+    required: true
+    source: manual.currency
+    max_length: 8
+    column_header: "币种"
+
+  - key: stock
+    required: true
+    source: manual.stock
+    type: integer
+    minimum: 0
+    column_header: "库存"
+    note: "整数、非负。负库存平台侧的表现通常是整份驳回,且只说「格式错误」"
+
+  - key: lead_time_days
+    required: false
+    source: manual.lead_time_days
+    type: integer
+    minimum: 0
+    column_header: "备货天数"
+
+  - key: variant_image
+    required: false
+    source: images.PRODUCT_FRONT
+    column_header: "变体图"

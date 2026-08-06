@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+storage/
+
+# 评审 P0-1:主密钥目录从来没被排除过。构建上下文里带着它,
+# 等于每一层镜像都留一份副本 —— 删掉源文件也删不掉镜像层里的那份。
+.secrets/
+.env
+.env.*
+!.env.example
+*.key
+*.pem

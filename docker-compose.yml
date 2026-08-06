@@ -1,0 +1,150 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-imagegen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-imagegen}
+      POSTGRES_DB: ${POSTGRES_DB:-imagegen}
+    # 只绑本机:Redis 是 Celery broker、Postgres 存全部业务数据,
+    # 发布到 0.0.0.0 等于把 API 层的口令整个绕开。容器间走 compose 网络,
+    # 本来就不需要发布端口;去掉这两行也可以。
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-imagegen}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_DIR: /data/storage
+      SETTINGS_KEY_DIR: /data/secrets
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    # 只绑本机 —— 和上面 postgres / redis 同一个理由,而 backend 比它们更该绑:
+    # 它正是那个「APP_ENV=local 且没配口令时放行一切」的组件
+    # (`api/deps.py` 的 ROLE_DEV 分支)。发布到 0.0.0.0 等于把整套 API
+    # 对局域网敞开,而 README 恰好教人从别的机器打开 5173 —— 也就是说
+    # 这台机器本来就预期在局域网可达。跨机访问走 5173 的 Vite 代理,
+    # 那条路一直是通的(VITE_PROXY_TARGET)。
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./sample-data:/sample-data:ro
+      - storage:/data/storage
+      - secrets:/data/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # 前缀跟着 API_PREFIX 走,不写死 /api。写死之后改这个配置的人会发现
+      # 健康检查永远失败,而 worker / beat 都 `condition: service_healthy` ——
+      # 整套后台任务起不来,现象却是"容器一直 unhealthy",不指向前缀
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000${API_PREFIX:-/api}/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_DIR: /data/storage
+      SETTINGS_KEY_DIR: /data/secrets
+    command: celery -A app.tasks.celery_app.celery_app worker -l info -Q default
+    volumes:
+      - ./backend:/app
+      - storage:/data/storage
+      - secrets:/data/secrets
+    depends_on:
+      backend:
+        # service_healthy 而不是 service_started:迁移在 backend 启动命令里跑,
+        # health 探针要等 uvicorn 起来才通过 —— 提前起来会拿旧 schema 消费任务
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 周期性兜底:Outbox relay(每 30 秒)与卡死任务回收(每 5 分钟)。
+  # 没有它,派发意图只会在快路径失败时躺在库里没人投 —— Outbox 就只剩记录作用。
+  # 只能起**一个**实例:多个 beat 会重复排产同一个节拍。
+  beat:
+    build: ./backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_DIR: /data/storage
+      SETTINGS_KEY_DIR: /data/secrets
+    command: celery -A app.tasks.celery_app.celery_app beat -l info
+    volumes:
+      - ./backend:/app
+      - storage:/data/storage
+      - secrets:/data/secrets
+    depends_on:
+      backend:
+        # service_healthy 而不是 service_started:迁移在 backend 启动命令里跑,
+        # health 探针要等 uvicorn 起来才通过 —— 提前起来会拿旧 schema 消费任务
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 开发模式的前端(Vite 开发服务器)。生产用 docker-compose.prod.yml,见评审 P0-3。
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    # R1-36:开发用 `npm ci` 而不是 `npm install`。
+    # 两者装出来的树可以不一样(`install` 会按 semver 悄悄升次版本并改写 lockfile),
+    # 于是「本地好的、CI 红的」这类问题没有任何线索。生产镜像一直是 `npm ci`,
+    # 开发这一侧对齐之后,lockfile 才真的是一份契约。
+    # 要故意升依赖时显式跑 `npm install <pkg>` 并提交 lockfile。
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    environment:
+      # 评审 P0-2:这里原本是 `VITE_API_BASE_URL: http://localhost:8000/api`。
+      #
+      # 那是一个**绝对地址,由浏览器解析**——于是同事从局域网打开
+      # http://<这台机器>:5173,页面能加载(5173 是对外发布的),但每个请求都打向
+      # **他自己电脑**的 8000,全站每一页都是「连不上服务」。就算他改掉这个变量
+      # 指向这台机器,后端 CORS_ORIGINS 默认只有 http://localhost:5173,再拦一次。
+      #
+      # 而正确的那条路一直是通的:`vite.config.ts` 里 /api 与 /files 两条代理都在,
+      # `client.ts` 的默认值正是 `?? '/api'`。留空这个变量就会走它 —— 同源,
+      # 没有 CORS,任何机器都能打开。所以这里改成只配代理目标。
+      #
+      # 注意不能用 localhost:容器里的 localhost 是前端容器自己,必须写服务名。
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  storage:
+  # 主密钥单独一个卷。绝不能并进 storage —— 那个卷会被挂成 /files 对外托管
+  secrets:

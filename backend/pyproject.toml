@@ -1,0 +1,101 @@
+[project]
+name = "swimwear-imagegen-backend"
+version = "0.2.0"
+description = "网站商品展示图自动生成系统 - 后端"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "redis>=5.2",
+    "celery>=5.4",
+    "httpx>=0.27",
+    "pillow>=11.0",
+    "python-multipart>=0.0.12",
+    "pyyaml>=6.0",
+    # 上架文件的 Excel 导出(listings/export_writer.py::to_xlsx)。它在函数内
+    # 延迟导入,缺了不影响启动,但运营点「导出 Excel」会当场报 ConfigError,
+    # 容器内 pytest 也会在 to_xlsx 用例上红 —— 开发机往往顺带装了它,看不出来
+    "openpyxl>=3.1",
+    # 后台设置页写入的密钥要加密落库(app/core/secrets.py 用 cryptography.fernet)。
+    # 缺了它 secrets.available() 返回 False,后台一个 API Key 都存不下来 ——
+    # 而这在开发机上是看不出来的:pytest / 别的包很容易把它顺带装进来
+    "cryptography>=43.0",
+]
+
+[project.optional-dependencies]
+# 只有 STORAGE_BACKEND=s3 时才需要;本地开发不装
+s3 = [
+    "boto3>=1.35",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    # 版本**钉死一个区间**,不写 `>=0.7`。
+    #
+    # 这个仓库刚被这件事咬过一次:`make lint` 一直"在"门禁清单里,但接上 CI
+    # 第一次真跑时报了 337 条。原因不是代码退化了,是 `>=0.7` 让每台机器、
+    # 每次 CI 都可能装到不同版本的 ruff,而 lint 工具的规则集是随版本长的。
+    # 一个"今天绿明天红、而中间没有人改过任何代码"的门禁,最后一定会被关掉。
+    "ruff>=0.16,<0.17",
+    # 取代 tests/pure/test_import_graph.py(方案 8.2 节:"改用 Ruff / import-linter /
+    # 架构 CI")。契约写在 .importlinter,由 `make arch-check` 与 CI 执行
+    "import-linter>=2.0,<3",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = [
+    "requires_db: 需要真实 PostgreSQL 的测试",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# 这个文件里的超宽行是**测试夹具的 CSV 原文**,躺在三引号字符串里。
+# 它的宽度由数据决定,不由代码风格决定:折行会改变夹具内容,而 `# noqa`
+# 写在字符串内部只是又一段数据,压不住这条规则。所以例外必须开在这里。
+#
+# 只对 E501 一条开口,且只对这一个文件 —— 整目录豁免的下场是真正的
+# 代码超宽也跟着没人管了。
+"tests/pure/test_product_import.py" = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 的依赖注入就是靠"在默认值里调用"表达的:
+#
+#     def endpoint(session: Session = Depends(db_session), q: str = Query("")):
+#
+# B008(不要在参数默认值里调用函数)针对的是可变默认值那个经典坑,
+# 而这几个调用返回的是**不可变的标记对象**,框架在请求期才真正求值。
+# 全仓 115 处 B008 一条不落全是这个形状 —— 那不是 115 个缺陷,
+# 是这条规则没有被告知本项目用的是哪个框架。
+#
+# 不用 `# noqa` 逐行压:115 个 noqa 会把真正该被这条规则拦下的写法一起淹掉。
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]

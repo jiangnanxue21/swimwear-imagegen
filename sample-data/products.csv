@@ -1,0 +1,11 @@
+spu,sku,name,audience,category,primary_color,secondary_colors,garment_type,pattern_type,strap_type,neckline_type,back_style,material,complexity,notes
+SPU-SW-001,SW-001-BLK-S,经典三角比基尼套装,WOMEN,swimwear,black,gold,BIKINI_SET,SOLID,HALTER,V_NECK,TIE_BACK,80%锦纶 20%氨纶,SIMPLE,基础款,用于评分基线校准
+SPU-SW-002,SW-002-BLU-M,条纹高腰连体泳衣,WOMEN,swimwear,blue,white,ONE_PIECE,STRIPE,WIDE,SCOOP,RACER_BACK,82%聚酯纤维 18%氨纶,MEDIUM,条纹易在生成中扭曲,重点观察 pattern_fidelity
+SPU-SW-003,SW-003-COR-S,印花抹胸比基尼,WOMEN,swimwear,coral,white,BIKINI_SET,FLORAL,STRAPLESS,BANDEAU,TIE_BACK,锦纶氨纶混纺,COMPLEX,无肩带,重点观察 STRAP_CHANGED
+SPU-SW-004,SW-004-NVY-L,深V系带连体泳衣,WOMEN,swimwear,navy,gold,ONE_PIECE,SOLID,SPAGHETTI,PLUNGE,LACE_UP,再生涤纶,MEDIUM,深V领口易被模型改写
+SPU-SW-005,SW-005-GRN-M,几何图案坦基尼,WOMEN,swimwear,green,beige,TANKINI,GEOMETRIC,ONE_SHOULDER,SQUARE,CROSS_BACK,锦纶,COMPLEX,单肩设计,重点观察不对称结构
+SPU-SW-006,SW-006-RED-S,撞色高开叉连体泳衣,WOMEN,swimwear,red,white,ONE_PIECE,COLOR_BLOCK,HALTER,HIGH_NECK,OPEN_BACK,涤纶氨纶,MEDIUM,撞色分割线位置需保持
+SPU-SW-007,SW-007-PNK-M,豹纹三点式比基尼,WOMEN,swimwear,pink,black,BIKINI_SET,ANIMAL,SPAGHETTI,SWEETHEART,TIE_BACK,锦纶氨纶,COMPLEX,动物纹重复图案,生成难度高
+SPU-SW-008,SW-008-WHT-L,纯色泳裙,WOMEN,swimwear,white,,DRESS,SOLID,WIDE,SCOOP,FULL_BACK,棉混纺,SIMPLE,浅色易过曝,观察 lighting_realism
+SPU-SW-009,SW-009-TEA-M,交叉背带运动泳衣,WOMEN,swimwear,teal,white,ONE_PIECE,SOLID,CRISS_CROSS,HIGH_NECK,CROSS_BACK,再生锦纶,COMPLEX,交叉背带,重点观察 BACK_STYLE_CHANGED
+SPU-SW-010,SW-010-PUR-S,轻薄防晒罩衫,WOMEN,swimwear,purple,beige,COVER_UP,SOLID,WIDE,V_NECK,FULL_BACK,雪纺,SIMPLE,半透明材质,观察 coverage 是否被改变

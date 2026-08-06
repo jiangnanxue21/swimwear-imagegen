@@ -1,0 +1,81 @@
+# 生产/类生产编排(评审 P0-3、并配合后端评审 P2-2)。
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# 相对 docker-compose.yml 的四处差别,每一处都对应一条评审意见:
+#
+#   1. 前端从 Vite 开发服务器换成**构建产物 + Nginx**(P0-3)
+#   2. backend 不再对外发布端口 —— 唯一入口是 Nginx,由它反代 /api 与 /files
+#      (后端 P2-2:「发布到 0.0.0.0 等于把 API 层的口令整个绕开」,
+#       而默认配置下 API 层根本没有口令)
+#   3. backend 去掉 `--reload` 与源码 bind mount
+#   4. 不再需要 CORS —— 前后端同源了
+#
+# **这份文件在交付时没有被验证过**(打包环境无网络、装不上 node_modules)。
+# 第一次用它之前先跑一次 `make fe-build`,那一步会把类型错误和构建错误暴露出来。
+
+services:
+  # R1-37:**生产不许回落到弱默认口令。**
+  #
+  # `docker-compose.yml` 里写的是 `${POSTGRES_PASSWORD:-imagegen}` —— 开发用
+  # 那个默认值是对的(一条命令就能起来),但这份 overlay 原来一个字都没覆盖它,
+  # 于是"生产编排"和"开发编排"用的是同一把口令 `imagegen`,而且**不设也能起来**。
+  #
+  # 去掉 `:-` 之后没配就起不来:compose 会报变量未设置。启动失败是个好错误 ——
+  # 它发生在部署那一刻、由部署的人看到,而不是三个月后由别人发现。
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?生产必须显式设置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?生产必须显式设置 POSTGRES_PASSWORD,不要用开发默认值}
+      POSTGRES_DB: ${POSTGRES_DB:?生产必须显式设置 POSTGRES_DB}
+
+  backend:
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: !reset []
+    # A45-#6:**`!reset` 不能省。**
+    #
+    # Compose 的 `volumes` 按**容器路径合并**,不是整段替换。这里原来只重列了
+    # storage 与 secrets,于是基座里的 `./backend:/app` 原样保留 —— 文件头
+    # 第 3 条"去掉 --reload 与源码 bind mount"因此不成立。
+    #
+    # 在没有源码 checkout 的部署机上,那个空目录会盖住镜像里的代码,三个服务
+    # 全部起不来,而现象(ModuleNotFoundError / 找不到 app)完全不指向
+    # volumes 合并。同文件的 `ports` 与 `image` 都记得写 `!reset`,
+    # 所以这是一处遗漏而不是取舍。
+    #
+    # 用 `!override` 而不是 `!reset`:`!reset` 是清空,清完就没法在同一个键上
+    # 再列;`!override` 是"这一段整体替换基座那一段",正是这里要的语义。
+    volumes: !override
+      - ./sample-data:/sample-data:ro
+      - storage:/data/storage
+      - secrets:/data/secrets
+
+  worker:
+    # 同 backend:不 override 的话基座的 ./backend:/app 会原样合并进来(A45-#6)
+    volumes: !override
+      - storage:/data/storage
+      - secrets:/data/secrets
+
+  beat:
+    # 同上
+    volumes: !override
+      - storage:/data/storage
+      - secrets:/data/secrets
+
+  frontend:
+    image: !reset null
+    build:
+      context: ./frontend
+    working_dir: !reset null
+    command: !reset null
+    environment: !reset null
+    volumes: !reset []
+    # 只绑本机。要对外服务时在前面再套一层带 TLS 的反代,
+    # 不要把这一层直接发布到 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy

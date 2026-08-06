@@ -1,0 +1,87 @@
+# 依赖方向契约。
+#
+# ## 它取代了什么
+#
+# `backend/tests/pure/test_import_graph.py` 的 2 条 AST 测试。方案 v4.1 第 8.2 节
+# 的处理是「改用：Ruff / import-linter / 架构 CI」。
+#
+# 那两条测试自己写了一个 AST 遍历去看 `ImportFrom` 节点。它能工作，但只覆盖它
+# 恰好想到的那两条规则，而且**只看直接依赖**——`app.core.x` → `app.foo` → `app.models`
+# 这种绕一层的反向依赖，它一个字都不会说。而绕一层恰恰是这类问题真实发生的方式：
+# 没有人会直接写一条明显反向的 import，都是顺手引了个"工具模块"，
+# 那个模块背地里连着数据库。
+#
+# import-linter 建的是完整依赖图，看的是**可达性**而不是单跳。
+#
+# ## 用法
+#
+#     lint-imports          # 或 make arch-check
+#
+# 需要能真正 import 到 app 包（要装后端依赖），所以它在 CI 里跟 pytest 同一个 job，
+# 不进 `make check` 的离线部分。
+
+[importlinter]
+root_packages =
+    app
+include_external_packages = True
+
+
+# ---------------------------------------------------------------- 契约一
+
+[importlinter:contract:core-is-the-bottom]
+name = core 是最底层，不许反向依赖上层
+type = forbidden
+source_modules =
+    app.core
+forbidden_modules =
+    app.services
+    app.models
+    app.api
+    app.db
+    app.tasks
+    app.workbench
+# 说明：core 里放的是配置、枚举、错误码、哈希、路径这类"谁都要用"的东西。
+# 它一旦反向依赖上层，import 顺序就会变成一个需要靠运气维持的东西——
+# 表现是「换个入口启动就循环导入」，而且每次修都只是把环搬到另一个位置。
+
+
+# ---------------------------------------------------------------- 契约二
+
+[importlinter:contract:grading-stays-pure]
+name = 评分与修复必须是纯函数，不碰持久化
+type = forbidden
+source_modules =
+    app.evaluators.scoring
+    app.evaluators.rules
+    app.evaluators.repair
+    app.evaluators.decision
+forbidden_modules =
+    app.models
+    app.db
+    app.services
+    sqlalchemy
+# 说明：「这张图为什么判 C」必须能在一个没有数据库的单测里复现。
+# 这条一旦破了，回答那个问题就要先造一套库内数据——于是没有人会去回答它，
+# 评分规则会变成一个只能整体观察、不能单独质询的黑盒。
+#
+# `include_external_packages = True` 是为了让 `sqlalchemy` 这一行生效：
+# 它是外部包，不打开这个开关的话 import-linter 只看 app.* 内部。
+
+
+# ---------------------------------------------------------------- 契约三
+
+[importlinter:contract:channels-take-only-the-contract]
+name = 渠道适配器只接受 CanonicalProduct，不直接查库
+type = forbidden
+source_modules =
+    app.channels
+forbidden_modules =
+    app.models
+    app.db
+    app.services
+# 说明：这一条在 A20 时还没有被任何测试守着，但它是方案第 2.1 节那条主链路
+# 能不能被穷举测试的前提——渠道映射如果能自己去查库，字段映射的输入就不再是
+# 一个可以摆在测试里的数据结构，而是"当时库里长什么样"。
+#
+# Phase 2 要新建三张发布域表并实现 Adapter，那正是这条最容易被顺手破掉的时候。
+# 先把它立在这里，比破了之后再回来立便宜得多。

@@ -1,0 +1,1394 @@
+"""运营流程判定(阶段 1,任务书 §2)。**零依赖纯函数。**
+
+这一层回答运营在列表页问的四个问题:
+
+    这件商品做到哪一步了      -> 五个子状态
+    卡在什么地方              -> 阻断 / 待确认 / 提醒,三级问题
+    完成度多少                -> 一个百分数
+    我下一步该干什么          -> **有且只有一个**推荐动作
+
+## 为什么必须是纯函数
+
+任务书 §2.4 的退出条件里有一条「商品列表与详情页状态一致,无明显延迟或
+相互矛盾」。做到这件事只有一个可靠办法:两个页面读同一个判定结果,
+而这个判定只有一份实现。
+
+它在这里而不是在 service 里,是因为「缺背面图时下一步是不是补素材」
+这类判断需要被穷举测试,而只要它能查库,就没人会写那个穷举测试。
+service 负责把库里的行翻译成下面这些 dataclass,判定全在本文件。
+
+## 三级问题不是三种颜色
+
+    BLOCKING       不解决就走不下去,也不允许导出
+    NEEDS_CONFIRM  要人做一个决定(冲突、低置信度),系统不替他决定
+    REMINDER       可以带着它继续走,但导出前最好看一眼
+
+分级的意义在于「阻断数」这个数字要能被信任。把提醒也算成阻断,
+运营会发现每件商品都是红的,然后不再看这个数 —— 那时候真正的
+阻断也一起被忽略了。
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+# 本文件的「零依赖」说的是**不碰基础设施**(不 import sqlalchemy / fastapi /
+# 模型层),不是不 import 任何东西。`media/sample_completeness` 和这里一样是
+# 纯判定层,拿进来不会把库拖进纯测试。
+#
+# 为什么是 import 而不是在这里再写一份满足组:「什么算一张够格的正面图」
+# 只能有一个答案。写两份的表现是判定说「或平铺图」、门禁说「必须正面图」,
+# 两处都不报错,而运营会去改素材的角色标注来迁就其中较严的那一份。
+from app.media import sample_completeness as gate
+
+
+class FlowStep(StrEnum):
+    """五个子状态(任务书 FE-102)。
+
+    顺序有意义:`STEP_ORDER` 依赖它推出「唯一下一步」。
+    """
+
+    MATERIAL = "MATERIAL"      # 素材
+    ATTRIBUTE = "ATTRIBUTE"    # 属性
+    IMAGE_SET = "IMAGE_SET"    # 图片集
+    COPY = "COPY"              # 文案
+    DRAFT = "DRAFT"            # 上架草稿
+
+
+#: 流程顺序。**唯一下一步就是这个序列里第一个没做完的步骤。**
+#:
+#: 写成常量而不是靠字典顺序:下一步的正确性完全依赖这个顺序,
+#: 它必须是一个能被测试直接断言的对象。
+STEP_ORDER: tuple[FlowStep, ...] = (
+    FlowStep.MATERIAL,
+    FlowStep.ATTRIBUTE,
+    FlowStep.IMAGE_SET,
+    FlowStep.COPY,
+    FlowStep.DRAFT,
+)
+
+STEP_LABELS: Mapping[FlowStep, str] = {
+    FlowStep.MATERIAL: "素材",
+    FlowStep.ATTRIBUTE: "属性",
+    FlowStep.IMAGE_SET: "图片集",
+    FlowStep.COPY: "文案",
+    FlowStep.DRAFT: "草稿",
+}
+
+
+class StepState(StrEnum):
+    """一个步骤的状态。
+
+    `STALE` 与 `BLOCKED` 分开:前者是「做完了但上游变了」,后者是
+    「前置条件不满足,现在做不了」。运营要做的事完全不同 ——
+    过期的重新生成一次即可,阻断的要回头补东西。
+
+    一处刻意的例外:素材步没有上游,它的 `BLOCKED` 表示「缺少必备素材,
+    整条流程从这里起步不了」。除素材步以外,`BLOCKED` 一律指上游未就绪,
+    且**不携带任何 issue**(等上游不是待办);素材步的 BLOCKED 则带着
+    具体缺什么的阻断问题。前端按状态上色时注意这两种红指向的动作不同。
+    """
+
+    BLOCKED = "BLOCKED"
+    TODO = "TODO"
+    IN_PROGRESS = "IN_PROGRESS"
+    NEEDS_CONFIRM = "NEEDS_CONFIRM"
+    STALE = "STALE"
+    DONE = "DONE"
+
+
+#: 步骤完成度权重。五步等权,合计 100。
+#:
+#: 每步的部分分**按任务书 §3.2 的计分口径**给:终态 100%、待确认/待批准 60%、
+#: 进行中 30%、未开始/失败/冲突/过期 0%。权重写成表而不是算术,
+#: 是为了让「为什么是 45%」永远有一个可以指着看的答案。
+#:
+#: 过期给 0 分是 §3.2 的明文,也有运营上的道理:过期的产出**不能用**,
+#: 和没做在结果上是一回事;给它部分分,一件草稿过期的商品会显示 90%+,
+#: 而它此刻恰恰导不出去 —— 完成度越高的行越晚被看,过期件就一直沉底。
+#: (此处曾给过 STALE=0.6 / IN_PROGRESS=0.5,与 §3.2 不符,已纠正;
+#: 数值由 test_workbench_flow 按 §3.2 表格钉住。)
+STATE_PROGRESS: Mapping[StepState, float] = {
+    StepState.BLOCKED: 0.0,
+    StepState.TODO: 0.0,
+    StepState.IN_PROGRESS: 0.3,
+    StepState.NEEDS_CONFIRM: 0.6,
+    StepState.STALE: 0.0,
+    StepState.DONE: 1.0,
+}
+
+STEP_WEIGHT = 20.0  # 5 步 × 20 = 100
+
+
+class IssueLevel(StrEnum):
+    BLOCKING = "BLOCKING"
+    NEEDS_CONFIRM = "NEEDS_CONFIRM"
+    REMINDER = "REMINDER"
+
+
+#: 受众筛选的合法取值。`UNCONFIRMED` 是哨兵值(见 `matches_filters`),
+#: 其余三个与 `core.enums.Audience` 一致 —— 本文件是零依赖层,不 import 枚举,
+#: 由 `tests/pure/test_a45_batch10_fixes` 的一条断言守住两边同步。
+_AUDIENCE_FILTER_VALUES: frozenset[str] = frozenset(
+    {"WOMEN", "MEN", "UNISEX", "UNCONFIRMED"}
+)
+
+
+class NextActionCode(StrEnum):
+    """推荐动作。**一个商品同一时刻只会得到其中一个。**
+
+    动作码而不是一句话:前端要按它决定跳到哪个标签页、按钮显示什么、
+    要不要禁用,而这三件事不能靠解析中文文案来决定。
+    """
+
+    UPLOAD_MATERIAL = "UPLOAD_MATERIAL"          # 补充素材
+    RELEASE_QUARANTINE = "RELEASE_QUARANTINE"    # 处理被隔离的素材
+    #: §6.2:素材有了,但角色不是人工确认的,门禁不认。
+    #:
+    #: **不复用 `UPLOAD_MATERIAL`**:那个按钮会说「补充素材」,而运营
+    #: 不需要补任何素材 —— 他要做的是打开素材页看一眼、点确认。说错话
+    #: 的代价是他真的去传了一张新图,而新图默认同样没确认,再撞一次。
+    #: **也不复用 `RELEASE_QUARANTINE`**:那句文案会说「N 条素材被隔离」,
+    #: 而这条动线上 N 可能是 0。**说错话比不说话更难查。**
+    CONFIRM_ASSET_ROLE = "CONFIRM_ASSET_ROLE"    # 确认素材角色
+    #: PRD v2 §8.2 / §9.4:受众与品类同屏确认。
+    #:
+    #: **它必须排在选模特之前**(§8.2 原话:受众确认之后模特候选集才是对的;
+    #: 顺序反过来会让运营先选一次模特、确认受众后又被清空)。在本文件的
+    #: 步骤序里这一点是结构保证的 —— 它属于 ATTRIBUTE 步,而选模特发生在
+    #: 素材与属性都就绪之后的生成阶段。
+    #:
+    #: 上一版没有这个码,后果是 `FlowHeader` 那个橙色「待确认」标记
+    #: **是个死胡同**:它告诉你有问题,而界面上没有任何一处能解决它。
+    CONFIRM_AUDIENCE = "CONFIRM_AUDIENCE"        # 确认受众与品类
+    RUN_EXTRACTION = "RUN_EXTRACTION"            # 启动属性识别
+    RESOLVE_CONFLICT = "RESOLVE_CONFLICT"        # 处理属性冲突
+    CONFIRM_ATTRIBUTES = "CONFIRM_ATTRIBUTES"    # 确认属性
+    #: PRD §11「未校准字段大量涌入」:识别跑过了,但结论全是 CANDIDATE
+    #: (未校准 / 置信度不足 / 模型说看不清),确认队列里一个可点的都没有。
+    #:
+    #: **不复用 `CONFIRM_ATTRIBUTES`**:那个按钮说「确认属性」,而运营点进去
+    #: 会发现没有任何东西可确认 —— 他会以为界面坏了,然后去点「启动属性识别」,
+    #: 那是一次真实付费调用,结果是同一批不采信的证据。
+    #: **也不复用 `RUN_EXTRACTION`**:那句话直接把他送去花那笔钱。
+    #: 与 `CONFIRM_ASSET_ROLE` 同一条理由 —— **说错话比不说话更难查。**
+    FILL_ATTRIBUTES = "FILL_ATTRIBUTES"          # 人工填写属性
+    BUILD_IMAGE_SET = "BUILD_IMAGE_SET"          # 编排图片集
+    FIX_IMAGE_SET = "FIX_IMAGE_SET"              # 修复图片集问题
+    APPROVE_IMAGE_SET = "APPROVE_IMAGE_SET"      # 批准图片集
+    GENERATE_COPY = "GENERATE_COPY"              # 生成文案
+    FIX_COPY = "FIX_COPY"                        # 修复文案问题
+    APPROVE_COPY = "APPROVE_COPY"                # 批准文案
+    BUILD_DRAFT = "BUILD_DRAFT"                  # 生成上架草稿
+    FIX_DRAFT = "FIX_DRAFT"                      # 修复草稿字段
+    REFRESH_DRAFT = "REFRESH_DRAFT"              # 重新生成过期草稿
+    EXPORT = "EXPORT"                            # 导出上架文件
+    RESOLVE_REJECTION = "RESOLVE_REJECTION"      # 处理平台驳回(P1 驳回回流)
+    DONE = "DONE"                                # 已导出,无待办
+
+
+#: 动作 -> 它属于哪个步骤。前端据此跳标签页。
+ACTION_STEP: Mapping[NextActionCode, FlowStep] = {
+    NextActionCode.UPLOAD_MATERIAL: FlowStep.MATERIAL,
+    NextActionCode.RELEASE_QUARANTINE: FlowStep.MATERIAL,
+    NextActionCode.CONFIRM_ASSET_ROLE: FlowStep.MATERIAL,
+    NextActionCode.CONFIRM_AUDIENCE: FlowStep.ATTRIBUTE,
+    NextActionCode.RUN_EXTRACTION: FlowStep.ATTRIBUTE,
+    NextActionCode.RESOLVE_CONFLICT: FlowStep.ATTRIBUTE,
+    NextActionCode.CONFIRM_ATTRIBUTES: FlowStep.ATTRIBUTE,
+    NextActionCode.FILL_ATTRIBUTES: FlowStep.ATTRIBUTE,
+    NextActionCode.BUILD_IMAGE_SET: FlowStep.IMAGE_SET,
+    NextActionCode.FIX_IMAGE_SET: FlowStep.IMAGE_SET,
+    NextActionCode.APPROVE_IMAGE_SET: FlowStep.IMAGE_SET,
+    NextActionCode.GENERATE_COPY: FlowStep.COPY,
+    NextActionCode.FIX_COPY: FlowStep.COPY,
+    NextActionCode.APPROVE_COPY: FlowStep.COPY,
+    NextActionCode.BUILD_DRAFT: FlowStep.DRAFT,
+    NextActionCode.FIX_DRAFT: FlowStep.DRAFT,
+    NextActionCode.REFRESH_DRAFT: FlowStep.DRAFT,
+    NextActionCode.EXPORT: FlowStep.DRAFT,
+    NextActionCode.RESOLVE_REJECTION: FlowStep.DRAFT,
+    NextActionCode.DONE: FlowStep.DRAFT,
+}
+
+ACTION_LABELS: Mapping[NextActionCode, str] = {
+    NextActionCode.UPLOAD_MATERIAL: "补充素材",
+    NextActionCode.RELEASE_QUARANTINE: "处理隔离素材",
+    NextActionCode.CONFIRM_ASSET_ROLE: "确认素材角色",
+    NextActionCode.CONFIRM_AUDIENCE: "确认受众与品类",
+    NextActionCode.RUN_EXTRACTION: "启动属性识别",
+    NextActionCode.RESOLVE_CONFLICT: "处理属性冲突",
+    NextActionCode.CONFIRM_ATTRIBUTES: "确认属性",
+    NextActionCode.FILL_ATTRIBUTES: "人工填写属性",
+    NextActionCode.BUILD_IMAGE_SET: "编排图片集",
+    NextActionCode.FIX_IMAGE_SET: "修复图片集",
+    NextActionCode.APPROVE_IMAGE_SET: "批准图片集",
+    NextActionCode.GENERATE_COPY: "生成文案",
+    NextActionCode.FIX_COPY: "修复文案",
+    NextActionCode.APPROVE_COPY: "批准文案",
+    NextActionCode.BUILD_DRAFT: "生成上架草稿",
+    NextActionCode.FIX_DRAFT: "修复草稿字段",
+    NextActionCode.REFRESH_DRAFT: "重新生成草稿",
+    NextActionCode.EXPORT: "导出上架文件",
+    NextActionCode.RESOLVE_REJECTION: "处理平台驳回",
+    NextActionCode.DONE: "已完成",
+}
+
+
+#: 快审退回原因 -> 中文(A10)。
+#:
+#: 键是字符串而不是 `RejectReason` 枚举:枚举定义在 `app.workbench.reject`,
+#: 而那个模块要 import 本模块取 `NextActionCode` —— 反向 import 会成环。
+#: 和下面 `PLATFORM_STATUS_LABELS` 是同一种处理,文案表本来就归这一层管。
+#: 两张表的键必须与那个枚举完全一致,契约测试盯着,加原因时漏了这里会立刻失败。
+REJECT_REASON_MESSAGES: Mapping[str, str] = {
+    "STRUCTURE_CHANGED": "商品结构改变",
+    "COLOR_MISMATCH": "颜色不一致",
+    "PRINT_CHANGED": "印花改变",
+    "LOW_IMAGE_QUALITY": "图片质量低",
+    "COPY_FACT_ERROR": "文案事实错误",
+    "UNNATURAL_PT": "葡语不自然",
+    "IRRELEVANT_KEYWORDS": "关键词不相关",
+    "NEEDS_MATERIAL": "需要补素材",
+    "OTHER": "其他",
+}
+
+
+#: 退回原因 -> 退回之后的唯一下一步。**A10 的核心就是这张表**:
+#: 验收标准是"运营遇到不合格商品时不需要离开队列自行猜测处理路径",
+#: 也就是退回必须产出一个明确的下一步,而不是把状态推回去让人自己想。
+#:
+#: 几条不那么显然的:
+#:
+#:   STRUCTURE_CHANGED   结构变了意味着**属性**记错了,不是图没拍好。先去改属性 ——
+#:                       直接重新生成会拿着同一份错属性再生成一次
+#:   NEEDS_MATERIAL      去素材页而不是生成页:缺的是输入,重新生成变不出新素材
+#:   OTHER               系统不猜。落到出问题的那一步让人自己处理,
+#:                       并且退回时强制要求写补充说明(见 reject.py)
+REJECT_REASON_ACTIONS: Mapping[str, NextActionCode] = {
+    "STRUCTURE_CHANGED": NextActionCode.CONFIRM_ATTRIBUTES,
+    "COLOR_MISMATCH": NextActionCode.FIX_IMAGE_SET,
+    "PRINT_CHANGED": NextActionCode.FIX_IMAGE_SET,
+    "LOW_IMAGE_QUALITY": NextActionCode.FIX_IMAGE_SET,
+    "COPY_FACT_ERROR": NextActionCode.FIX_COPY,
+    "UNNATURAL_PT": NextActionCode.FIX_COPY,
+    "IRRELEVANT_KEYWORDS": NextActionCode.FIX_COPY,
+    "NEEDS_MATERIAL": NextActionCode.UPLOAD_MATERIAL,
+    # 「其他」**不在这张表里** —— 见下面的 REJECT_STEP_FALLBACK
+}
+
+
+#: 退回之后回到哪一步:按**被退回的对象**定,不按原因定。
+#:
+#: 两种情况用它:
+#:
+#:   「其他」          系统不猜运营想干什么,把他送回出问题的那一步。
+#:                    这一条原先在上表里硬写成 FIX_IMAGE_SET,于是文案选
+#:                    「其他」退回会被送去重排图片,而问题在文字上 ——
+#:                    一张按原因索引的表回答不了这个问题,它不知道退的是谁
+#:   认不出的原因码    库里存着一个上表没有的值(旧数据、手工 SQL)。
+#:                    落到本步的修复动作,让人去修,而不是卡在无动作可做
+REJECT_STEP_FALLBACK: Mapping[str, NextActionCode] = {
+    "image_set": NextActionCode.FIX_IMAGE_SET,
+    "copy": NextActionCode.FIX_COPY,
+}
+
+
+def reject_next_action(target: str, reason: str | None) -> NextActionCode:
+    """退回之后的唯一下一步。`target` 是被退回的那一步('image_set' / 'copy')。
+
+    **A10 的核心就是这个函数**:验收标准是"运营遇到不合格商品时不需要离开队列
+    自行猜测处理路径",也就是退回必须产出一个明确的下一步。
+    """
+    fallback = REJECT_STEP_FALLBACK[target]
+    if not reason:
+        return fallback
+    return REJECT_REASON_ACTIONS.get(reason, fallback)
+
+
+def _reject_label(reason: str | None) -> str:
+    """退回原因的中文。认不出来时如实回显原值,不写"未知" ——
+    看到一个陌生的码,下一步是去查它是谁写进来的,而"未知"把这条线索抹掉了。"""
+    if not reason:
+        return "未注明原因"
+    return REJECT_REASON_MESSAGES.get(reason, reason)
+
+
+#: 平台侧状态 -> 给运营看的一句话(OPS-REVIEW P1)。
+#:
+#: 表放在本文件而不是 platform.py:flow 的草稿列摘要要用它,而 platform.py
+#: 已经 import flow(FlowStep)。反向 import 会成环;文案表本来就归这里管
+#: (STEP_LABELS / ACTION_LABELS 都在这一层),platform.py 从这里取。
+PLATFORM_STATUS_LABELS: Mapping[str, str] = {
+    "NONE": "未上传平台",
+    "SUBMITTED": "已上传平台",
+    "LIVE": "平台已上架",
+    "REJECTED": "平台驳回",
+}
+
+
+# ==========================================================
+# 输入:service 从库里查出来喂进来的事实
+# ==========================================================
+
+
+@dataclass(frozen=True)
+class MaterialFacts:
+    """素材层事实。
+
+    `usable_roles` 用角色集合而不是数量:缺的是背面图还是细节图,
+    决定了提示语该说什么,而「有 3 张图」这个数字什么也回答不了。
+
+    ## `usable_roles` 与 `gate_roles` 不是一回事,别合并
+
+        usable_roles  素材库里**有**哪些角色的图。谁标的、是不是 AI 生成的,
+                      一律不问。提醒类问题读它 —— 一张模型猜出角色的背面图,
+                      说「没有背面图」是假的,而假提醒会训练人忽略这一列
+        gate_roles    §6.2 门禁**认**哪些角色。要求那张图是本商品的证据,
+                      且角色是人定的(判定在 `media/sample_completeness`)
+
+    合并的结果只有两种,都是错的:按宽的算,AI 图能满足完整度;
+    按严的算,每件商品都会显示缺背面图。
+
+    ## 两个新字段都**不给宽松默认值**
+
+    默认空集 = 谁没填谁不合格。给一个「没传就用 `usable_roles`」之类的
+    兜底,漏填的表现是**悄悄放行** —— 硬规则 4 第二次事故的形状正是如此:
+    缺一列不报错,判定一路走到最宽的一档,而两侧的测试全绿。
+
+    代价是接线那天所有旧夹具当场变红。那是设计在起作用,不是回归。
+    """
+
+    total: int = 0
+    usable: int = 0
+    quarantined: int = 0
+    pending: int = 0
+    usable_roles: frozenset[str] = frozenset()
+    #: §6.2 门禁认可的角色集合。**空集 = 一张够格的样品都没有。**
+    gate_roles: frozenset[str] = frozenset()
+    #: 每个颜色各自的门禁角色(§6.2 的颜色作用域,A45-batch14-15 接线)。
+    #:
+    #: 归属外键落库之前这里恒为空 —— 那时判定验完了却接不上线,
+    #: 14-10 用一条欠账守卫把原因钉在明处。现在那一列有了,这里跟着接上。
+    #:
+    #: **默认空 dict 而不是「没传就退回 gate_roles」**:退回的表现是
+    #: 每个颜色都拿到全 SPU 的角色集合,于是「B 色一张正面图都没有」
+    #: 会被判成合格 —— 与 `gate_roles` 那条默认值同一个理由。
+    variant_gate_roles: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: 「确认一下角色就能解开门禁」的角色,已排序。非空即意味着门禁没过
+    #: (`sample_completeness.confirmable_roles` 的性质),所以它同时是
+    #: 「补图」与「确认角色」两条动线的分岔依据
+    confirmable_roles: tuple[str, ...] = ()
+
+    # `has_primary_image` 在 A45-batch14-11 删掉了。它**算了没人读**:
+    # `service.py` 是唯一写入点,全仓零个读取点。留着的坏处不是多一个
+    # 布尔字段,而是它读的是 `usable_roles` 而 §6.2 门禁读的是 `gate_roles`
+    # —— 第一个接它的人会拿到一个「AI 图也算有主图」的答案,而两侧的
+    # 测试全绿。真需要「有没有主图」时,问 `missing_role_groups(gate_roles)`,
+    # 那是本仓唯一一份必备角色口径,而且它答的是「正面图**或**平铺图」。
+
+
+@dataclass(frozen=True)
+class AudienceFacts:
+    """受众层事实(PRD v2 §3.4 / §8.2 / §9.4)。
+
+    `audience` 用 `str | None` 而不是枚举:本文件是**零依赖纯函数**层,
+    不 import `core.enums`。service 负责把库里的列翻译进来,判定在这里。
+
+    `None` = 待确认,**不是 UNISEX**(§3.4 规则 3)。两者必须分开:
+    UNISEX 是一个明确的业务判断,"没填"不是。
+    """
+
+    #: 商品受众。None = 待确认
+    audience: str | None = None
+    #: 取值本身不合法(库里存着一个认不出的字符串)。
+    #: 它不是"没填" —— 走兼容缝的话这个错值会静默存在到永远
+    invalid: bool = False
+
+
+@dataclass(frozen=True)
+class AttributeFacts:
+    """属性层事实。字段名集合,不是数量 —— 提示要能点名到字段。"""
+
+    required_fields: tuple[str, ...] = ()
+    confirmed: frozenset[str] = frozenset()
+    suggested: frozenset[str] = frozenset()
+    conflicted: frozenset[str] = frozenset()
+    candidate_only: frozenset[str] = frozenset()
+    extraction_count: int = 0
+
+    @property
+    def missing_required(self) -> tuple[str, ...]:
+        """必填但尚未确认的字段。"""
+        return tuple(f for f in self.required_fields if f not in self.confirmed)
+
+
+@dataclass(frozen=True)
+class ImageSetFacts:
+    exists: bool = False
+    status: str | None = None
+    version: int = 0
+    item_count: int = 0
+    #: 图片集规则层的问题码。这一层的问题**全部是阻断级**(见 image_set_rules)
+    violation_codes: tuple[str, ...] = ()
+    #: 被隔离素材连累而降级
+    downgraded: bool = False
+    #: A10:被快审退回过,以及退回原因(`RejectReason` 的值)。
+    #: 判定层必须看得见它 —— 只落审计的话,图片集回到 DRAFT、校验依旧通过,
+    #: 下一步又变成"等待批准",那件商品立刻走回快审队列排在原处
+    reject_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class CopyFacts:
+    exists: bool = False
+    status: str | None = None
+    version: int = 0
+    blocking_violations: int = 0
+    warning_violations: int = 0
+    #: 已批准之后属性又变了 —— 文案里的事实可能已经不成立
+    stale: bool = False
+    locale: str | None = None
+    #: A10:被快审退回过,以及退回原因。理由同 `ImageSetFacts.reject_reason`
+    reject_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DraftFacts:
+    exists: bool = False
+    status: str | None = None
+    error_count: int = 0
+    warning_count: int = 0
+    #: 上游指纹变了。**STALE 草稿不允许导出**(§9.1)
+    stale: bool = False
+    exported: bool = False
+    #: 平台侧状态(OPS-REVIEW P1)。None = 还没有草稿行。
+    #: 取值见 `core.enums.PlatformStatus`,由运营在导出页手工录入
+    platform_status: str | None = None
+    #: 未解决的平台驳回条数。**>0 时这一步永远不算 DONE** ——
+    #: 平台说不行,就是还没行;绿色"已完成"挂在被驳回的商品上,
+    #: 运营就只能回到系统外拿表格记驳回件(OPS-REVIEW 第 11 环的原话)
+    open_rejections: int = 0
+
+
+@dataclass(frozen=True)
+class ProductFlow:
+    """一件商品的全部流程事实。service 负责组装,本文件负责判定。"""
+
+    product_id: str
+    sku: str
+    spu: str
+    #: 受众。默认空 = 待确认 —— 存量商品(迁移 0030 不回填)全部落在这一档,
+    #: 所以它产出的是 NEEDS_CONFIRM 而不是 BLOCKING,理由见 `_evaluate_attribute`
+    audience: AudienceFacts = field(default_factory=AudienceFacts)
+    material: MaterialFacts = field(default_factory=MaterialFacts)
+    attribute: AttributeFacts = field(default_factory=AttributeFacts)
+    image_set: ImageSetFacts = field(default_factory=ImageSetFacts)
+    copy: CopyFacts = field(default_factory=CopyFacts)
+    draft: DraftFacts = field(default_factory=DraftFacts)
+
+
+# ==========================================================
+# 输出
+# ==========================================================
+
+
+@dataclass(frozen=True)
+class Issue:
+    """一条问题。
+
+    `target_step` 让前端可以把问题做成可点击的 —— 任务书 FE-103 的
+    验收结果是「阻断问题醒目且可点击」,点了要能落到具体那一页。
+    """
+
+    level: IssueLevel
+    code: str
+    message: str
+    target_step: FlowStep
+    hint: str | None = None
+    #: 具体到字段 / 素材 / 图片项。没有就留空
+    ref: str | None = None
+
+
+@dataclass(frozen=True)
+class StepResult:
+    step: FlowStep
+    state: StepState
+    summary: str
+    issues: tuple[Issue, ...] = ()
+
+
+@dataclass(frozen=True)
+class NextAction:
+    code: NextActionCode
+    label: str
+    step: FlowStep
+    reason: str
+
+
+@dataclass(frozen=True)
+class FlowResult:
+    steps: tuple[StepResult, ...]
+    issues: tuple[Issue, ...]
+    completion: int
+    blocking_count: int
+    pending_count: int
+    reminder_count: int
+    current_step: FlowStep
+    next_action: NextAction
+
+    def step_state(self, step: FlowStep) -> StepState:
+        for s in self.steps:
+            if s.step is step:
+                return s.state
+        raise KeyError(step)
+
+
+# ---------------------------------------------------------------- 各步判定
+
+
+#: 上架至少要有的素材角色。**判定在 `media/sample_completeness`,不在这里。**
+#:
+#: 这里原先是 `REQUIRED_ROLES = ("PRODUCT_FRONT",)`,而 §6.2 的原文是
+#: 「至少一张 PRODUCT_FRONT/FLAT_LAY」—— 于是只有透明底商品图的商品
+#: (旧枚举 `GARMENT_CUTOUT` 有损映射成 `FLAT_LAY`)被永久判「缺少正面图」,
+#: 而运营解除它的唯一办法是把平铺图改标成正面图。见那个模块的文档。
+#:
+#: 推荐角色留在这一层:它们**不进门禁**,缺了只是提醒,所以读的是
+#: `usable_roles` 而不是 `gate_roles`(理由写在 `MaterialFacts` 上)。
+#: 背面与细节缺失做成阻断会让运营为了过检查去传一张凑数的图,那比没有更糟。
+RECOMMENDED_ROLES: tuple[str, ...] = ("PRODUCT_BACK", "DETAIL")
+
+#: 角色文案表。**唯一一份在 `media/sample_completeness`**,这里只是别名 ——
+#: 名字保留是因为它已经是本模块的对外常量,而复制一份回来的表现是
+#: 改了一处之后判定说「平铺图」、按钮说 `FLAT_LAY`,两处都不报错。
+ROLE_LABELS: Mapping[str, str] = gate.ROLE_LABELS
+_role_label = gate.role_label
+
+
+def _evaluate_material(facts: MaterialFacts) -> StepResult:
+    issues: list[Issue] = []
+
+    # 按**满足组**判定:组内任一角色即满足。集合用 `gate_roles` 而不是
+    # `usable_roles` —— 门禁问的是「有没有一张够格的样品」,而
+    # 「够格」要求那张图是本商品的证据、且角色是人定的(§6.2)。
+    for group in gate.missing_role_groups(facts.gate_roles):
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="MATERIAL_MISSING_REQUIRED_ROLE",
+                # 说「正面图**或**平铺图」。只报组里第一个角色的话,运营为了
+                # 消掉这句话会把平铺图改标成正面图 —— 而下游每一处按角色
+                # 取图的地方跟着错。`ref` 只带第一个,那是跳转依据不是文案
+                message=f"缺少{gate.group_label(group)}",
+                target_step=FlowStep.MATERIAL,
+                hint="上传该组任一角色的素材,或确认已有素材的角色",
+                ref=group[0],
+            )
+        )
+
+    if facts.usable == 0 and facts.total == 0:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="MATERIAL_EMPTY",
+                message="还没有任何素材",
+                target_step=FlowStep.MATERIAL,
+                hint="先上传商品图,识别与图片集都依赖它",
+            )
+        )
+
+    if facts.confirmable_roles:
+        # **级别必须是 NEEDS_CONFIRM,不能降成 REMINDER。**
+        #
+        # 降级之后行为几乎不变:步骤照样 BLOCKED、下一步照样是「确认素材角色」。
+        # 变的是**可见度**:`summarize()` 的「待确认」只数 NEEDS_CONFIRM,
+        # 而前端给 REMINDER 的是 `badge: false` —— 列表页根本不计数。
+        # 于是唯一能解开这条阻断的事情在看板上一处都不显示。
+        #
+        # 而 REMINDER 的语义是「可以带着它继续走」,对一件走不下去的商品
+        # 说这句话本身就是错的。
+        names = "、".join(_role_label(r) for r in facts.confirmable_roles)
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="MATERIAL_ROLE_UNCONFIRMED",
+                message=f"有素材标着{names},但这个角色不是人工确认的",
+                target_step=FlowStep.MATERIAL,
+                hint=(
+                    "门禁只认人工确认过的角色(§6.2):模型猜的、按文件名推的都不算。"
+                    "到素材页看一眼再确认,比重新拍一张便宜"
+                ),
+                ref=facts.confirmable_roles[0],
+            )
+        )
+
+    if facts.quarantined:
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="MATERIAL_QUARANTINED",
+                message=f"{facts.quarantined} 条素材被隔离",
+                target_step=FlowStep.MATERIAL,
+                hint="隔离是合规预检的结论,有假阳性;人工复核后可放行",
+            )
+        )
+
+    for role in RECOMMENDED_ROLES:
+        if role not in facts.usable_roles:
+            issues.append(
+                Issue(
+                    level=IssueLevel.REMINDER,
+                    code="MATERIAL_MISSING_RECOMMENDED_ROLE",
+                    message=f"没有{_role_label(role)}",
+                    target_step=FlowStep.MATERIAL,
+                    hint="不阻断上架,但缺背面/细节图会影响识别置信度",
+                    ref=role,
+                )
+            )
+
+    if any(i.level is IssueLevel.BLOCKING for i in issues):
+        state = StepState.BLOCKED
+    elif facts.quarantined:
+        state = StepState.NEEDS_CONFIRM
+    else:
+        state = StepState.DONE
+
+    summary = f"可用 {facts.usable}/{facts.total}"
+    if facts.quarantined:
+        summary += f",隔离 {facts.quarantined}"
+    return StepResult(FlowStep.MATERIAL, state, summary, tuple(issues))
+
+
+def _evaluate_attribute(
+    facts: AttributeFacts, *, material_ready: bool,
+    audience: AudienceFacts | None = None,
+) -> StepResult:
+    """属性步。**受众确认也在这一步**(§9.4:受众与品类同屏确认,不拆两步)。
+
+    ## 为什么受众未确认是 NEEDS_CONFIRM 而不是 BLOCKING
+
+    迁移 0030 **不回填**商品受众,存量商品全部是 NULL。做成阻断等于
+    一夜之间把所有在途商品拦住,而运营此刻能做的只有逐件确认受众 ——
+    `workbench/audience_rules.py` 的兼容矩阵为同一个理由留了同一条缝:
+    「NULL 受众 + 无前缀规则包」放行并警告。两处的宽严必须一致,
+    否则列表页说"可以走",导出闸说"不行",而两句话都是对的。
+
+    取值不合法(`invalid`)则是**阻断**:那不是"没填",是库里存着一个
+    认不出的字符串。给它兼容缝的话,这个错值会静默存在到永远。
+    """
+    audience = audience or AudienceFacts()
+    missing = facts.missing_required
+    total_required = len(facts.required_fields)
+    done = total_required - len(missing)
+    summary = f"已确认 {done}/{total_required}"
+    if audience.invalid:
+        summary = "受众取值非法 · " + summary
+    elif audience.audience is None:
+        summary = "受众待确认 · " + summary
+    if facts.conflicted:
+        summary += f",冲突 {len(facts.conflicted)}"
+
+    if not material_ready:
+        # 上游没就绪时**不产出字段级问题**。以前这里照常产出,于是一件
+        # 刚建好的商品会显示「阻断 5」(2 条素材 + 每个必填属性 1 条),
+        # 必填属性越多的品类数字越虚高 —— 而运营此刻能做的只有一件事:
+        # 补素材。阻断数要能被信任,就不能把「等上游」也算成待办。
+        # BLOCKED 状态本身已经说明了一切,`_decide_next` 也只看最上游那步。
+        return StepResult(FlowStep.ATTRIBUTE, StepState.BLOCKED, summary, ())
+
+    issues: list[Issue] = []
+
+    # 受众排在字段问题之前:它决定了必填字段集本身(§18.3 属性按受众
+    # 条件化)。受众没定就去确认属性,确认的是一份**可能是错的**清单 ——
+    # 男装商品会被问领型、女装商品会被问腰头
+    if audience.invalid:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="AUDIENCE_INVALID",
+                message="商品受众取值不合法",
+                target_step=FlowStep.ATTRIBUTE,
+                hint="库里存着一个认不出的受众值,请在商品资料里重新选择受众",
+                ref="audience",
+            )
+        )
+    elif audience.audience is None:
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="AUDIENCE_UNCONFIRMED",
+                message="受众待确认",
+                target_step=FlowStep.ATTRIBUTE,
+                hint=(
+                    "受众决定模特候选集、检查项与导出模板;"
+                    "确认之前必填属性清单可能不是这件商品该填的那一份"
+                ),
+                ref="audience",
+            )
+        )
+
+    for name in sorted(facts.conflicted):
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="ATTR_CONFLICT",
+                message=f"{name} 存在多图结论冲突",
+                target_step=FlowStep.ATTRIBUTE,
+                hint="系统不会替你选。并列展示各图结论,人工定一个",
+                ref=name,
+            )
+        )
+
+    for name in missing:
+        if name in facts.conflicted:
+            continue  # 已经作为冲突报过一次,不重复计数
+
+        # **CANDIDATE 不在这个 `or` 里,那是 §11 修的那条。**
+        #
+        # 原来写的是 `name in facts.suggested or name in facts.candidate_only`,
+        # 于是一个「留了证据但不采信」的字段会产出「有建议值待确认」这句话。
+        # `AttributeStatus` 的文档字符串自己写着两者不能混:
+        # 「未校准字段会和低分字段一起涌进待确认列表,人只会全部忽略」。
+        #
+        # 判定的单点在 `attributes/queue_policy`,service 层按它分桶;
+        # 这里读的 `suggested` / `candidate_only` 已经是分好的结果。
+        if name in facts.suggested:
+            issues.append(
+                Issue(
+                    level=IssueLevel.NEEDS_CONFIRM,
+                    code="ATTR_NOT_CONFIRMED",
+                    message=f"{name} 有建议值待确认",
+                    target_step=FlowStep.ATTRIBUTE,
+                    hint="确认后才会进入文案的事实源",
+                    ref=name,
+                )
+            )
+        elif name in facts.candidate_only:
+            # 自成一码而不是并进 `ATTR_NOT_CONFIRMED`:两者的下一步不同。
+            # 「尚无可用值」的建议是「先跑一次属性识别」,而这条动线上
+            # **识别已经跑过了**,再跑一次会得到同一批不采信的证据 ——
+            # 把运营送去做一件确定无效、而且要花钱的事。
+            issues.append(
+                Issue(
+                    level=IssueLevel.BLOCKING,
+                    code="ATTR_EVIDENCE_ONLY",
+                    message=f"{name} 有证据但不采信",
+                    target_step=FlowStep.ATTRIBUTE,
+                    hint=(
+                        "模型给过值,但这个(字段 × 模型 × Prompt)还没校准、"
+                        "或置信度低于下限,系统按 fail-closed 不采信。"
+                        "再跑一次识别得到的是同一批证据,请人工直接填写"
+                    ),
+                    ref=name,
+                )
+            )
+        else:
+            issues.append(
+                Issue(
+                    level=IssueLevel.BLOCKING,
+                    code="ATTR_NOT_CONFIRMED",
+                    message=f"{name} 尚无可用值",
+                    target_step=FlowStep.ATTRIBUTE,
+                    hint="先跑一次属性识别,或人工直接填写",
+                    ref=name,
+                )
+            )
+
+    # material_ready 为假的分支已在函数开头提前返回
+    if facts.extraction_count == 0 and not facts.confirmed:
+        state = StepState.TODO
+    elif facts.conflicted:
+        state = StepState.NEEDS_CONFIRM
+    elif missing:
+        # 同上:CANDIDATE 不算「等人点头」。一件模型一个字段都没答上来的商品
+        # 原来会落进 NEEDS_CONFIRM,而那一档在 `STATE_PROGRESS` 里记 0.6 分 ——
+        # 于是它在列表里排得比真的做了一半的商品还靠后,而运营点进去
+        # 一个可确认的值都找不到。
+        state = (
+            StepState.NEEDS_CONFIRM
+            if all(m in facts.suggested for m in missing)
+            else StepState.IN_PROGRESS
+        )
+    else:
+        state = StepState.DONE
+
+    return StepResult(FlowStep.ATTRIBUTE, state, summary, tuple(issues))
+
+
+#: 图片集问题码 -> 给运营看的一句话。规则层的码是给程序看的。
+IMAGE_SET_VIOLATION_MESSAGES: Mapping[str, str] = {
+    "MISSING_PRIMARY_FOR_VARIANT": "没有指定主图",
+    "MULTIPLE_PRIMARY_FOR_VARIANT": "指定了多张主图",
+    "MISSING_IMAGE_FOR_VARIANT": "有变体没有配图",
+    "UNTRUSTED_PRIMARY_ROLE": "主图的角色是模型猜的,把握不足",
+    "UNUSABLE_ASSET": "引用了被隔离或未就绪的素材",
+    "EMPTY_SET": "图片集里没有任何图片",
+}
+
+
+def _evaluate_image_set(
+    facts: ImageSetFacts, *, upstream_ready: bool
+) -> StepResult:
+    issues: list[Issue] = []
+
+    for code in facts.violation_codes:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code=f"IMAGESET_{code}",
+                message=IMAGE_SET_VIOLATION_MESSAGES.get(code, code),
+                target_step=FlowStep.IMAGE_SET,
+                hint="图片集的问题一律阻断批准 —— 主图放错是消费者第一眼看到的错误",
+                ref=code,
+            )
+        )
+
+    if facts.downgraded:
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="IMAGESET_DOWNGRADED",
+                message="引用的素材被隔离,已批准的图片集被降级为待复核",
+                target_step=FlowStep.IMAGE_SET,
+                hint="换掉那张素材再重新批准,或先放行该素材",
+            )
+        )
+
+    if facts.status == "REJECTED":
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="IMAGESET_REJECTED",
+                message="图片集被快审退回:" + _reject_label(facts.reject_reason),
+                target_step=FlowStep.IMAGE_SET,
+                hint="按退回原因处理完再重新批准;改内容会派生出新版本",
+                ref=facts.reject_reason,
+            )
+        )
+
+    if not upstream_ready:
+        state = StepState.BLOCKED
+    elif not facts.exists:
+        state = StepState.TODO
+    elif facts.status == "APPROVED":
+        state = StepState.DONE
+    else:
+        state = StepState.IN_PROGRESS
+
+    if not facts.exists:
+        summary = "未编排"
+    else:
+        summary = f"v{facts.version} · {facts.item_count} 张 · {facts.status}"
+    return StepResult(FlowStep.IMAGE_SET, state, summary, tuple(issues))
+
+
+def _evaluate_copy(facts: CopyFacts, *, upstream_ready: bool) -> StepResult:
+    issues: list[Issue] = []
+
+    if facts.blocking_violations:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="COPY_BLOCKING_VIOLATION",
+                message=f"文案有 {facts.blocking_violations} 处硬失败",
+                target_step=FlowStep.COPY,
+                hint="字数、禁词、无依据声明都在这一类。修完才能批准",
+            )
+        )
+    if facts.warning_violations:
+        issues.append(
+            Issue(
+                level=IssueLevel.REMINDER,
+                code="COPY_WARNING",
+                message=f"文案有 {facts.warning_violations} 处提醒",
+                target_step=FlowStep.COPY,
+                hint="同义词词典扫出的疑似不一致。词典不全,人工判断即可",
+            )
+        )
+    if facts.stale:
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="COPY_STALE",
+                message="属性在文案批准之后发生了变化,文案已过期",
+                target_step=FlowStep.COPY,
+                hint="重新生成或人工复核,确认文案里的事实仍然成立",
+            )
+        )
+
+    # A10:文案的 `REJECTED` 有两个来源 —— 规则硬失败(save_copy / revalidate 置的)
+    # 和快审退回。判据是**有没有退回原因**,不是状态本身:只看状态的话,
+    # 一版因禁词被驳回的文案会在这里被说成"快审退回:未注明原因",
+    # 而硬失败那一条 issue 已经在上面出过了,运营会看到两句互相矛盾的话
+    if facts.status == "REJECTED" and facts.reject_reason:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="COPY_REJECTED",
+                message="文案被快审退回:" + _reject_label(facts.reject_reason),
+                target_step=FlowStep.COPY,
+                hint="按退回原因改完再重新校验与批准",
+                ref=facts.reject_reason,
+            )
+        )
+
+    if not upstream_ready:
+        state = StepState.BLOCKED
+    elif not facts.exists:
+        state = StepState.TODO
+    elif facts.stale:
+        state = StepState.STALE
+    elif facts.status == "APPROVED":
+        state = StepState.DONE
+    elif facts.blocking_violations:
+        state = StepState.IN_PROGRESS
+    else:
+        state = StepState.IN_PROGRESS
+
+    if not facts.exists:
+        summary = "未生成"
+    else:
+        summary = f"v{facts.version} · {facts.status}"
+        if facts.locale:
+            summary = f"{facts.locale} · " + summary
+    return StepResult(FlowStep.COPY, state, summary, tuple(issues))
+
+
+def _evaluate_draft(facts: DraftFacts, *, upstream_ready: bool) -> StepResult:
+    issues: list[Issue] = []
+
+    if facts.error_count:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="DRAFT_FIELD_ERROR",
+                message=f"草稿有 {facts.error_count} 个字段不合格",
+                target_step=FlowStep.DRAFT,
+                hint="必填缺失、超长、枚举不匹配都在这一类,阻断正式导出",
+            )
+        )
+    if facts.warning_count:
+        issues.append(
+            Issue(
+                level=IssueLevel.REMINDER,
+                code="DRAFT_FIELD_WARNING",
+                message=f"草稿有 {facts.warning_count} 个字段有提醒",
+                target_step=FlowStep.DRAFT,
+            )
+        )
+    if facts.stale:
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="DRAFT_STALE",
+                message="上游已变化,这份草稿是旧事实",
+                target_step=FlowStep.DRAFT,
+                hint="过期草稿不允许导出。重新生成一次即可,不会丢手填字段",
+            )
+        )
+    if facts.open_rejections:
+        # OPS-REVIEW P1:平台驳回是阻断,不是提醒。它挂在草稿步上
+        # (五个流程步里没有"平台"一步,而驳回指向的产物正是这份草稿),
+        # 于是异常页的草稿分区会自动收下它,阻断计数也把它算进去 ——
+        # 驳回件从此不可能再顶着绿色"已完成"沉在列表底部。
+        issues.append(
+            Issue(
+                level=IssueLevel.BLOCKING,
+                code="PLATFORM_REJECTED",
+                message=f"平台驳回 {facts.open_rejections} 条未解决",
+                target_step=FlowStep.DRAFT,
+                hint="到导出页看驳回原因与当时导出的版本;修复上游、重导后标记解决",
+            )
+        )
+
+    if not upstream_ready:
+        state = StepState.BLOCKED
+    elif not facts.exists:
+        state = StepState.TODO
+    elif facts.stale:
+        state = StepState.STALE
+    elif facts.error_count:
+        state = StepState.IN_PROGRESS
+    elif facts.open_rejections:
+        # 已导出但被平台驳回:这份产出**不能用**,和过期在结果上是一回事,
+        # 所以不给 DONE。用 IN_PROGRESS 而不是新造一个状态:
+        # 运营要做的确实是"回来接着干活",而每加一个 StepState,
+        # 列表五列、筛选、前端文案表、异常判定都要跟着长一格。
+        state = StepState.IN_PROGRESS
+    elif facts.exported:
+        state = StepState.DONE
+    elif facts.status in ("VALIDATED", "APPROVED"):
+        state = StepState.NEEDS_CONFIRM  # 校验过了,等人点导出
+        # 状态是 NEEDS_CONFIRM 就必须有一条对应的问题。以前这里没有,
+        # 于是列表页草稿列亮着「待确认」,顶部的待确认计数却不含它 ——
+        # 两处口径不一致正是本模块声明要杜绝的事。点导出确实是
+        # 「要人做一个决定」,把它算进待确认没有语义上的勉强。
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="DRAFT_AWAITING_EXPORT",
+                message="草稿已通过校验,等待人工导出",
+                target_step=FlowStep.DRAFT,
+                hint="核对预览无误后点「导出上架文件」",
+            )
+        )
+    else:
+        state = StepState.IN_PROGRESS
+
+    if not facts.exists:
+        summary = "未生成"
+    else:
+        summary = str(facts.status)
+        if facts.exported:
+            summary += " · 已导出"
+        if facts.open_rejections:
+            summary += f" · 平台驳回 {facts.open_rejections}"
+        elif facts.platform_status and facts.platform_status != "NONE":
+            label = PLATFORM_STATUS_LABELS.get(facts.platform_status, facts.platform_status)
+            summary += f" · {label}"
+    return StepResult(FlowStep.DRAFT, state, summary, tuple(issues))
+
+
+# ---------------------------------------------------------------- 下一步
+
+
+def _decide_next(flow: ProductFlow, steps: Mapping[FlowStep, StepResult]) -> NextAction:
+    """算出**唯一**的下一步。
+
+    规则很简单:按 `STEP_ORDER` 走,第一个没做完的步骤决定动作。
+    于是「不出现非法下一步」是结构保证的 —— 不可能在属性没确认时
+    推荐去生成文案,因为属性那一步会先被撞上。
+    """
+
+    def action(code: NextActionCode, reason: str) -> NextAction:
+        return NextAction(
+            code=code, label=ACTION_LABELS[code], step=ACTION_STEP[code], reason=reason
+        )
+
+    material = steps[FlowStep.MATERIAL]
+    if material.state is StepState.BLOCKED:
+        # ---- 先看有没有「确认一下就能解开」的图 ----
+        #
+        # 排在补图之前是有代价对比的:确认一个角色是点一下,重新拍一张图
+        # 是一天。而 `confirmable_roles` 非空**必然**意味着门禁没过
+        # (见 `sample_completeness.confirmable_roles` 的性质),
+        # 所以这一支不会抢走一件本来就能往下走的商品。
+        confirm = next(
+            (i for i in material.issues if i.code == "MATERIAL_ROLE_UNCONFIRMED"), None
+        )
+        if confirm is not None:
+            return action(NextActionCode.CONFIRM_ASSET_ROLE, confirm.message)
+
+        # ---- 理由**直接取 issue 文案,不从 `ref` 重拼** ----
+        #
+        # `ref` 按设计只带满足组里的第一个角色(它是跳转依据)。从它重拼的
+        # 后果是判定说「正面图**或**平铺图」、按钮理由说「缺少正面图」——
+        # 本批要修的那个坏循环原样回来:运营为了消掉那句话,
+        # 会把平铺图改标成正面图。
+        missing = [
+            i.message for i in material.issues if i.code == "MATERIAL_MISSING_REQUIRED_ROLE"
+        ]
+        if missing:
+            return action(NextActionCode.UPLOAD_MATERIAL, "、".join(missing))
+        return action(NextActionCode.UPLOAD_MATERIAL, "还没有可用素材")
+    if material.state is StepState.NEEDS_CONFIRM:
+        return action(
+            NextActionCode.RELEASE_QUARANTINE,
+            f"{flow.material.quarantined} 条素材被隔离,需要人工复核",
+        )
+
+    attribute = steps[FlowStep.ATTRIBUTE]
+
+    # ---- §8.2 / §9.4:确认受众与品类 ----
+    #
+    # 位置有两条约束,这一行同时满足:
+    #
+    #   排在补素材之后   §8.2 的处理顺序里「需要补充资料」是第 3 条,
+    #                   「等待确认受众」是第 4 条
+    #   排在选模特之前   §8.2 明文:受众确认之后模特候选集才是对的。
+    #                   选模特发生在素材与属性就绪后的生成阶段,
+    #                   所以放在属性步之首就够了 —— 结构保证,不靠约定
+    #
+    # **但不把已经走完属性的存量商品拉回来。** 迁移 0030 不回填受众,
+    # 存量商品全是 NULL;`audience_rules` 的兼容矩阵放行「NULL 受众 +
+    # 无前缀规则包」并只给警告。如果这里无条件抢先,那批商品会被永久
+    # 挡在导出之前 —— 而导出闸恰恰说它们可以过。两处的宽严必须一致。
+    if attribute.state is not StepState.DONE:
+        if flow.audience.invalid:
+            return action(
+                NextActionCode.CONFIRM_AUDIENCE,
+                "商品受众取值不合法,请重新选择受众",
+            )
+        if flow.audience.audience is None:
+            return action(
+                NextActionCode.CONFIRM_AUDIENCE,
+                "受众未确认;它决定模特候选集、检查项与导出模板",
+            )
+
+    if attribute.state is not StepState.DONE:
+        if flow.attribute.conflicted:
+            names = "、".join(sorted(flow.attribute.conflicted))
+            return action(NextActionCode.RESOLVE_CONFLICT, f"{names} 有冲突结论待人工裁决")
+        if flow.attribute.extraction_count == 0:
+            return action(NextActionCode.RUN_EXTRACTION, "还没跑过属性识别")
+        missing = flow.attribute.missing_required
+        # **先问「有没有东西可确认」,再决定说哪句话**(PRD §11)。
+        #
+        # 原来这里无条件说「确认属性」。识别跑过、而结论全是 CANDIDATE 时
+        # 那句话是假的:确认队列是空的。运营点开属性页找不到可点的东西,
+        # 下一步多半是去点「启动属性识别」—— 一次真实付费调用,
+        # 换回同一批不采信的证据。
+        pending = [m for m in missing if m in flow.attribute.suggested]
+        if pending:
+            return action(
+                NextActionCode.CONFIRM_ATTRIBUTES,
+                "待确认:" + "、".join(pending[:3]) + ("…" if len(pending) > 3 else ""),
+            )
+        if missing:
+            return action(
+                NextActionCode.FILL_ATTRIBUTES,
+                "待填写:" + "、".join(missing[:3]) + ("…" if len(missing) > 3 else ""),
+            )
+        return action(NextActionCode.CONFIRM_ATTRIBUTES, "属性尚未全部确认")
+
+    image_set = steps[FlowStep.IMAGE_SET]
+    if image_set.state is not StepState.DONE:
+        if not flow.image_set.exists:
+            return action(NextActionCode.BUILD_IMAGE_SET, "还没有图片集")
+        # A10:被退回过的,下一步由退回原因决定 —— 这一条必须排在
+        # violation_codes 之前。退回往往正是因为"校验全过但人眼看着不对",
+        # 那时 violation_codes 是空的,落到最后一行就又变成"等待批准",
+        # 于是运营刚退回的那件立刻走回队列排在原处
+        if flow.image_set.status == "REJECTED":
+            return action(
+                reject_next_action("image_set", flow.image_set.reject_reason),
+                "快审退回:" + _reject_label(flow.image_set.reject_reason),
+            )
+        if flow.image_set.violation_codes:
+            first = flow.image_set.violation_codes[0]
+            return action(
+                NextActionCode.FIX_IMAGE_SET,
+                IMAGE_SET_VIOLATION_MESSAGES.get(first, first),
+            )
+        return action(NextActionCode.APPROVE_IMAGE_SET, "图片集校验通过,等待批准")
+
+    copy_step = steps[FlowStep.COPY]
+    if copy_step.state is not StepState.DONE:
+        if not flow.copy.exists:
+            return action(NextActionCode.GENERATE_COPY, "还没有文案")
+        if flow.copy.stale:
+            return action(NextActionCode.GENERATE_COPY, "属性变了,文案需要重新生成")
+        # A10:同上,退回优先于校验问题。判据带上 reject_reason ——
+        # 规则硬失败也会把状态置成 REJECTED,那一类的下一步是"修复文案",
+        # 由下面那条按 blocking_violations 给出,不该冒充成快审退回
+        if flow.copy.status == "REJECTED" and flow.copy.reject_reason:
+            return action(
+                reject_next_action("copy", flow.copy.reject_reason),
+                "快审退回:" + _reject_label(flow.copy.reject_reason),
+            )
+        if flow.copy.blocking_violations:
+            return action(
+                NextActionCode.FIX_COPY,
+                f"{flow.copy.blocking_violations} 处硬失败未解决",
+            )
+        return action(NextActionCode.APPROVE_COPY, "文案校验通过,等待批准")
+
+    draft = steps[FlowStep.DRAFT]
+    if draft.state is StepState.DONE:
+        return action(NextActionCode.DONE, "已导出,没有待办")
+    if not flow.draft.exists:
+        return action(NextActionCode.BUILD_DRAFT, "图片集与文案都已批准,可以生成草稿")
+    if flow.draft.stale:
+        return action(NextActionCode.REFRESH_DRAFT, "上游已变化,草稿需要重新生成")
+    if flow.draft.error_count:
+        return action(NextActionCode.FIX_DRAFT, f"{flow.draft.error_count} 个字段不合格")
+    if flow.draft.open_rejections:
+        # 排在过期与字段错误之后:驳回的修复路径本身就会让草稿过期
+        # (换图片集版本、改文案),那时该显示的机械下一步是"重新生成草稿";
+        # 机械步骤都走完之后,这个动作稳定地指着"重导并标记解决",
+        # 直到驳回记录被人关掉为止 —— 不会在导出前后来回跳。
+        return action(
+            NextActionCode.RESOLVE_REJECTION,
+            f"平台驳回 {flow.draft.open_rejections} 条未解决;修复后重导并标记解决",
+        )
+    return action(NextActionCode.EXPORT, "草稿校验通过,可以导出")
+
+
+# ---------------------------------------------------------------- 入口
+
+
+def evaluate(flow: ProductFlow) -> FlowResult:
+    """判定一件商品。**列表页与详情页都调这一个函数。**"""
+    material = _evaluate_material(flow.material)
+    material_ready = material.state in (StepState.DONE, StepState.NEEDS_CONFIRM)
+
+    attribute = _evaluate_attribute(
+        flow.attribute, material_ready=material_ready, audience=flow.audience
+    )
+    attribute_ready = attribute.state is StepState.DONE
+
+    image_set = _evaluate_image_set(flow.image_set, upstream_ready=attribute_ready)
+    image_set_ready = image_set.state is StepState.DONE
+
+    copy_step = _evaluate_copy(flow.copy, upstream_ready=attribute_ready)
+    copy_ready = copy_step.state is StepState.DONE
+
+    draft = _evaluate_draft(
+        flow.draft, upstream_ready=image_set_ready and copy_ready
+    )
+
+    by_step = {
+        FlowStep.MATERIAL: material,
+        FlowStep.ATTRIBUTE: attribute,
+        FlowStep.IMAGE_SET: image_set,
+        FlowStep.COPY: copy_step,
+        FlowStep.DRAFT: draft,
+    }
+    ordered = tuple(by_step[s] for s in STEP_ORDER)
+
+    issues = tuple(i for s in ordered for i in s.issues)
+    completion = round(
+        sum(STATE_PROGRESS[s.state] * STEP_WEIGHT for s in ordered)
+    )
+
+    current = next(
+        (s.step for s in ordered if s.state is not StepState.DONE), FlowStep.DRAFT
+    )
+
+    return FlowResult(
+        steps=ordered,
+        issues=issues,
+        completion=int(completion),
+        blocking_count=sum(1 for i in issues if i.level is IssueLevel.BLOCKING),
+        pending_count=sum(1 for i in issues if i.level is IssueLevel.NEEDS_CONFIRM),
+        reminder_count=sum(1 for i in issues if i.level is IssueLevel.REMINDER),
+        current_step=current,
+        next_action=_decide_next(flow, by_step),
+    )
+
+
+def matches_filters(
+    result: FlowResult,
+    *,
+    step: str | None = None,
+    state: str | None = None,
+    only_blocked: bool = False,
+    next_action: str | None = None,
+    audience: str | None = None,
+    flow: ProductFlow | None = None,
+) -> bool:
+    """列表筛选(FE-106)。**判定在这里,不在 SQL 里。**
+
+    这些条件全都由判定结果派生,SQL 里没有对应的列。放在这里的代价是
+    分页要在内存里做,收益是筛选结果和界面上显示的状态**永远一致** ——
+    两处各算一遍的话,「筛了草稿校验失败却看到一件通过的」这类问题
+    会非常难查。首期只做单商品闭环,量级完全撑得住。
+    """
+    if only_blocked and result.blocking_count == 0:
+        return False
+    if next_action and result.next_action.code.value != next_action:
+        return False
+    # 受众筛选(PRD v2)。**它是批量导出闸口的配套动作,不是装饰。**
+    #
+    # 批量导出在批次内出现两个规则包时会拒绝,并让运营"按受众分成两个批次
+    # 分别导出" —— 而在这个参数之前,界面上没有任何手段能按受众把批次拆开。
+    # §9.5 要求"错误必须包含行动";那条错误给了指令,这里补上行动。
+    #
+    # `UNCONFIRMED` 是筛"待确认"那一档。它不是 Audience 的第四个取值
+    # (§3.4 规则 3),只是这个筛选参数的一个哨兵值 —— 所以判定写在这里,
+    # 不写进枚举。
+    #
+    # **`flow` 缺席时抛错,不是静默跳过筛选。** 与 `/model-templates` 那条
+    # 一样的道理:一个筛选条件被静默忽略之后,调用方拿到的是**全量**,
+    # 而他以为那就是筛选结果。那种错误不报错、也不长得像错。
+    if audience:
+        if flow is None:
+            raise ValueError(
+                "按受众筛选需要同时传入 flow(受众事实在它身上);"
+                "静默跳过筛选会让调用方把全量当成筛选结果"
+            )
+        want = audience.strip().upper()
+        if want not in _AUDIENCE_FILTER_VALUES:
+            # 拼错的取值必须报错而不是"匹配不上返回空"。后者在界面上是
+            # 「这个受众一件商品都没有」—— 一句错得很有说服力的话
+            raise ValueError(
+                f"受众筛选取值不合法:{audience!r};"
+                f"可用:{', '.join(sorted(_AUDIENCE_FILTER_VALUES))}"
+            )
+        got = (flow.audience.audience or "").upper()
+        if want == "UNCONFIRMED":
+            if got:
+                return False
+        elif got != want:
+            return False
+    if step:
+        try:
+            want = FlowStep(step)
+        except ValueError:
+            return False
+        if state:
+            return result.step_state(want).value == state
+        return result.current_step is want
+    if state:
+        return any(s.state.value == state for s in result.steps)
+    return True
+
+
+def summarize(results: Iterable[FlowResult]) -> dict[str, Any]:
+    """列表页顶部的计数。运营先看这个决定今天从哪儿下手。
+
+    ## 为什么这里还要按动作码分一份(A9)
+
+    「今日待办」首页的七张卡片问的是「待确认属性有几件、待审核图片有几件」——
+    也就是**按唯一下一步分组的件数**。这份数字有三个可能的产地:
+
+        前端自己数            列表接口只返回当页 20 条,数出来的是"这一页有几件",
+                              而首页要说的是"一共有几件"。且 §3.2.1 已经定过纪律:
+                              前端不推算状态,状态与计数都原样来自接口
+        七次带筛选的请求      每次 `?next_action=X&page_size=1` 读 total。数字是对的,
+                              但每次请求都要对全部商品跑一遍 flow 判定 ——
+                              首页一次打开等于七遍全量扫描
+        这里多分一次组        判定已经算完了,分组只是同一个循环里多记一笔
+
+    所以选第三个。它不新增接口、不新增能力,只是把已经算出来的结论多说一句。
+
+    ## 零值也要在
+
+    十七个动作码全部零填。少一个键,首页的卡片会在计数归零时整张消失,
+    于是七张卡片的位置每次打开都不一样 —— 而运营是靠肌肉记忆点第三张的。
+    """
+    by_action: dict[str, int] = {code.value: 0 for code in NextActionCode}
+    counts: dict[str, Any] = {
+        "total": 0,
+        "blocked": 0,
+        "needs_confirm": 0,
+        "exportable": 0,
+        "done": 0,
+        "by_next_action": by_action,
+    }
+    for r in results:
+        counts["total"] += 1
+        if r.blocking_count:
+            counts["blocked"] += 1
+        if r.pending_count:
+            counts["needs_confirm"] += 1
+        if r.next_action.code is NextActionCode.EXPORT:
+            counts["exportable"] += 1
+        if r.next_action.code is NextActionCode.DONE:
+            counts["done"] += 1
+        # `exportable` / `done` 与这里重复计了同一件事,刻意不合并:
+        # 上面两个键是既有契约,列表页顶部还在用
+        by_action[r.next_action.code.value] += 1
+    return counts
+
+
+def step_states(result: FlowResult) -> dict[str, str]:
+    """五个子状态的扁平映射。列表页一行五列直接用它。"""
+    return {s.step.value: s.state.value for s in result.steps}
+
+
+def issues_of(result: FlowResult, level: IssueLevel) -> Sequence[Issue]:
+    return [i for i in result.issues if i.level is level]

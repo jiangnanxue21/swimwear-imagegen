@@ -1,0 +1,161 @@
+# 门禁执行者(方案 v4.1 Phase 0 / G-0:「没有 CI 之前,清单写多长都没有意义」)。
+#
+# 六个 job:gates / backend / frontend / e2e / images / all-green。
+# 分支保护挂 all-green 一个就够(CLAUDE.md「门禁」一节)。
+#
+# ## 这份文件与两处清单互相钉着
+#
+#   - `backend/tools/verify_delivery.py::check_ci_runs_every_gate` 逐条在这里
+#     找**命令字面量**(不是 step 名字)。加一条门禁 = 改三个地方:
+#     Makefile、本文件、那张表。
+#   - `tests/pure/test_a44_batch5_fixes.py` 要求 backend job 里有 `python -O -c`
+#     冒烟,覆盖 `app.workbench.batch` 与 `app.workflows.dispatch_policy` ——
+#     那三处守卫从 assert 改成 if/raise 之后,只有 -O 下真的执行过才算数。
+#
+# ## backend job 为什么同时要 PostgreSQL 和 Redis
+#
+# A42 实测:有库无 Redis 是 24 条失败,全部红在生成链路(任务静默停在
+# CREATED),没有一条提到 Redis。`task_always_eager` 只跳过投递,Celery 仍要
+# 构造 result backend。所以 pytest 的 job 必须把它需要的东西**全部声明出来**,
+# `verify_delivery.py::check_ci_backs_pytest_with_redis` 盯着这一段别被删。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ---------------------------------------------------------------- 零依赖门禁
+  # 只要有 python3 就能跑的那一批:纯测试 + 交付卫生 + 样例数据 + import 解析。
+  # 放最前面:它们最快、报错最准,失败时后面的 job 不用等。
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 后端纯测试(零依赖)
+        run: cd backend && python3 tools/run_pure_tests.py
+      - name: 交付卫生与门禁接线自检
+        run: cd backend && python3 tools/verify_delivery.py
+      - name: 样例数据自检
+        run: cd backend && python3 tools/verify_sample_data.py
+      - name: app.* import 静态解析
+        run: cd backend && python3 tools/verify_imports.py
+      - name: 变异脚本锚点体检(只解析,不执行)
+        run: cd backend && python3 tools/audit_anchors.py
+      - name: 守卫窗口体检
+        run: cd backend && python3 tools/audit_source_guards.py
+
+  # ---------------------------------------------------------------- 后端
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: imagegen
+          POSTGRES_PASSWORD: imagegen
+          POSTGRES_DB: imagegen
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U imagegen"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://imagegen:imagegen@localhost:5432/imagegen
+      POSTGRES_USER: imagegen
+      POSTGRES_PASSWORD: imagegen
+      POSTGRES_DB: imagegen
+      REDIS_URL: redis://localhost:6379/0
+      SETTINGS_SECRET_KEY: ci-fixed-key-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装后端(含 dev 依赖)
+        run: cd backend && pip install -e ".[dev]"
+      - name: Ruff
+        run: cd backend && ruff check app tests
+      - name: 依赖方向契约(import-linter)
+        run: cd backend && lint-imports
+      - name: 迁移升降级(真库)
+        # 升到 head、降一级再回 head:0030 这类带回填的迁移,downgrade
+        # 写错只有真库跑一遍才会叫。
+        run: |
+          cd backend
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
+      - name: -O 冒烟(守卫在优化模式下真的执行)
+        run: |
+          cd backend
+          python -O -c "import app.workbench.batch, app.workflows.dispatch_policy"
+      - name: pytest(PostgreSQL + Redis)
+        run: cd backend && pytest
+
+  # ---------------------------------------------------------------- 前端
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 依赖可复现安装
+        run: cd frontend && npm ci
+      - name: 类型检查
+        run: cd frontend && npm run typecheck
+      - name: Lint
+        run: cd frontend && npm run lint
+      - name: Vitest
+        run: cd frontend && npm run test
+      - name: 构建
+        run: cd frontend && npm run build
+      - name: 全量语法解析
+        run: cd frontend && npm run syntax-check
+
+  # ---------------------------------------------------------------- Playwright
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: cd frontend && npm ci
+      - run: cd frontend && npx playwright install --with-deps chromium
+      - name: 主流程 e2e
+        run: cd frontend && npm run e2e
+
+  # ---------------------------------------------------------------- 生产镜像
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 后端镜像
+        run: docker build -t swimwear-imagegen-backend:ci backend
+      - name: 前端镜像
+        run: docker build -t swimwear-imagegen-frontend:ci frontend
+
+  # ---------------------------------------------------------------- 汇总
+  # 分支保护只挂这一个。needs 全绿它才绿 —— 新增 job 记得加进 needs,
+  # 否则那个 job 红着也能合。
+  all-green:
+    runs-on: ubuntu-latest
+    needs: [gates, backend, frontend, e2e, images]
+    steps:
+      - run: echo "all gates green"

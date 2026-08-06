@@ -1,0 +1,243 @@
+# 女装泳衣规则包(PRD v2 §18.5)—— category_code: women_swimwear
+#
+# ############################################################################
+# # 由受众前时代的 swimwear.yaml 拆分而来(§0.2:一份 spec 拆成按受众两份)。#
+# # **字段映射与 swimwear.yaml 保持一致**:女装的导出行为不因拆分而变 ——   #
+# # 变的只是键名(受众编进 category_code,§18.1)与新增的规则包三项       #
+# # (audience / enabled_hard_fail_codes / review_checks,§18.2)。         #
+# #                                                                          #
+# # 女装三条结构码与男装三条码互不启用(§14.4):启用清单写在这里,          #
+# # 不写在枚举里 —— 枚举是全集,规则包决定本次用哪些。                      #
+# ############################################################################
+
+audience: WOMEN
+
+# §14.4:女装泳衣启用的硬错误码。男装三条(WAISTBAND/INSEAM/LINER)不在此列。
+# AUDIENCE_MISMATCH 两个受众的包里都有(§18.5 两份示例均含)。
+enabled_hard_fail_codes:
+  - GARMENT_WRONG
+  - GARMENT_PART_MISSING
+  - GARMENT_PART_ADDED
+  - STRAP_CHANGED
+  - NECKLINE_CHANGED
+  - BACK_STYLE_CHANGED
+  - COVERAGE_CHANGED
+  - COLOR_VARIANT_WRONG
+  - PATTERN_DISTORTED
+  - LOGO_OR_TEXT_CHANGED
+  - SKU_IMAGE_MISMATCH
+  - ANATOMY_HARD_ERROR
+  - FACE_HARD_ERROR
+  - IMAGE_CORRUPTED
+  - PRODUCT_SEVERELY_OCCLUDED
+  - AUDIENCE_MISMATCH
+  # PRD v3.1 §6.5 事实一致性清单末两项。三份包一起启用:它们描述的是
+  # **渲染塌了**,与受众无关 —— 男装泳裤一样会被生成成两侧不等宽。
+  - ASYMMETRY_INTRODUCED
+  - FUSION_DEFECT
+
+# §14.1:女装泳衣重点检查区域。审阅页 review_focus 从这里下发,
+# 前端不许自己维护一份受众到检查项的映射(§19)。
+review_checks:
+  - cup_shape
+  - shoulder_strap
+  - neckline
+  - back_style
+  - waistline
+  - leg_cut
+  - crotch
+  - print_consistency
+
+channel: GENERIC
+# 1.1.0 —— 给 price / stock / lead_time_days 补了 type / minimum / decimal_places。
+#
+# 这里必须跟着涨。`spec_version` 进 `listing_drafts.source_fingerprint`,
+# 涨一次所有在旧规则下算过的草稿就重新判一次 —— 而这一版新增的正是校验规则本身。
+# 不涨的话,一份在旧规则下「校验通过、可以导出」的草稿会保持那个状态,
+# 而它的价格可能是三位小数。
+spec_version: "1.1.0"
+
+sites:
+  - MAIN
+
+# 运营在草稿页手填的字段。
+#
+# **价格、库存、备货时效一律在这里,不允许模型生成。**
+# 让大模型给一个会真的向消费者收款的数字,是这条链路里唯一不可挽回的错误。
+manual_fields:
+  - brand
+  - price
+  - currency
+  - stock
+  - lead_time_days
+
+consts:
+  channel_name: "通用模板"
+  category_path: "Swimwear"
+
+# ---------------------------------------------------------------- SPU 级字段
+header_fields:
+  - key: spu_code
+    required: true
+    source: product.spu
+    column_header: "SPU编码"
+
+  - key: product_title
+    required: true
+    source: copy.en.title
+    max_length: 120
+    transforms:
+      - name: truncate
+        max_length: 120
+    column_header: "商品标题"
+    note: "长度上限与 copy_rules.title_max 同源,改一处两边一起变"
+
+  - key: category_path
+    required: true
+    source: const.category_path
+    column_header: "类目"
+
+  - key: brand
+    required: true
+    source: manual.brand
+    max_length: 64
+    column_header: "品牌"
+
+  - key: description
+    required: true
+    source: copy.en.description
+    max_length: 2000
+    column_header: "商品描述"
+
+  - key: selling_points
+    required: false
+    source: copy.en.bullet_points
+    transforms:
+      - name: join
+        separator: " | "
+    column_header: "卖点"
+
+  - key: keywords
+    required: false
+    source: copy.en.keywords
+    transforms:
+      - name: join
+        separator: ","
+    column_header: "关键词"
+
+  - key: main_image
+    required: true
+    source: images.PRODUCT_FRONT
+    column_header: "主图"
+    note: "取的是**已批准图片集**里该角色的图,不是生成任务的产物"
+
+  - key: back_image
+    required: false
+    source: images.PRODUCT_BACK
+    column_header: "背面图"
+
+  - key: detail_image
+    required: false
+    source: images.DETAIL
+    column_header: "细节图"
+
+  - key: garment_type
+    required: true
+    source: attr.garment_type
+    column_header: "品类"
+    allowed_values:
+      - ONE_PIECE
+      - BIKINI_TOP
+      - BIKINI_BOTTOM
+      - BIKINI_SET
+      - TANKINI
+      - COVER_UP
+      - SWIM_SHORTS
+      - DRESS
+      - TOP
+      - OTHER
+
+  - key: neckline_type
+    required: false
+    source: attr.neckline_type
+    column_header: "领型"
+
+  - key: back_style
+    required: false
+    source: attr.back_style
+    column_header: "背部款式"
+
+  - key: strap_type
+    required: false
+    source: attr.strap_type
+    column_header: "肩带"
+
+  - key: pattern_type
+    required: false
+    source: attr.pattern_type
+    column_header: "图案"
+
+  - key: material
+    required: true
+    source: attr.material
+    max_length: 128
+    column_header: "材质"
+    note: "材质不参与图片识别(注册表 visual=False),只能来自商品库或人工"
+
+# ---------------------------------------------------------------- SKU 行字段
+row_fields:
+  - key: sku_code
+    required: true
+    source: variant.sku
+    column_header: "SKU编码"
+
+  - key: color
+    required: true
+    source: variant.primary_color
+    max_length: 64
+    column_header: "颜色"
+
+  - key: size
+    required: true
+    source: variant.size
+    max_length: 32
+    column_header: "尺码"
+
+  - key: price
+    required: true
+    source: manual.price
+    type: number
+    minimum: 0
+    decimal_places: 2
+    column_header: "价格"
+    note: >-
+      **不允许模型生成。**
+      三条数值约束是 required 之后的第二道闸:required 只回答「填了没有」,
+      而一个手滑成 "3.990" 或 "-39.90" 的价格是填了的。这一列会真的向
+      消费者收款,填错的代价不对称,所以宁可在导出前拦下来。
+
+  - key: currency
+    required: true
+    source: manual.currency
+    max_length: 8
+    column_header: "币种"
+
+  - key: stock
+    required: true
+    source: manual.stock
+    type: integer
+    minimum: 0
+    column_header: "库存"
+    note: "整数、非负。负库存平台侧的表现通常是整份驳回,且只说「格式错误」"
+
+  - key: lead_time_days
+    required: false
+    source: manual.lead_time_days
+    type: integer
+    minimum: 0
+    column_header: "备货天数"
+
+  - key: variant_image
+    required: false
+    source: images.PRODUCT_FRONT
+    column_header: "变体图"
