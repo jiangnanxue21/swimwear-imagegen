@@ -43,7 +43,8 @@ from tests.conftest import requires_db
 
 pytestmark = requires_db
 
-PRODUCT = {"spu": "SPU-REG", "name": "回归测试泳衣"}
+SPU_CODE = "SPU-REG"
+PRODUCT = {"spu": SPU_CODE, "name": "回归测试泳衣"}
 
 
 def _image(w=800, h=1200) -> bytes:
@@ -52,8 +53,61 @@ def _image(w=800, h=1200) -> bytes:
     return buf.getvalue()
 
 
+def _ensure_spu(client) -> None:
+    """先建 SPU 档,再往下挂 SKU。
+
+    ## 为什么这一步在这批用例写好之后才需要
+
+    A45-batch14-26 关掉了 §4.2 那条 NULL 兼容缝:`product_service.create_product`
+    现在**解析** `spu` 字符串 —— 查 `spus` 表,查不到就 422
+    (「SPU xx 不存在:请先用 POST /spus 建档,再往下挂 SKU」)。
+    在那之前这个函数从不写 `spu_id`,于是走 `POST /api/products` 建出来的商品
+    不属于任何 SPU、`audience` 可空,绕过了「受众必填」。
+
+    这批 fixture 写在那次契约变更之前,11 条(本文件 + 12-5)全挂在同一处,
+    统一返回 422。**这是老 fixture 没跟上新契约,不是基础设施问题** ——
+    同批次里不碰 `/api/products` 的 `test_batch_lease_concurrency_db.py` 是绿的。
+
+    ## 为什么每条用例都要建,不能提到模块级
+
+    `conftest.session` 跑在 SAVEPOINT 上(A42),teardown 回滚整个外层事务,
+    用例之间不留数据。模块级建一次的话,第二条用例开始就又是 422 了。
+
+    重复调用返回 409(`create_spu` 的 `_code_taken` 快速路径),那也是
+    "已经有了",一并放行 —— 同一条用例里建两个商品时会走到这条路。
+
+    ## 为什么是 ONE_SIZE + 单颜色
+
+    建档会按尺码模板展开 SKU。`ONE_SIZE` × 一个颜色只展开一行
+    (`SPU-REG-REG-OS`),噪音最小。它和用例自建的 `SKU-REG01-A` 那些不撞:
+    SPU 段允许横线、颜色与尺码段不允许(`sku_matrix.normalize_code`),
+    所以从右边数两段切得开,两套编码不会拼出同一个 SKU。
+    换成 ALPHA_3 只是让每条用例凭空多三行商品。
+    """
+    resp = client.post(
+        "/api/spus",
+        json={
+            "spu_code": SPU_CODE,
+            "internal_name": "回归测试 SPU",
+            # 受众在 SPU 层必填(§4.2),而且 `create_product` 会把它抄进
+            # 商品行 —— 商品那边的 `garment_type` 默认 OTHER,对三个受众恒许,
+            # 所以这里选哪个都不会撞上 C-03 那道受众 × 品类闸
+            "audience": "WOMEN",
+            "color_variants": [{"variant_code": "REG", "working_name": "回归色"}],
+            "size_template": "ONE_SIZE",
+        },
+    )
+    assert resp.status_code in (201, 409), resp.text
+
+
 def _product_with_asset(client, sku: str) -> str:
-    pid = client.post("/api/products", json={**PRODUCT, "sku": sku}).json()["id"]
+    _ensure_spu(client)
+    resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
+    # 状态码先断言再取 id:原来直接 `.json()["id"]`,建品失败时抛的是
+    # KeyError('id'),既不点名是哪一步、也看不到后端给的那句话。
+    # 这批用例这次全红了一轮,报文就在响应体里,而堆栈里一个字都没有
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
     client.post(
         f"/api/products/{pid}/assets",
         files={"file": ("front.jpg", _image(), "image/jpeg")},
@@ -347,9 +401,13 @@ def test_reaper_still_sends_a_missing_id_task_through_reconciliation(
     这一批不该存在（成因是落 ID 的那次 commit 崩了），但**它出现的时候**
     不能被误判成"可以安全续取"——那条任务没有 ID 可续。
     """
+    # 这条用例不用 `_product_with_asset`(它不需要素材),但建档这一步
+    # 是一样的 —— 新契约要求 SPU 先存在,漏掉这里就只有这一条还是 422
+    _ensure_spu(client)
     pid_resp = client.post(
         "/api/products", json={**PRODUCT, "sku": "SKU-REG02-BLIND"}
     )
+    assert pid_resp.status_code == 201, pid_resp.text
     pid = pid_resp.json()["id"]
     from app.models.product import Product
 

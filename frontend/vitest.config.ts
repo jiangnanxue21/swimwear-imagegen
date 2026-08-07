@@ -35,6 +35,23 @@ import path from 'node:path'
 
 export default defineConfig({
   plugins: [react()],
+  /**
+   * 缓存目录搬出 `node_modules/`。
+   *
+   * Vite 默认把它放在 `node_modules/.vite`,而 `node_modules/` 的属主取决于
+   * **是谁装的依赖**:在容器里用 root 跑过一次 `npm ci`、再换普通用户跑测试,
+   * 这个目录就归 root 了,`mkdir` 会被 `EACCES` 挡下 ——
+   * 表现是**一条用例都起不来**,而不是某几条红。
+   *
+   * 这不是仓库的代码缺陷,是机器前提;但仓库这一侧能把它变成不可能发生:
+   * `.vite-cache/` 与 `node_modules/` 同级、由跑测试的那个用户创建,
+   * 不再继承别人装依赖时留下的属主。
+   *
+   * **空结果不能读作通过。** `passWithNoTests: false`(见下)挡的是
+   * "一条都没匹配上还绿着";这一行挡的是"一条都没起来"。两件事都会
+   * 产出一个空的用例集,而只有前者会被 include 规则本身发现。
+   */
+  cacheDir: '.vite-cache',
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },
   },

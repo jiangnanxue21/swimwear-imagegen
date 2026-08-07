@@ -12,8 +12,9 @@ from tests.conftest import requires_db
 
 pytestmark = requires_db
 
+SPU_CODE = "SPU-GEN"
 PRODUCT = {
-    "spu": "SPU-GEN",
+    "spu": SPU_CODE,
     "sku": "SKU-GEN-1",
     "name": "生成测试泳衣",
     "garment_type": "BIKINI_SET",
@@ -26,8 +27,46 @@ def _image(w=800, h=1200) -> bytes:
     return buf.getvalue()
 
 
+
+
+def _ensure_spu(client) -> None:
+    """先建 SPU 档,再往下挂 SKU。**完整理由见 12-4 那份同名 helper。**
+
+    一句话版本:A45-batch14-26 起 `create_product` 会解析 `spu` 字符串,
+    查不到就 422(「SPU xx 不存在:请先用 POST /spus 建档」)。
+    batch15 修了 12-4 / 12-5 两份 fixture,但同一笔账在本文件、
+    `test_api_products.py`、`test_api_reviews.py` 里原样躺着 —— 那次只跑了
+    12-4 / 12-5,**11 这个数字是样本量,不是问题的边界**。本文件占 16 条。
+
+    每条用例都要建:`conftest.session` 跑在 SAVEPOINT 上,teardown 回滚外层
+    事务,用例之间不留数据。重复调用返回 409(`create_spu` 的 `_code_taken`
+    快速路径),那也是"已经有了",一并放行。
+
+    受众选 `WOMEN`:`create_product` 会把 SPU 的受众抄进商品行,而 `PRODUCT`
+    的品类是 `BIKINI_SET` —— 它只在 WOMEN 的词表里(`core/garments`),
+    选 MEN/UNISEX 会换一个 422 出来(C-03 受众 × 品类闸),而且报文里
+    不会提 SPU,查起来更绕。
+    """
+    resp = client.post(
+        "/api/spus",
+        json={
+            "spu_code": SPU_CODE,
+            "internal_name": "生成测试 SPU",
+            "audience": "WOMEN",
+            "color_variants": [{"variant_code": "GEN", "working_name": "回归色"}],
+            "size_template": "ONE_SIZE",
+        },
+    )
+    assert resp.status_code in (201, 409), resp.text
+
+
 def _product_with_asset(client, sku="SKU-GEN-1") -> str:
-    pid = client.post("/api/products", json={**PRODUCT, "sku": sku}).json()["id"]
+    _ensure_spu(client)
+    resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
+    # 先断状态码再取 id:原来 `.json()["id"]` 在建品失败时抛 KeyError('id'),
+    # 后端那句「请先用 POST /spus 建档」一个字都到不了报告里
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
     client.post(
         f"/api/products/{pid}/assets",
         files={"file": ("front.jpg", _image(), "image/jpeg")},
@@ -87,7 +126,12 @@ def test_explicit_idempotency_key_is_honoured(client):
 
 
 def test_task_without_assets_is_rejected(client):
-    pid = client.post("/api/products", json={**PRODUCT, "sku": "SKU-NOASSET"}).json()["id"]
+    # 这条不走 `_product_with_asset`(它要的正是"没有素材"),但建档这一步
+    # 一样要先有 SPU —— 漏掉这里就只剩这一条还是 422
+    _ensure_spu(client)
+    resp = client.post("/api/products", json={**PRODUCT, "sku": "SKU-NOASSET"})
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
     r = _create_task(client, pid)
     assert r.status_code == 422
     assert "素材" in r.json()["error"]["message"]

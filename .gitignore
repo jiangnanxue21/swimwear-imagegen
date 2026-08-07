@@ -13,6 +13,10 @@ storage/
 # 依赖与构建产物
 node_modules/
 dist/
+# Vite/Vitest 缓存。默认在 node_modules/.vite 之下(被上面那行连带忽略),
+# vitest.config.ts 把它搬了出来(理由在那边:root 装的依赖会让默认位置
+# 对跑测试的用户变成只读),搬出来之后就要在这里单独记一行
+.vite-cache/
 *.tsbuildinfo
 coverage/
 __pycache__/

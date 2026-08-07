@@ -143,7 +143,39 @@ export function oneOfParam<T extends number>(fallback: T, values: readonly T[]):
   }
 }
 
-type Spec = Record<string, Codec<never>>
+/**
+ * `Spec` 的上界。**不能写成 `Codec<never>`。**
+ *
+ * `Codec<T>` 对 `T` 是**不变**的:`T` 在 `read` 的返回位置(协变)和 `write` 的
+ * 参数位置(逆变)各出现一次。所以 `Codec<never>` 既不是任何 `Codec<T>` 的
+ * 父类型、也装不下它们 —— 它只装得下 `Codec<never>` 自己,而没有人会写那个。
+ * 结果是**每一个真实调用点都违约**:七个筛选项的页面报七条 `TS2322`,
+ * 报文长这样 `Type 'Codec<string>' is not assignable to type 'Codec<never>'`。
+ *
+ * 修法是把两个方向分开取各自的极值,而不是让一个类型参数同时当两头:
+ *
+ *     read  的返回是协变位置 -> 上界取 `unknown`(什么都装得下)
+ *     write 的参数是逆变位置 -> 上界取 `never` (什么都装得下)
+ *
+ * `never` 在这里是**逆变方向的顶**,不是"空类型"那个直觉意思 ——
+ * 逆变位置的包容关系是反的,参数越窄的函数越通用。原来那一版的错误正是
+ * 把这个 `never` 顺手用到了协变的 `read` 上。
+ *
+ * 这么写之后 `Codec<T>` 对任意 `T` 都满足 `AnyCodec`,而 `Values<S>` 里那个
+ * `infer T` 仍然从**实参的精确类型**上取回 `T`(约束只管准入、不参与推断),
+ * 所以 `filters.values.page` 照旧是 `number`,不是 `unknown`。
+ * 反面守卫:把 `values.search` 赋给 `number` 必须仍然报错 —— 如果不报,
+ * 说明这次"修好"是把类型塌成了 `any`,那等于把门禁拆了。
+ *
+ * `AnyCodec` **不导出**:它的 `write` 只收 `never`,是给约束用的形状,
+ * 不是给人用的。导出之后早晚有人拿它当 `Codec` 的别名去标注变量。
+ */
+interface AnyCodec {
+  read: (raw: string | null) => unknown
+  write: (value: never) => string | null
+}
+
+type Spec = Record<string, AnyCodec>
 type Values<S> = { [K in keyof S]: S[K] extends Codec<infer T> ? T : never }
 
 export interface UrlFilters<S> {

@@ -2,6 +2,23 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+
+# Vitest 把缓存从 `node_modules/.vite` 搬到了这里(A45-batch15,理由在
+# vitest.config.ts)。上面 `node_modules/` 那行原本连带把它排掉了,搬出来
+# 之后就要单独记一行 —— 否则 `COPY . .` 会把一份本机缓存带进构建上下文
+.vite-cache/
+
+# 用例不进生产镜像的构建上下文。
+#
+# `npm run build` 是 `tsc -b && vite build`,而 `tsconfig.json` 的 include 是
+# `["src", "tests"]` —— 用例进了上下文,它们的类型错误就会**让镜像构建失败**,
+# 而不只是让 `npm run typecheck` 红。这两件事该分开:
+# 类型门禁在 CI 的 typecheck 步骤上,镜像构建只该因为**产物**的问题而失败。
+#
+# 排掉之后 tsconfig 里那个 `tests` 匹配到空目录,不报错(TS 只在 include
+# 整体匹配为空时才报 TS18003,这里 `src` 还在)。
+tests/
+
 .env
 .env.*
 !.env.example

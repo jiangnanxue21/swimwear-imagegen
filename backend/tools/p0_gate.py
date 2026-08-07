@@ -167,7 +167,17 @@ def _db_cases_exist() -> tuple[bool, str]:
 
 
 def _single_head() -> tuple[bool, str]:
-    """迁移链单一 head,并报出 head 编号(P0 第二条要跑到 0034)。"""
+    """迁移链单一 head,并报出 head 编号。
+
+    **这里刻意不写 head 的编号。** 原文是「P0 第二条要跑到 0034」,而文件树
+    早已到 0045 —— 它过期不会有任何东西报错,正是本文件头引用的那条规矩
+    (STATUS 第五节:写死的数字会在下一次增删时过期,而过期了没有东西报错)
+    在自己身上失效了一次。`AC-VERIFICATION.md` §P0-2 已把它记成「过期叙述」。
+
+    判定本来就是**动态算的**(下面从迁移文件里推 head),从来不比对某个常量,
+    所以修法是删掉那个数字而不是把它改成 0045 —— 改成 0045 只是把下一次
+    过期推迟到下一个迁移。
+    """
     import re
 
     versions = BACKEND / "migrations" / "versions"

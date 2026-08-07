@@ -236,3 +236,7 @@ repair-variant-owners: ## 列出/归属裸 VARIANT owner(B-07,默认干跑)
 clean:
 	docker compose down -v
 	rm -rf backend/storage backend/.pytest_cache
+	# 前端缓存。A45-batch15 之前它在 node_modules/.vite 之下,`rm -rf node_modules`
+	# 会连带删掉;搬到 .vite-cache/ 之后就得单独列一行,否则 `make clean` 之后
+	# 还留着一份陈缓存 —— 而 "clean 过了还是这个现象" 是最难查的那类问题
+	rm -rf frontend/.vite-cache

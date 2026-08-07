@@ -18,8 +18,9 @@ from tests.conftest import requires_db
 
 pytestmark = requires_db
 
+SPU_CODE = "SPU-REV"
 PRODUCT = {
-    "spu": "SPU-REV",
+    "spu": SPU_CODE,
     "sku": "SKU-REV-1",
     "name": "审核测试泳衣",
     "garment_type": "BIKINI_SET",
@@ -32,8 +33,38 @@ def _image(w=800, h=1200) -> bytes:
     return buf.getvalue()
 
 
+def _ensure_spu(client) -> None:
+    """先建 SPU 档,再往下挂 SKU。**完整理由见 12-4 那份同名 helper。**
+
+    一句话版本:A45-batch14-26 起 `create_product` 会解析 `spu` 字符串,
+    查不到就 422。batch15 修了 12-4 / 12-5,本文件(15 条)、
+    `test_api_generation.py`(16 条)、`test_api_products.py`(8 条)
+    是同一笔账的剩余部分。
+
+    每条用例都要建(SAVEPOINT 回滚);重复调用返回 409,一并放行。
+    受众选 `WOMEN` —— `PRODUCT` 的品类 `BIKINI_SET` 只在 WOMEN 词表里,
+    换个受众会撞上 C-03 那道闸,而那条报文不提 SPU,查起来更绕。
+    """
+    resp = client.post(
+        "/api/spus",
+        json={
+            "spu_code": SPU_CODE,
+            "internal_name": "审核测试 SPU",
+            "audience": "WOMEN",
+            "color_variants": [{"variant_code": "REV", "working_name": "回归色"}],
+            "size_template": "ONE_SIZE",
+        },
+    )
+    assert resp.status_code in (201, 409), resp.text
+
+
 def _product_with_asset(client, sku: str) -> str:
-    pid = client.post("/api/products", json={**PRODUCT, "sku": sku}).json()["id"]
+    _ensure_spu(client)
+    resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
+    # 先断状态码再取 id:原来 `.json()["id"]` 在建品失败时抛 KeyError('id'),
+    # 后端那句「请先用 POST /spus 建档」一个字都到不了报告里
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
     client.post(
         f"/api/products/{pid}/assets",
         files={"file": ("front.jpg", _image(), "image/jpeg")},

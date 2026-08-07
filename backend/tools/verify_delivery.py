@@ -210,11 +210,25 @@ def _ci_text() -> str:
 
 
 def check_ci_runs_every_gate() -> None:
-    """CI 必须真的跑全那 12 条，缺一条就是「清单写在文档里」。
+    """CI 必须真的跑全那 13 条，缺一条就是「清单写在文档里」。
 
-    方案 4.1 节 G-1 列了 11 项，A45-batch14-14 加了第 12 项。
+    方案 4.1 节 G-1 列了 11 项，A45-batch14-14 加了第 12 项，
+    A45-batch14-24 的列写入点审计是第 13 项。
     这里逐条在 CI 配置里找它的执行痕迹。
     找的是命令而不是 step 名字：step 名字可以随便写，命令不能。
+
+    ## 第 13 条为什么补在这里(A45-batch15)
+
+    `CHECKS` 上那个标签在 14-24 就写成了「13 条」,而这个字典一直是 12 条 ——
+    标签、守卫(`test_the_audit_is_registered_as_a_delivery_gate`)、变异锚点
+    (`mutate_batch14_24.MUTATIONS[6]`)三处都按「审计已挂 CI」写好了,
+    **唯独 CI 步骤本身和这一条 required 没落**。表现是纯测试 1 红 + 锚点
+    1 条对不上,而 `verify_delivery` 自己是绿的 —— 因为它数的是这个字典,
+    而这个字典没有那一条。
+
+    注意它与 `check_every_column_can_say_who_writes_it` 不重复:那一条**执行**
+    审计(判退出码),这一条判**CI 里有没有独立步骤**。只有前者时,审计的
+    失败会混在 `verify_delivery` 的一堆输出里,CI 上看不出是哪道门禁红的。
     """
     ci = _ci_text()
     required = {
@@ -228,6 +242,7 @@ def check_ci_runs_every_gate() -> None:
         "npm run test": "Vitest",
         "npm run build": "前端构建",
         "audit_source_guards.py": "守卫窗口体检（反向断言不许吃切窄的源码）",
+        "audit_column_writers.py": "列写入点审计（每一列都答得出谁写它）",
         "verify_delivery.py": "交付卫生（本文件）",
         "docker build": "生产镜像构建",
     }

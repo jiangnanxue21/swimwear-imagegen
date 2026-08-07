@@ -66,7 +66,6 @@ from app.extractors.schema import (
     enum_hint_for,
     normalize_value,
 )
-from app.media import evidence_rules
 from app.media import service as media_service
 from app.models.attribute import (
     AttributeCalibration,

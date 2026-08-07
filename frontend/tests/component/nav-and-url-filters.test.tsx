@@ -104,7 +104,31 @@ function wrapper(initial: string) {
   )
 }
 
-/** 把 hook 和「地址栏现在长什么样」一起读出来 —— 后者才是这批用例真正的被测对象。 */
+/**
+ * 把 hook 和「地址栏现在长什么样」一起读出来 —— 后者才是这批用例真正的被测对象。
+ *
+ * ## 下面每一处 `enumParam` 都写了显式类型实参,这不是啰嗦
+ *
+ * `enumParam<T extends string>(allowed: Iterable<string>)` 的 `T` **在参数表里
+ * 没有出现**:`allowed` 收的是 `Iterable<string>`,不是 `readonly T[]`。
+ * 于是不给实参、也不给 fallback 时 `T` 无处可推,推成 `never`,
+ * 整个 codec 塌成 `Codec<undefined>` —— `values.step` 的类型是 `undefined`,
+ * 而 `patch({ step: 'EXPORT' })` 报 `TS2322: Type 'string' is not assignable
+ * to type 'undefined'`。
+ *
+ * 这和 A45-batch15 修掉的那批 `Codec<never>` **是两回事**,只是报文都叫 TS2322:
+ * 那一批是 `Spec` 的上界写错(每个调用点都违约,页面侧七条),
+ * 这一批是**类型参数无处可推**(只有裸调用的地方中招)。
+ * `src/pages/*` 全都写了实参(`enumParam<FlowStep>(...)`),所以只有这份用例文件红。
+ *
+ * **修法不是去改 `enumParam` 的签名。** 把 `allowed` 改成 `readonly T[]` 确实能推,
+ * 但页面传进去的是 `Object.keys(NEXT_ACTION_LABEL)`,类型是 `string[]`,
+ * 对 `readonly NextActionCode[]` 不成立 —— 那会把四个页面一起打红。
+ *
+ * 代价写明:白名单和类型实参是**两份**同样的信息,改一处忘一处不会报错。
+ * 这里认这个代价,因为反过来(签名从数组推)要求所有调用点都持有字面量数组,
+ * 而受众、流程步骤那几个白名单**本来就是从 label 字典的键上取的**。
+ */
 function mount<S extends Parameters<typeof useUrlFilters>[0]>(spec: S, initial: string) {
   return renderHook(
     () => {
@@ -118,7 +142,7 @@ function mount<S extends Parameters<typeof useUrlFilters>[0]>(spec: S, initial: 
 describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
   it('URL 上的合法参数直接就是当前筛选值', () => {
     const { result } = mount(
-      { next_action: enumParam(['CONFIRM_ATTRIBUTE', 'EXPORT']) },
+      { next_action: enumParam<'CONFIRM_ATTRIBUTE' | 'EXPORT'>(['CONFIRM_ATTRIBUTE', 'EXPORT']) },
       '/workbench?next_action=CONFIRM_ATTRIBUTE',
     )
 
@@ -129,7 +153,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
     // 顺手删掉非法参数 = 在渲染期发起一次导航，和上一版 clear() 是同一个错误：
     // 地址栏和用户抢方向盘，而且把一次手敲变成后退栈里的一格
     const { result } = mount(
-      { next_action: enumParam(['CONFIRM_ATTRIBUTE']) },
+      { next_action: enumParam<'CONFIRM_ATTRIBUTE'>(['CONFIRM_ATTRIBUTE']) },
       '/workbench?next_action=TELEPORT',
     )
 
@@ -139,7 +163,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
 
   it('页面接手之后参数**还在**——这正是上一版擦掉的那一条', () => {
     const { result } = mount(
-      { next_action: enumParam(['CONFIRM_ATTRIBUTE']) },
+      { next_action: enumParam<'CONFIRM_ATTRIBUTE'>(['CONFIRM_ATTRIBUTE']) },
       '/workbench?next_action=CONFIRM_ATTRIBUTE',
     )
 
@@ -193,7 +217,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
 
   it('patch 一次写多项 —— 换排序 + 回第一页只进一格后退栈', () => {
     const { result } = mount(
-      { sort: enumParam(['sku', 'completion']), page: intParam(1, { min: 1 }) },
+      { sort: enumParam<'sku' | 'completion'>(['sku', 'completion']), page: intParam(1, { min: 1 }) },
       '/workbench?page=5',
     )
 
@@ -204,7 +228,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
 
   it('reset 只删自己声明过的参数，URL 上别人的参数留着', () => {
     const { result } = mount(
-      { step: enumParam(['GENERATE']) },
+      { step: enumParam<'GENERATE'>(['GENERATE']) },
       '/workbench?step=GENERATE&tab=material',
     )
 
@@ -225,7 +249,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
   })
 
   it('signature 跟着筛选变 —— 清勾选那条 effect 靠它', () => {
-    const { result } = mount({ step: enumParam(['GENERATE', 'EXPORT']) }, '/workbench')
+    const { result } = mount({ step: enumParam<'GENERATE' | 'EXPORT'>(['GENERATE', 'EXPORT']) }, '/workbench')
     const before = result.current.filters.signature
 
     act(() => result.current.filters.patch({ step: 'EXPORT' }))
@@ -236,7 +260,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
   it('后退能回到上一组筛选条件（§8.2「后退保留」）', () => {
     // 这一条是整批的落点：patch 走 push 而不是 replace，
     // 所以浏览器后退回到的是上一组条件，而不是直接离开这一页
-    const { result } = mount({ step: enumParam(['GENERATE', 'EXPORT']) }, '/workbench')
+    const { result } = mount({ step: enumParam<'GENERATE' | 'EXPORT'>(['GENERATE', 'EXPORT']) }, '/workbench')
 
     act(() => result.current.filters.patch({ step: 'GENERATE' }))
     act(() => result.current.filters.patch({ step: 'EXPORT' }))

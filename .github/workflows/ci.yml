@@ -49,6 +49,8 @@ jobs:
         run: cd backend && python3 tools/audit_anchors.py
       - name: 守卫窗口体检
         run: cd backend && python3 tools/audit_source_guards.py
+      - name: 列写入点审计
+        run: cd backend && python3 tools/audit_column_writers.py
 
   # ---------------------------------------------------------------- 后端
   backend:

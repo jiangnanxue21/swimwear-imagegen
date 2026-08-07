@@ -41,7 +41,8 @@ from tests.conftest import requires_db
 
 pytestmark = requires_db
 
-PRODUCT = {"spu": "SPU-B125", "name": "batch12-5 回归泳衣"}
+SPU_CODE = "SPU-B125"
+PRODUCT = {"spu": SPU_CODE, "name": "batch12-5 回归泳衣"}
 
 
 def _image(w=800, h=1200) -> bytes:
@@ -50,8 +51,43 @@ def _image(w=800, h=1200) -> bytes:
     return buf.getvalue()
 
 
+def _ensure_spu(client) -> None:
+    """先建 SPU 档,再往下挂 SKU。理由与 12-4 那份逐字相同。
+
+    A45-batch14-26 起 `create_product` 会解析 `spu` 字符串:查 `spus` 表,
+    查不到就 422(「SPU xx 不存在:请先用 POST /spus 建档」)。这批 fixture
+    写在那次契约变更之前,于是 11 条(本文件 + 12-4)统一挂在这一处。
+
+    **这两份 helper 是刻意复制的,不抽到 conftest。** 两个文件用的是不同的
+    SPU 编码(`SPU-B125` / `SPU-REG`),抽公共 helper 就要多一个参数,
+    而它唯一的作用是让两个不相干的批次共享一段夹具 —— 那正是将来改其中一批
+    会连带改动另一批的路径。这批用例的价值在于彼此独立地钉住同一条链路。
+
+    每条用例都要建(`conftest.session` 跑在 SAVEPOINT 上,结束回滚);
+    同一条用例内重复调用返回 409,那也是"已经有了",一并放行。
+    `ONE_SIZE` + 单颜色只展开一行噪音 SKU(`SPU-B125-B125-OS`),
+    与用例自建的编码切得开(SPU 段允许横线,颜色与尺码段不允许)。
+    """
+    resp = client.post(
+        "/api/spus",
+        json={
+            "spu_code": SPU_CODE,
+            "internal_name": "batch12-5 回归 SPU",
+            "audience": "WOMEN",
+            "color_variants": [{"variant_code": "B125", "working_name": "回归色"}],
+            "size_template": "ONE_SIZE",
+        },
+    )
+    assert resp.status_code in (201, 409), resp.text
+
+
 def _product_with_asset(client, sku: str) -> str:
-    pid = client.post("/api/products", json={**PRODUCT, "sku": sku}).json()["id"]
+    _ensure_spu(client)
+    resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
+    # 先断状态码再取 id:原来 `.json()["id"]` 在建品失败时抛 KeyError('id'),
+    # 后端那句「请先用 POST /spus 建档」一个字都到不了报告里
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
     client.post(
         f"/api/products/{pid}/assets",
         files={"file": ("front.jpg", _image(), "image/jpeg")},
