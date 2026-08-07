@@ -1886,7 +1886,31 @@
 - [ ] **主密钥轮换**(人工动作)。早期交付包带出过 `.secrets/.settings.key`,
       应视为已泄露。步骤见 `docs/DECISIONS.md` §3.1。
 
-## 五、怎么验证
+## 五、本机真环境验收快照(2026-08-07)
+
+PG `39.97.61.13:5432` + Redis `39.97.61.13:6379`,本机直连,**不起 Docker**。
+迁移文件树 head = `0045`;真库 `imagegen` / `imagegen_test` 起始 head = `0038`,
+本次把 `imagegen_test` 升到 `0045` 后跑 P0。`imagegen` 库未动。
+
+逐条数字、失败响应原文、复现命令见 **`docs/AC-VERIFICATION.md`**。
+本节给一张总结表,数字不写死(STATUS 第五节那条规矩);命令拿不准以
+`AC-VERIFICATION.md` §7 为准。
+
+| P0 项 | 状态 | 一句话根因 |
+|---|---|---|
+| P0-1 真库 pytest 全量 | ❌ | `POST /api/products` 接口契约改了(SPU 外键化),12-4/12-5 fixture 仍走老路径,11/13 在 `_product_with_asset` 上 422 |
+| P0-2 Alembic 升降级 | ✅ | `imagegen_test` 上 0038→0045→base→0045 全链通过;`imagegen` 未动 |
+| P0-3 前端四条 + docker | ⚠️ | typecheck 6 条 TS2322(`nav-and-url-filters.test.tsx`);Vitest 因 `node_modules/.vite` root-owned EACCES;docker 两条未验证 |
+| P0-4 R-04/R-05 | ✅ | `run_pure_tests.py batch12_7` 16/16 + `verify_imports.py` 419 文件 |
+| P0-5 BILLED_RESULT_UNKNOWN 演练 | ✅ | `12-7_billed_unknown` + `batch_receipt_lifecycle` 18/18 |
+| P0-6 租约 fencing 双 session | ⚠️ | `batch_lease_concurrency` 1 条真库跑绿;`12-5` 5 条同 P0-1 fixture 问题 |
+
+AC-01~AC-22:22 条**全部未验证**(原文多数沿用 v3.0,仓库内不可得;AC-21/22
+有原文但需真实样照 + 真实抽取器调度)。**§14.3 的人工测试准入仍未满足**。
+
+---
+
+## 六、怎么验证
 
 ```bash
 make test-pure     # 纯逻辑测试,只要有 python3 就能跑,不需要任何三方依赖
@@ -1907,7 +1931,7 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 
 ---
 
-## 六、文档地图
+## 七、文档地图
 
 一共 13 份。**每份都写明「什么时候看」** —— 如果一份文档回答不了「谁会在什么情况下
 打开它」,它就不该留下。
@@ -1933,6 +1957,7 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 | `docs/REVIEW.md` | 要知道下一步该做什么 —— 施工方案(a20 v4.1),第 12 章任务表已标完成状态 |
 | `docs/REVIEW-A28-TRACKING.md` | 要回答「a28 那份检视报告的 20 条阻断项现在还剩几条」。**下次复核只需核 4 条**,其余每条都绑了一条会红的测试 |
 | `CLAUDE.md`(根 / backend / frontend) | 用 Claude Code 开工前。写的是约定与踩过的坑,不是目录说明 |
+| `docs/AC-VERIFICATION.md` | 要回答「AC-01~AC-22 在本机真环境里到底哪几条跑过、哪几条没」 —— P0 6 项逐项结论、22 条 AC 状态表、复现命令合集都在这里 |
 
 另有 `docs/vendor/fashn-skill/` 是 FASHN 官方文档的存档,不是本项目文档,
 不计入上表也不要改动 —— `docs/PROVIDER-FASHN.md` 的实现依据全部指向它。
