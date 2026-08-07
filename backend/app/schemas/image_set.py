@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.enums import MediaRole
+from app.core.enums import ImageAngle, MediaRole
 from app.core.field_limits import MAX_IMAGE_SET_ITEMS
 
 
@@ -28,6 +28,19 @@ class ImageItemIn(BaseModel):
     enabled: bool = True
     #: listing_image_items.derivative_purpose String(32)
     derivative_purpose: str | None = Field(default=None, max_length=32)
+    #: §6.5「通用图默认不混入颜色附图」。**默认 false,和列的默认一致。**
+    #:
+    #: 入参层给它默认值而不是让它可缺省为 None,是因为这一列在库里
+    #: `nullable=False`:少传一个字段与显式传 false 必须是同一件事,
+    #: 否则「没勾」和「勾了又取消」会在两条路径上走出两个结果。
+    shared_opt_in: bool = False
+    #: 这一项覆盖的拍摄角度。候选入集时由调用方带上生成任务的方案角度,
+    #: 人工只处理例外(§6.5 UI 落点那一句)。
+    #:
+    #: 用枚举而不是 `str`:角度验收拿它和 `GenerationPlan.angles_json` 的键
+    #: 比对,一个拼错的 `"Front"` 会静默地覆盖不到任何角度,而门禁报出来的
+    #: 是「缺正面图」—— 运营补图补不好的那种。枚举让它在 422 就停住
+    angle: ImageAngle | None = None
 
 
 class ImageSetItemsIn(BaseModel):
@@ -98,6 +111,10 @@ class ImageSetItemOut(BaseModel):
     is_primary: bool = False
     enabled: bool = True
     derivative_purpose: str | None = None
+    #: §6.5 的两列。读得回来才编辑得了 —— 与本类开头那段说的是同一件事:
+    #: 保存完读不回来的字段,在界面上等于不存在
+    shared_opt_in: bool = False
+    angle: str | None = None
 
 
 class ImageSetOut(BaseModel):

@@ -29,6 +29,7 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -36,6 +37,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -81,25 +84,97 @@ class MediaConsent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class MediaAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """一条素材。
 
-    去重键是 ``(product_id, sha256)``:同一商品同一张图只有一条记录。
-    「供应商重复推同一张图」因此不会产生第二条素材,也不会重复触发识别。
+    ## 去重键(§4.8,A45-batch14-26 / 迁移 0044)
 
-    跨商品**不去重**:两个 SKU 用了同一张图是两条记录,因为角色、变体绑定、
+    PRD §4.8 逐字要求 ``UNIQUE(spu_id, COALESCE(color_variant_id,''), sha256)``。
+    本表落的是**两条局部唯一索引**,不是一条 —— 理由写在 0044 的模块文档里,
+    一句话版本:``spu_id`` 可空,而 UNIQUE 里 ``NULL <> NULL``,一条式落法会让
+    **所有没有 SPU 的存量素材彻底失去去重**,那比今天更糟。
+
+        uq_media_assets_spu_colour_sha256   WHERE spu_id IS NOT NULL   §4.8 那个键
+        uq_media_assets_product_sha256      WHERE spu_id IS NULL       旧键,兜底
+
+    两条互斥且合起来覆盖全表,所以**任何一行都恰好落在一条键下**,不存在
+    「两条都不管」的行。第二条是**会自净的**:老建档路径从本批起必带
+    ``spu_id``(见 `product_service.create_product`),存量回填完成之后它
+    覆盖零行,那时 ``spu_id`` 收 NOT NULL 并把它删掉是同一个动作。
+
+    跨 SPU **不去重**:两个 SPU 用了同一张图是两条记录,因为角色、变体绑定、
     授权、隔离状态都是按商品算的。物理存储层仍然只存一份(内容寻址)。
     """
 
     __tablename__ = "media_assets"
     __table_args__ = (
-        UniqueConstraint("product_id", "sha256", name="uq_media_assets_product_sha256"),
+        # §4.8 的键。局部索引 —— `spu_id` 为空的行走下面那条兜底键。
+        # 用 `func.coalesce` 而不是 Python 侧的 `or ''`:索引表达式必须由
+        # 数据库求值,写成 Python 表达式时它会在建表那一刻被求成常量。
+        Index(
+            "uq_media_assets_spu_colour_sha256",
+            "spu_id",
+            func.coalesce(text("color_variant_id::text"), text("''")),
+            "sha256",
+            unique=True,
+            postgresql_where=text("spu_id IS NOT NULL"),
+        ),
+        # 兜底键:没有 SPU 的行仍按商品去重。**不是历史遗留,是覆盖面的另一半。**
+        Index(
+            "uq_media_assets_product_sha256",
+            "product_id",
+            "sha256",
+            unique=True,
+            postgresql_where=text("spu_id IS NULL"),
+        ),
         Index("ix_media_assets_product_status", "product_id", "status"),
         Index("ix_media_assets_spu_role", "spu", "role"),
         Index("ix_media_assets_sha256", "sha256"),
+        # §4.8 / 风险表 D3:AI 来源的图永远不许是商品证据。
+        # 这是 `evidence_rules.violates_ai_check` 的库级孪生 —— 那个函数让
+        # 纯层能穷举证明"派生函数产不出违规组合",这条 CHECK 拦的是
+        # **绕过派生函数的直写**。两者缺一:只有函数时,一条 raw UPDATE 就穿透;
+        # 只有 CHECK 时,这条不变式只能在有 PostgreSQL 的地方验,而真库用例池
+        # 里已经压着 60 条没跑过的了。
+        #
+        # `evidence_class IS NULL` 放行:存量行还没回填,而回填是脚本的事。
+        # 这不是缺口 —— NULL 在读取侧当作"没算过",本来就进不了白名单。
+        CheckConstraint(
+            "evidence_class IS NULL "
+            "OR NOT ("
+            "  (source = 'AI_GENERATED'"
+            "   OR generation_task_id IS NOT NULL"
+            "   OR generation_candidate_id IS NOT NULL)"
+            "  AND evidence_class = 'PRODUCT_EVIDENCE'"
+            ")",
+            name="ck_media_assets_ai_not_product_evidence",
+        ),
     )
 
     product_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False
     )
-    #: 冗余,便于按 SPU 聚合。SPU 下多个 Product(颜色/尺码)共用素材时靠它
+    #: **SPU 归属的权威列(§4.8)。A45-batch14-26 / 迁移 0043。**
+    #:
+    #: 在它之前,这张表挂 SPU 靠的是下面那个 `spu: String(64)` 字符串码,
+    #: 而 `products` 从 batch13 起挂的是 `spu_id` 外键。两张表指着同一个
+    #: SPU、用两种口径回答「是不是同一个 SPU」—— 改一次 `spu_code`,
+    #: `products` 跟着走(外键),`media_assets` 原地断开(字符串码),
+    #: 而断开之后按 SPU 聚合的素材会**静默少掉一批**,没有任何地方会报。
+    #:
+    #: 可空,理由与 `products.spu_id` 相同:老建档路径的存量行还没有 SPU。
+    #: 但**新写入必须有** —— 写入侧的闸在 `media/service.py`,
+    #: 因为去重键的覆盖面(见 `__table_args__`)依赖这一列的空/非空来分流。
+    #:
+    #: `ondelete="RESTRICT"`:与 `products.spu_id` 不同,这里不允许级联。
+    #: 删掉一个 SPU 而把它的素材留成孤儿,等于让那批图落进兜底键,
+    #: 于是同一张图在「删 SPU 前」和「删 SPU 后」的去重结果不一致。
+    spu_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("spus.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    #: 反规范化读列。**权威是上面的 `spu_id`。**由服务层随 `spu_id` 同步,
+    #: 与 `products.spu` 同口径(§4.4)。保留它是因为 `ix_media_assets_spu_role`
+    #: 与几处按 SPU 码聚合的查询在读,换掉它是另一批的事。
     spu: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     source: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -175,6 +250,39 @@ class MediaAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
         index=True,
     )
+
+    #: **§4.8 的证据等级。A45-batch14-26 / 迁移 0045。**
+    #:
+    #: 在它之前这是一个纯派生量(`evidence_rules.derive_evidence_class`),
+    #: 每个读取点各算一次。落成存储列的理由**不是省 CPU**,是 §5.1 白名单
+    #: 需要在 SQL 里过滤:派生量过滤不了,于是白名单只能先把全部素材取出来
+    #: 再在 Python 里筛 —— 而"先全取"这件事在素材上万之后本身就是问题。
+    #:
+    #: ## 落了列之后,"唯一写入点"这句话为什么还成立
+    #:
+    #: D3 那条风险(独立赋值的存储列会与 `source` / 溯源列漂移)是真的,
+    #: 所以这一列**不接受赋值**:
+    #:
+    #:   - 应用层唯一写入路径仍是 `derive_evidence_class`,由
+    #:     `media/service.py` 在落库前调用一次;
+    #:   - 库级 `CheckConstraint` 钉住那条不变式(AI 来源 → 不是商品证据),
+    #:     它是 `violates_ai_check` 的孪生,拦的是绕过派生函数的直写;
+    #:   - `tests/pure` 有一条 AST 守卫钉着"路由层与脚本不许直接赋值"。
+    #:
+    #: 三件套之前是"派生 + CHECK",现在是"派生 + 存储 + CHECK"。中间那件
+    #: 新增的是**缓存**,不是第二个事实源 —— 区别在于它没有独立的写入路径。
+    #:
+    #: ## 可空,且不回填在迁移里
+    #:
+    #: 存量行留 NULL,由 `app/scripts/backfill_evidence_class.py` 补。
+    #: 迁移不许 import `app.*`(全仓 42 份没有一份破例),所以在迁移里回填
+    #: 只能把四条规则冻成一段 SQL CASE —— **那就是第二个判定点**,
+    #: 也正是 0040 当时逐条权衡后拒绝的那个做法。脚本可以 import 派生函数,
+    #: 于是回填与运行时走的是同一段代码。
+    #:
+    #: 读取侧遇到 NULL 的口径:**当作没算过,不当作 REFERENCE_ONLY**。
+    #: 后者会让一批存量商品证据凭空退出识别输入,而那是静默的。
+    evidence_class: Mapped[str | None] = mapped_column(String(24), nullable=True)
 
     storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(64), nullable=False)

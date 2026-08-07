@@ -734,16 +734,40 @@ def test_what_this_batch_cannot_verify_is_written_down():
 
 
 def test_the_plan_panel_is_written_but_not_reachable_yet_and_this_is_the_ledger():
-    """**这条守卫记的是欠账,不是成绩 —— 它有还款日。**
+    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+
+    上一版这里写的是"它有还款日" —— **而那句话当时是假的**:还款日只写在
+    这段文档里,没有任何机制会在它到期时响。A45-batch14-21 给
+    `verify_delivery` 加了一条门禁读这一行,现在它是真的了(§3.37)。
 
     `GenerationPlanPanel.tsx` 与 `api/generationPlans.ts` 本批新增,而
     **全树没有任何地方 import 它们** —— 面板存在,但进不去任何路由。
 
     文档里写的是"跑不了 tsc / Vitest"。那句话是真的,但它说的是**环境限制**;
     没接进路由是**接线欠账**,两件事的处理方式完全不同:前者等一台有
-    node_modules 的机器,后者等有人写一行 import。混成一句话的后果是
+    node_modules 的机器,后者等有人写代码。混成一句话的后果是
     下一个人以为"等机器就行",而机器到了之后面板照样打不开 ——
     tsc 会给一个没有任何引用的组件开绿灯。
+
+    ## 上一版这里写的是"等有人写一行 import"。**那句话是错的**
+
+    A45-batch14-23 逐条核路由时核出来的:面板要 `spuId`(UUID),而
+    **全前端没有任何一条路径拿得到 SPU 的 UUID**。
+
+        api/spus.ts             不存在
+        batchApi 的 SpuGroup    只有 `spu: string`(反规范化的字符串码)
+        workbench 那几组出参    同样只有 `spu: string`
+        publish.ts 的
+        `external_spu_id`       是**平台侧**的外部 id,不是本系统的主键
+
+    唯一在出参里给 `spu_id` 的 schema 是 `generation_plan.py` 自己 ——
+    **要拿到 spu_id 得先有一份方案,而要列方案得先有 spu_id。**
+
+    所以这笔账和「三步建档 UI」(阶段 1 剩余项)是同一笔:两者都卡在
+    "前端要有一个知道 SPU 主键的宿主页"。按 §3.33 的规矩把理由改准 ——
+    **一条过期的理由比没有理由更糟**:照着"写一行 import"去做的人,
+    会发现无处可写,然后多半随手把 `spu` 字符串码传进 `spuId`,
+    那时接口 422,而错因指向后端。
 
     这个仓库对"路由可达"的分工写在 `test_frontend_contract.py` 顶部:
     那件事归 Playwright(P5),纯层不碰。**本条不越界去测可达性**,
@@ -764,42 +788,3 @@ def test_the_plan_panel_is_written_but_not_reachable_yet_and_this_is_the_ledger(
         "请删掉本守卫,并把\"进得去这个页面吗\"交给 Playwright(见 "
         "test_frontend_contract.py 顶部那张分工表)。"
     )
-
-
-def test_the_two_new_item_columns_have_no_writer_yet_and_this_is_the_ledger():
-    """**这条守卫记的是欠账,不是成绩 —— 它有还款日。**
-
-    `shared_opt_in` 与 `angle` 两列本批落库,`_to_view` 读它们,§6.5 的四条
-    规则用它们判定。**但没有任何代码路径写过它们。**
-
-    这件事的具体后果不是"少了个功能",是**两条规则的判定结果被钉死**:
-
-        shared_opt_in 恒 False   每张通用图恒定命中 UNMARKED_SHARED_IMAGE
-        angle 恒 NULL            一旦某个颜色配了方案,那个颜色的必要角度
-                                 **永远覆盖不了** —— 图片集再也批不过
-
-    第二条尤其安静:门禁不报"少了写入路径",它报的是"缺正面图"。
-    运营会去补图,补多少张都没用,因为新图的 `angle` 同样是 NULL。
-
-    本批文档把这件事记在"验不到什么"里,措辞是"接线点在服务层,而服务层
-    要 sqlalchemy"。**那个措辞是错的**,合并复审时改了:在 `create_set`
-    里多写两个 kwarg 不需要**运行** sqlalchemy,只需要有人写。缺的不是
-    环境,是代码 —— 混成一句话的后果是下一个人以为"等机器就行"。
-
-    写入路径落地那天这条会红。那时把它删掉,换成正向守卫。
-    """
-    src = (BACKEND_ROOT / "app" / "listings" / "image_set_service.py").read_text(
-        encoding="utf-8"
-    )
-    tree = ast.parse(src)
-    constructed = [
-        {kw.arg for kw in node.keywords}
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ListingImageItem"
-    ]
-    assert constructed, "`ListingImageItem` 的构造点不见了 —— 这条守卫失去了对象"
-    for written in constructed:
-        assert "shared_opt_in" not in written and "angle" not in written, (
-            "§6.5 那两列有写入路径了 —— 这条欠账还清了。请删掉本守卫,"
-            "并补一条正向守卫:候选入集时继承生成任务的颜色与角度。"
-        )

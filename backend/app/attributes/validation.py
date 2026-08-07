@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from app.attributes.registry import REGISTRY, AttributeField, ValueType
@@ -166,6 +167,90 @@ def split_variant_owner_id(owner_id: str) -> tuple[str, str] | None:
     if len(spu) != length or ns != _VARIANT_NS:
         return None
     return spu, variant_id
+
+
+@dataclass(frozen=True)
+class FingerprintScope:
+    """一条事实该拿**哪个作用域**的样品指纹去比(§5.3)。
+
+    ## 为什么不是一个裸的 `str | None`
+
+    `scope_fingerprint.SHARED` 就是 `None`。用裸值的话,"这条事实比共享指纹"
+    和"这条事实根本不参与指纹比较"会写成同一个值 —— 而两者的结论完全相反:
+    前者拿 `fingerprints()[None]` 去比,对不上就过期;后者永远不过期。
+
+    混起来的表现是 CHANNEL 层的刊登属性开始跟着样品变化过期,而刊登属性
+    (平台类目 id、站点特有字段)和样品图没有任何关系。它不报错,只是让
+    一批永远不该过期的行在每次补图之后集体待确认。
+
+    所以判定返回一个**两问一答**的结构:参不参与、参与的话比哪个。
+    """
+
+    #: 这条事实参不参与样品指纹比较
+    participates: bool
+    #: 参与时比哪个作用域。`None` = 共享作用域(`scope_fingerprint.SHARED`)
+    scope: str | None = None
+
+
+#: 不参与指纹比较。CHANNEL 层用它,见 `fingerprint_scope()` 第二段
+NOT_FINGERPRINTED = FingerprintScope(participates=False)
+
+#: 共享作用域。`scope` 为 None 与 `scope_fingerprint.SHARED` 同值
+SHARED_FINGERPRINT_SCOPE = FingerprintScope(participates=True, scope=None)
+
+
+def fingerprint_scope(owner_type: OwnerType, owner_id: str) -> FingerprintScope:
+    """这条事实比哪个作用域的指纹。**判定只有这一处,纯函数。**
+
+    §5.3 那张表把对应关系写死了:
+
+        SPU 共享事实   ← `shared_fingerprint(spu)`
+        某颜色的事实   ← `variant_fingerprint(spu, variant)`
+
+    ## 三层落共享,一层落颜色,一层不参与
+
+        SPU / PRODUCT / SKU   共享作用域。它们的证据集合是"该商品全部证据
+                              素材",与 `shared_fingerprint` 的集合定义逐字
+                              相同(§5.3 第一行)
+        VARIANT               取 owner_id 里的变体段
+        CHANNEL               不参与。刊登属性来自平台契约,不来自样品图
+
+    SKU 层今天没有字段(注册表里一个都没有),但它必须现在就有答案 ——
+    加字段的人不该顺手决定"尺码事实什么时候过期"。落共享是因为尺码的证据
+    也是那批样品图;真要按颜色分,那是一次要写进 §5.3 的口径变更。
+
+    ## VARIANT 拆不出来时朝"过期"那一侧倒
+
+    owner_id 的格式是 `<len>:<spu>/<variant_id>`(A44 命名空间)。
+    `split_variant_owner_id` 拆不出来的是 A44 之前写的裸变体 id ——
+    那些行由 `orphaned_variant_owners()` 点名列着。
+
+    这里返回**共享作用域**而不是"不参与":不参与等于宣布这条事实永远成立,
+    而它恰恰是身份没对齐的那一批,最需要有人重新看一眼。落共享的话它跟着
+    共享指纹走,补任何一张图都会让它待确认 —— 吵,但方向对。
+
+    ## 拆得出来也不保证比得上,而那同样是对的
+
+    变体段的取值来自 `variant_id_for()` 的**三级回落**:`color_variant_id`
+    → `variant_key` → 种子表达式。只有第一级和素材侧的
+    `media_assets.color_variant_id` 同源;落到后两级的行在
+    `fingerprints()` 的结果里找不到对应的键,于是当前指纹是 None,
+    `facts_stale` 判过期。
+
+    这不是缺陷,是同一条口径:身份没迁完的行,系统证明不了它仍然成立。
+    诊断由 `variant_key.identity_source()` / `drift()` 负责说清是哪一级,
+    **这里不替它们兜底** —— 兜底会让一批身份漂着的事实以"没变"的身份
+    进导出。
+    """
+    if owner_type is OwnerType.CHANNEL:
+        return NOT_FINGERPRINTED
+    if owner_type is OwnerType.VARIANT:
+        split = split_variant_owner_id(owner_id)
+        if split is None:
+            return SHARED_FINGERPRINT_SCOPE
+        _spu, variant_id = split
+        return FingerprintScope(participates=True, scope=variant_id or None)
+    return SHARED_FINGERPRINT_SCOPE
 
 
 def owner_for(

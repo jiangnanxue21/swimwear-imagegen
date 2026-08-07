@@ -36,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.attributes import confidence as conf
+from app.attributes import queue_policy
 from app.attributes import run_state
 from app.attributes import scope_fingerprint
 from app.attributes import validation
@@ -675,6 +676,147 @@ def current_value(
     )
 
 
+#: 指纹与取数口径的**唯一一份**声明(§5.1 / §5.3)。
+#:
+#: `run_extraction` 那一行原来是就地写的字面量,而事实侧一接线就变成了
+#: 四个调用点各写一遍 —— 而这个值一旦有两个答案,后果不是报错:指纹会按
+#: 一个比取数更窄(或更宽)的集合算,于是**那批图真的进了识别、真的花了钱,
+#: 却不参与"输入变没变"的判断**,补一张图不会让事实过期,AC-21 静静地不成立。
+#:
+#: 取 True 是为了**维持现状**,不是在判定外链可信:本仓还没有可信机制
+#: (见 `media/evidence_rules` 文档第二条),而今天 `IMPORTED_URL` 没有任何
+#: 写入点,所以这个值改变不了任何一条真实数据的去留。接可信机制时改这里,
+#: **不要改 `evidence_assets_for` 的默认值** —— 默认值留给新调用点,
+#: 新调用点该 fail closed。
+EVIDENCE_IMPORTED_URL_TRUSTED = True
+
+
+def scope_fingerprints_for(
+    session: Session, product: Product
+) -> dict[str | None, str]:
+    """一件商品当前各作用域的样品指纹。**事实侧的唯一取数入口。**
+
+    返回 `{None: 共享指纹, 颜色id: 颜色指纹, ...}`,形状与
+    `scope_fingerprint.fingerprints()` 相同(它就是这里的判定)。
+
+    ## 为什么要有这个函数,而不是三处各抄一行
+
+    事实侧的指纹有三个消费者:`apply_evidence`(识别写值)、`confirm`
+    (人工确认)、`workbench._attribute_facts`(读取时判过期)。三处各写
+    一行 `evidence_assets_for(...)` + `views()` + `fingerprints()` 的话,
+    这个仓库已经付过一次学费的形状会原样回来 —— §5.1 那一条写的是
+    「白名单查询助手成为**唯一取数入口**」,而它防的从来不是今天的代码,
+    是明天那个照着抄一行、少传一个关键字的调用点。
+
+    这里的漂移尤其安静:**写入侧按 A 集合算指纹、读取侧按 B 集合算**,
+    两边都不报错,表现是一条刚刚确认完的事实立刻显示"已过期",
+    或者反过来,一条真的该过期的事实永远显示正常。
+
+    ## 经 `views()`,不把 ORM 行直接递进去
+
+    §5.3 的元素清单用 `asset_id` / `content_hash`,而 `MediaAsset` 上的列名
+    是 `id` / `sha256`。少了这层翻译,`_element()` 的每一项都 getattr 到
+    None,算出来的是**一个所有素材都长得一样的指纹** —— 不报错、不抛异常,
+    只是换了图也不 stale。那是本模块最安静的坏法。
+    """
+    assets = media_service.evidence_assets_for(
+        session, product.id, imported_url_trusted=EVIDENCE_IMPORTED_URL_TRUSTED
+    )
+    return scope_fingerprint.fingerprints(
+        scope_fingerprint.views(assets),
+        imported_url_trusted=EVIDENCE_IMPORTED_URL_TRUSTED,
+    )
+
+
+def fingerprint_for_owner(
+    prints: Mapping[str | None, str], *, owner_type: OwnerType, owner_id: str
+) -> str | None:
+    """这条事实该存/该比的那一个指纹。**作用域判定不在这里。**
+
+    判定在 `validation.fingerprint_scope()`(纯层,能穷举 `OwnerType` 的每一个
+    成员)。这里只负责把它的答案翻译成一次查表。
+
+    两种情况返回 None,含义不同但**下游一致**:
+
+        不参与(CHANNEL)      写入时不存指纹,读取时不判过期
+        参与但查不到那个键    该颜色今天没有任何证据素材。`facts_stale`
+                              拿它当"对不上",判过期 —— 而那正是对的:
+                              一个颜色的最后一张证据图被删掉时,
+                              它的事实最该被重新看一眼
+
+    第二种是 `fingerprints()` 那条注释里说的"没有素材的颜色不出现在结果里",
+    在事实侧的落点。**不要在这里给它兜一个空指纹**:兜出来的值会让一条
+    没有任何证据支撑的事实带着"指纹没变"的证明进导出。
+    """
+    scope = validation.fingerprint_scope(owner_type, owner_id)
+    if not scope.participates:
+        return None
+    return prints.get(scope.scope)
+
+
+def stale_fields(
+    session: Session,
+    product: Product,
+    values: Mapping[str, ProductAttributeValue],
+    *,
+    settled_only: bool = True,
+) -> frozenset[str]:
+    """哪些事实的输入指纹对不上了(§5.3 / AC-21)。**`facts_stale` 的唯一调用点。**
+
+    ## 这是 AC-21 的落点
+
+    「给颜色 A 补传样品后:共享事实与 A 色事实 stale,**B 色事实不受影响**」。
+    这里不重新证明它 —— 全称命题由 `scope_fingerprint` 那边穷举验过。
+    这个函数只做三件事:取一次当前指纹、按 owner 找到该比的那一个、比。
+
+    ## `settled_only`:默认只看已确认的那些
+
+    过期这件事只对**已经立起来的事实**有意义。一个 CANDIDATE 值本来就等着
+    人处理,把它也标成"过期"会让工作台对同一个字段同时说两句话 ——
+    「有建议值待确认」和「已确认的事实过期了」,而后者是假的:
+    那条事实从来没有立起来过,谈不上过不过期。
+
+    档位判定**不在这里手写状态集合**,走 `queue_policy.disposition()` ——
+    那张表是穷举的、由守卫钉着,而手写一份 `{"CONFIRMED"}` 的下场是
+    `AttributeStatus` 新增一档时这里静静地漏掉它。
+
+    传 `settled_only=False` 表示全都看,给巡检和接口出参用:它们问的是
+    "库里这一行的指纹对不对得上",不是"工作台该不该催人"。
+
+    ## 参不参与要单独问一次,不能靠 `current is None` 推
+
+    `fingerprint_for_owner()` 对**两种**情况都返回 None:不参与(CHANNEL),
+    以及参与但那个作用域今天没有证据素材。后者必须判过期(一个颜色的最后
+    一张证据图被删掉,它的事实最该被重新看一眼),前者必须不判 ——
+    只看返回值的话两者分不开,而合并的表现是刊登属性跟着补图集体过期。
+
+    ## 为什么返回字段名集合而不是逐行布尔
+
+    调用方(工作台判定、接口出参)问的都是"哪些字段",按行返回会让每个
+    调用方自己再折一次 —— 那是两处判定,而两处判定会漂移。
+    """
+    if not values:
+        return frozenset()
+    prints = scope_fingerprints_for(session, product)
+    stale: set[str] = set()
+    for name, row in values.items():
+        if settled_only and (
+            queue_policy.disposition(row.status) is not queue_policy.Disposition.SETTLED
+        ):
+            continue
+        owner_type = OwnerType(row.owner_type)
+        if not validation.fingerprint_scope(owner_type, row.owner_id).participates:
+            continue
+        current = fingerprint_for_owner(
+            prints, owner_type=owner_type, owner_id=row.owner_id
+        )
+        if scope_fingerprint.facts_stale(
+            stored_fingerprint=row.input_fingerprint, current_fingerprint=current
+        ):
+            stale.add(name)
+    return frozenset(stale)
+
+
 def set_value(
     session: Session,
     *,
@@ -689,6 +831,7 @@ def set_value(
     system_confidence: float | None = None,
     breakdown: dict[str, Any] | None = None,
     evidence_ids: list[str] | None = None,
+    input_fingerprint: str | None = None,
 ) -> ProductAttributeValue:
     """写一个属性值。**这是唯一允许写 `product_attribute_values` 的入口。**
 
@@ -697,6 +840,17 @@ def set_value(
 
     投影到 `products` 的兼容列在**同一个事务**里做(§5.4)。分两次写的话,
     两边会在崩溃时永久不一致,而投影列还有旧查询在读。
+
+    ## `input_fingerprint`:写在这里,因为这里是唯一写入点
+
+    §4.5 要求每条事实记下"它是按哪批素材立起来的"。调用方算好了传进来,
+    因为**该比哪个作用域取决于 owner**,而 owner 正是这个函数的入参
+    (判定在 `validation.fingerprint_scope()`,取数在 `scope_fingerprints_for()`)。
+
+    默认 None = 不知道。它和"算出来是空"不是一回事,但下游一致:
+    `facts_stale(stored=None)` 恒为 True,判过期 —— 算不出来就算过期
+    (`scope_fingerprint` 模块文档第四条)。默认值朝**不放行**那一侧倒,
+    是因为反方向的代价是一条来路不明的事实带着"没变"的证明进导出。
     """
     # **校验落在这里,不落在 API 层(A43 / BLOCK-03)。**
     #
@@ -737,6 +891,7 @@ def set_value(
         system_confidence=system_confidence,
         confidence_breakdown=breakdown,
         evidence_ids=evidence_ids or [],
+        input_fingerprint=input_fingerprint,
         valid_from=_now(),
         is_current=True,
         confirmed_by=actor if status is AttributeStatus.CONFIRMED else None,
@@ -757,6 +912,10 @@ def set_value(
             "field": field_name,
             "status": status.value,
             "source": source.value,
+            # 记**有没有**指纹,不记指纹本身:64 位哈希对读审计的人是噪音,
+            # 而"这条事实立起来的时候算不算得出输入"恰恰是事后排查
+            #「它为什么一确认就显示过期」唯一有用的那一位
+            "fingerprinted": input_fingerprint is not None,
         },
     )
     return row
@@ -808,6 +967,17 @@ def apply_evidence(
 
     evidence = list_evidence(session, extraction.id)
     existing_map = effective_map(session, product.id, product=product)
+    # §4.5:每条事实记下它自己作用域的指纹。**算一次,逐字段查表。**
+    #
+    # 不能拿 `extraction.input_fingerprint`:那是**这次 run 吃进去的整批
+    # 素材**的共享指纹,而这里要写的是共享事实与各颜色事实各自的那一个。
+    # 拿 run 行的顶数,给颜色 A 补一张图会 stale 掉 B 色事实 —— D1 那个
+    # 问题从后门原样回来,而且不报错。那正是欠账守卫当初点名的捷径。
+    #
+    # 也不能逐字段各取一次数:那是 N 次 `evidence_assets_for`,而且**两次
+    # 取数之间素材可能变**,于是同一次合并写出来的几条事实分属不同的
+    # 输入快照 —— 一个查不出来的不一致
+    prints = scope_fingerprints_for(session, product)
 
     # 逐条证据算 system_confidence。每张图的质量与来源不同,
     # 所以权重必须一条一条算,不能按字段算一次
@@ -964,6 +1134,9 @@ def apply_evidence(
                     "rejected_values": list(result.rejected_values),
                 },
                 evidence_ids=list(result.evidence_ids),
+                input_fingerprint=fingerprint_for_owner(
+                    prints, owner_type=owner_type, owner_id=owner_id
+                ),
             )
         )
         if result.ai_divergence:
@@ -1000,12 +1173,26 @@ def confirm(
     合起来的实际语义是"每个 Product UUID 一桶属性",分层只存在于契约里。
 
     现在三个坐标交给 `owner_for()`,由字段自己决定落在哪一层。
+
+    ## 人工确认同样记指纹(§4.5),而且这一条最要紧
+
+    §6.3 的完成条件原文是「必填事实 `CONFIRMED` **且其 `input_fingerprint`
+    匹配当前作用域指纹**」。人工确认写的正是 `CONFIRMED`,不记指纹的话
+    这条路写出来的事实**永远满足不了完成条件** —— 存量指纹恒为空,
+    `facts_stale(stored=None)` 恒为 True,于是运营点一次确认、刷新之后
+    那个字段又回到待确认,点多少次都一样。
+
+    这是一个**没有任何地方会报错**的死循环,所以它不许靠"记得传"来避免:
+    取数与判定都在这个模块里(`scope_fingerprints_for` /
+    `fingerprint_for_owner`),调用点只有这一处和 `apply_evidence`,
+    两处都由 `test_a45_batch14_21_facts_stale.py` 用 AST 钉着。
     """
     if not actor or actor == "anonymous":
         raise ValidationError(
             "人工确认必须有已验证的操作者", code=ErrorCode.AUTH_FAILED, http_status=401
         )
     owner_type, owner_id = owner_for(field_name, **owner_coordinates(product))
+    prints = scope_fingerprints_for(session, product)
     return set_value(
         session,
         owner_type=owner_type,
@@ -1015,6 +1202,9 @@ def confirm(
         source=AttributeSource.MANUAL,
         status=AttributeStatus.CONFIRMED,
         actor=actor,
+        input_fingerprint=fingerprint_for_owner(
+            prints, owner_type=owner_type, owner_id=owner_id
+        ),
     )
 
 

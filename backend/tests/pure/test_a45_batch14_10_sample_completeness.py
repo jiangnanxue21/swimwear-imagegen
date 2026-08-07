@@ -750,7 +750,12 @@ def test_the_action_code_does_not_reuse_someone_elses_words():
 
 
 def test_the_variant_scope_is_wired_now_that_the_attribution_column_exists():
-    """**这条守卫原来记的是欠账,A45-batch14-15 把它收了。**
+    """**这条守卫原来记的是欠账,A45-batch14-15 把它收了。欠账已还。**
+
+    最后那四个字是给 `verify_delivery` 的「欠账守卫都在还款日之内」看的。
+    翻转之后这段叙述里仍然留着"记的是欠账"四个字(它值得留:它解释了
+    这条守卫为什么长这样),而那句话会让还款日门禁在**过去时**里命中 ——
+    第一版当场误伤了本条。三种状态各说一句话,不靠时态去猜。
 
     原文:「颜色子集要按 `color_variant_id` 分,而那一列是阶段 2 的归属外键,
     今天不存在。拿 `variant_hint` 分子集等于让模型猜出来的值决定运营能不能

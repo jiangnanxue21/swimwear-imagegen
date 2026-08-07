@@ -17,7 +17,7 @@ from app.listings import image_set_service, variants
 from app.models.listing_copy import ListingDraft
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
-from app.models.spu import Spu
+from app.models.spu import ColorVariant, Spu
 from app.services import audit
 from app.services.product_import import ImportResult
 from app.services.sorting import apply_order
@@ -37,6 +37,50 @@ SORTABLE = {
     "status": Product.status,
     "category": Product.category,
 }
+
+
+def assert_colour_belongs_to(
+    session: Session, product: Product, color_variant_id: UUID
+) -> None:
+    """这个颜色确实是这件商品所在 SPU 的颜色(§4.3)。
+
+    ## 为什么必须查,而不是信任前端传上来的 id
+
+    §4.3 那条约束写得很清楚:颜色名在 SPU 内唯一,**跨 SPU 同名是常态**
+    (几乎每个款都有黑色)。所以光看一个 UUID 分不出它属于谁 —— 而传错的
+    后果不是报错:那张图会挂到**另一个款**的颜色上,于是
+
+        它进不了本商品那个颜色的完整度门禁(表现:传了图还说缺图)
+        它却会让**另一个 SPU** 的颜色事实过期(表现:一个没人动过的款
+        突然一批字段回到待确认)
+
+    两个现象都不指向"上传时选错了颜色",而且发生在两个不同的页面上。
+
+    ## 商品没有 spu_id 时一律拒绝
+
+    老建档路径(`create_product` / CSV 导入)今天还不写 `products.spu_id`
+    —— 那是阶段 1 的剩余项。这些商品**给不出**"本商品所在 SPU"这个答案,
+    于是没有任何依据判断一个颜色属不属于它。
+
+    拒绝而不是放行:放行等于允许把图挂到一个查不出关系的颜色上,
+    而那正是上面第二条的来路。代价是老路径建的商品暂时不能按颜色上传 ——
+    它们本来也没有颜色可选(`POST /spus` 才建颜色)。
+    """
+    if product.spu_id is None:
+        raise ValidationError(
+            "这件商品还没有归属到 SPU,不能按颜色上传素材;"
+            "走三步建档(POST /spus)建出来的商品才有颜色可选",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    variant = session.get(ColorVariant, color_variant_id)
+    if variant is None or variant.spu_id != product.spu_id:
+        raise ValidationError(
+            "这个颜色不属于本商品所在的 SPU。颜色名在 SPU 内唯一,"
+            "跨 SPU 同名是常态 —— 请从本商品的颜色列表里选",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=422,
+        )
 
 
 def get_product(session: Session, product_id: UUID) -> Product:
@@ -64,11 +108,58 @@ def create_product(session: Session, data: dict[str, Any], *, actor: str) -> Pro
     # 受众 × 品类组合校验(C-03)。update 那道闸如果不在 create 上重复,
     # 想绕开的人删了重建就行 —— 与授权字段"两个入口一起收"是同一条道理。
     # 受众未确认(None)不拦:那时"该出哪一组"还没有答案
+    # **§4.2 那条 NULL 兼容缝在这里关掉(A45-batch14-26)。**
+    #
+    # 在此之前这个函数从不写 `spu_id`,于是走这条路建出来的商品:
+    #   - `spu_id` 为空 → 它不属于任何 SPU
+    #   - `audience` 可空 → **绕过了 §4.2「受众必填」**
+    # 而受众填错的后果 `create_spu` 里写着:模特、提示词、槽位表、检查项、
+    # 尺码表、平台类目全跟着错,每一步单看都是"正常完成"。
+    #
+    # 关的方式是**解析**,不是**新建**。这里不调 `create_spu`:那个函数会按
+    # 尺码模板展开一整套 SKU,从"建一个商品"里长出十几行商品来 ——
+    # 而且它会成为第二条建档路径,`seed_sample_data` 当初刻意不写第二条,
+    # 理由在那边(§"seed 走 spu_service.create_spu(),不另写建档路径")。
+    #
+    # 查不到就拒绝,错误信息指向"先建 SPU"。**代价写明**:CSV 导入从此
+    # 要求 SPU 先存在。这是真实的行为变更,不是兼容性疏漏 ——
+    # 放行的代价是每一条走老路径的商品继续绕过受众必填,而那批商品
+    # 正是将来 `spu_id` 收 NOT NULL 时挡在路上的那批。
+    spu_code = (data.get("spu") or "").strip()
+    if not spu_code:
+        raise ValidationError(
+            "SPU 编码必填:商品必须挂在一个 SPU 下,受众、尺码表、平台类目都由它决定",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=422,
+        )
+    spu_row = session.scalar(select(Spu).where(Spu.spu_code == spu_code))
+    if spu_row is None:
+        raise ValidationError(
+            f"SPU {spu_code} 不存在:请先用 POST /spus 建档,再往下挂 SKU。"
+            "受众在 SPU 层必填(§4.2),从这里直接建商品会绕过它",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=422,
+        )
+
+    # 受众的权威是 `spus.audience`(batch13 / §4.2),`products.audience` 是它的
+    # 反规范化副本。**从 SPU 抄,不用入参那一份** —— 两者不一致时信 SPU,
+    # 否则调用方可以用一个入参把商品行的受众改成和它 SPU 不同的值,
+    # 而 `category_code_for` 读的是商品行那一份。
+    data = dict(data)
+    data["audience"] = spu_row.audience
+
+    # 受众 × 品类组合校验(C-03)。update 那道闸如果不在 create 上重复,
+    # 想绕开的人删了重建就行。**现在受众恒非空**(上面从 SPU 抄的),
+    # 所以这道闸从"未确认时不拦"变成永远真的在判 —— 那正是这条缝的意义
     block = garments.garment_block_reason(data.get("audience"), data.get("garment_type"))
     if block is not None:
         raise ValidationError(block, code=ErrorCode.INPUT_INVALID, http_status=422)
 
     product = Product(**{k: v for k, v in data.items() if v is not None})
+    # 归属外键。`spu` 字符串留着是反规范化读列(§4.4),两者由这里一起写死,
+    # 不给"码写了、外键没写"留缝
+    product.spu_id = spu_row.id
+    product.spu = spu_row.spu_code
     # 变体身份在这里定下来,**必须在 add 之前**(A44)。
     # 先 add 的话它会在同门兄弟里查到自己,于是「已有同色变体」永远成立,
     # 复用逻辑从第 2 行起就再也不会被执行 —— 而那是它唯一的用处。

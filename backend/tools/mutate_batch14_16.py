@@ -86,9 +86,14 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "W5",
         "ingest 收了溯源却不写进行里(「算好了没人读」那一类)",
         SVC,
+        # 锚点带上收尾的 `)`:A45-batch14-26 起,同一个函数里还有一处
+        # `derive_evidence_class(...)` 也按同样两行传溯源,两行式锚点
+        # 从此不唯一(`audit_anchors` 当场报「改了也不知道改的是哪一处」)。
+        # 延长而不是换掉 —— 这条变异验的仍然是**构造点**漏写溯源。
         "        generation_task_id=generation_task_id,\n"
-        "        generation_candidate_id=generation_candidate_id,\n",
-        "",
+        "        generation_candidate_id=generation_candidate_id,\n"
+        "    )",
+        "    )",
     ),
     (
         "M1",

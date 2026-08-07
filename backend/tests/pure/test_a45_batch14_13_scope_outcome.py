@@ -485,7 +485,12 @@ def test_the_aggregation_is_actually_read():
 
 
 def test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one():
-    """**这条守卫记的是欠账,不是成绩。**
+    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+
+    还款日读作「交付阶段推进到 5 之前必须还清」。它属于 §4.6 那一批列,
+    而 §4.6 剩下的那半(异步化 + cancel)是阶段 3 唯一真的卡在环境上的一项
+    —— 但**这一列不卡环境**,加两个列不需要 Redis,只需要有人写。
+    两件事混在一句话里的后果是下一个人以为"等机器就行"。
 
     §11 要的是「失败颜色明确列出」。今天它只到日志为止,因为跑完之后
     **没有任何一列**记得这件事:
@@ -559,10 +564,21 @@ def test_the_wired_half_is_registered_and_the_unwired_half_is_not():
     而让它变绿最省事的做法是拿 product_id 凑一个假作用域」。
 
     迁移 0040 把五列落下去之后那个借口消失,三个全部接线并登记。
-    反向断言换到**下一层欠账**上:事实侧的过期比较(`facts_stale` /
-    `changed_scopes`)要等属性值行也带上指纹列,那是阶段 4 的事。
-    今天登记它们会红,而让它变绿最省事的做法是拿 run 行的指纹去比属性值
-    —— 两者的作用域根本不同。
+
+    ## A45-batch14-21:`facts_stale` / `changed_scopes` 这一层也还上了
+
+    上一版这条守卫的反向断言点着这两个,理由是「要等属性值行也带上指纹列,
+    **那是阶段 4 的事**」。迁移 0042 把
+    `product_attribute_values.input_fingerprint` 落下去,两个都接线并登记。
+
+    **这条欠账暴露过一个新的失效方向,值得在这里记一句。** 阶段 4 落码了,
+    而这件事没做 —— 守卫没有变红,因为它钉的是"没接线"这个事实,不钉
+    "什么时候该接"。还款日只写在这段文档里,到期不还没有任何机制会响。
+    §3.37 立的规矩和 `verify_delivery` 那条「欠账守卫都在还款日之内」
+    是这件事的补丁:**判据落在别人身上的守卫,守不住自己。**
+
+    反向断言现在点的是那条捷径本身:不许拿 run 行的指纹去填属性值 ——
+    两者的作用域根本不同,而它是当初让这条门禁"最省事变绿"的那个做法。
     """
     entry = _wired_entry("app/attributes/run_state.py")
     for wired in (
@@ -577,11 +593,30 @@ def test_the_wired_half_is_registered_and_the_unwired_half_is_not():
         assert wired in entry, f"{wired} 没有被登记成接线"
 
     fingerprint = _wired_entry("app/attributes/scope_fingerprint.py")
-    for wired in ("fingerprints", "views"):
+    for wired in ("fingerprints", "views", "facts_stale", "changed_scopes"):
         assert wired in fingerprint, f"{wired} 没有被登记成接线"
-    for owed in ("facts_stale", "changed_scopes"):
-        assert owed not in fingerprint, (
-            f"{owed} 被登记成接线了,而事实侧还没有指纹列 —— "
-            "让门禁变绿最省事的做法是拿 run 行的指纹去比属性值,"
-            "而两者的作用域根本不同"
+
+    # 反向:那条捷径不许被走。`apply_evidence` 里如果出现
+    # `extraction.input_fingerprint`,写进属性值的就是**这次 run 吃进去的
+    # 整批素材**的共享指纹 —— 共享事实与各颜色事实会共用同一个答案,
+    # 于是给颜色 A 补一张图会 stale 掉 B 色事实。D1 从后门原样回来,
+    # 而且不报错:每一条事实都带着一个看起来很像的 64 位哈希。
+    service = (APP / "attributes" / "service.py").read_text(encoding="utf-8")
+    fn = next(
+        n for n in ast.walk(ast.parse(service))
+        if isinstance(n, ast.FunctionDef) and n.name == "apply_evidence"
+    )
+    body = "\n".join(
+        ast.unparse(n)
+        for n in fn.body
+        if not (
+            isinstance(n, ast.Expr)
+            and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, str)
         )
+    )
+    assert "extraction.input_fingerprint" not in body, (
+        "事实的指纹取自 run 行 —— 那是「这次 run 吃了哪批素材」,"
+        "不是「这条事实按哪批素材立起来」。共享与颜色事实会共用同一个答案,"
+        "给 A 色补图会 stale 掉 B 色事实(D1 从后门回来)"
+    )

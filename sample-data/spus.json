@@ -1,0 +1,77 @@
+{
+  "_readme": [
+    "新结构的样例数据(PRD §13 阶段 1「测试数据与 Fixture 重置为新结构」)。",
+    "",
+    "这份文件描述的是 SPU → 颜色 → SKU 三层,而不是 products.csv 那张平表。",
+    "两份并存是刻意的,各有各的用处,见 sample-data/README.md 那一节:",
+    "",
+    "    products.csv   老建档路径(CSV 导入)的样例。那条路今天还不写 spu_id,",
+    "                   它是阶段 1 的剩余项 —— 这份 CSV 是它的回归样本,不能删",
+    "    spus.json      新建档路径(POST /spus)的样例。验收「可构造三颜色九 SKU",
+    "                   的 SPU」要的就是它",
+    "",
+    "**字段形状必须与 `schemas/spu.SpuCreate` 一致。** 播种走的是",
+    "`spu_service.create_spu()` —— 和接口同一个服务,不是第二条建档路径。",
+    "写第二条的下场是样例数据能建出接口建不出来的东西,而演示时看不出来。",
+    "",
+    "`display_name` 不在这里:它是投影列,唯一写入点是属性服务在 VARIANT 层",
+    "`standard_color_name` 被确认时(§4.3)。建档阶段能填的只有 `working_name`。"
+  ],
+  "spus": [
+    {
+      "spu_code": "SPU-SW-101",
+      "internal_name": "三色系带比基尼(验收样本)",
+      "audience": "WOMEN",
+      "base_category": "swimwear",
+      "supplier_ref": "SUP-A-2201",
+      "notes": "**阶段 1 验收「三颜色九 SKU」点名的就是这一件。**三色 × ALPHA_3 = 9 行。别把它改成两色或均码:改了之后那条验收在样例数据里就没有对象了,而验收脚本会红。",
+      "size_template": "ALPHA_3",
+      "color_variants": [
+        { "variant_code": "BLK", "working_name": "经典黑", "supplier_color_code": "C-001" },
+        { "variant_code": "COR", "working_name": "珊瑚橘", "supplier_color_code": "C-014" },
+        { "variant_code": "NVY", "working_name": "藏青", "supplier_color_code": "C-027" }
+      ]
+    },
+    {
+      "spu_code": "SPU-SW-102",
+      "internal_name": "单色连体泳衣(单色对照组)",
+      "audience": "WOMEN",
+      "base_category": "swimwear",
+      "supplier_ref": "SUP-B-3310",
+      "notes": "单色对照组。**AC-21 要两组才验得出来**:多色那件证明「A 色变了 B 色不变」,单色这件证明共享作用域本身还在动 —— 只有多色样本时,一个把颜色维整个关掉的缺陷会表现成「全都不过期」,而那看起来很像正常。",
+      "size_template": "ALPHA_4",
+      "color_variants": [
+        { "variant_code": "WHT", "working_name": "米白", "supplier_color_code": "C-003" }
+      ]
+    },
+    {
+      "spu_code": "SPU-MW-201",
+      "internal_name": "男士平角泳裤(受众对照组)",
+      "audience": "MEN",
+      "base_category": "swimwear",
+      "supplier_ref": "SUP-C-1180",
+      "notes": "受众对照组。§18.3 的必填属性集按受众条件化 —— 女装问领型、男装问腰头。样例里只有 WOMEN 的话,「受众决定必填集」这条在演示中永远看不出来,而它错了的表现是运营被问到一个这件商品根本没有的字段。",
+      "size_template": "ALPHA_3",
+      "color_variants": [
+        { "variant_code": "BLK", "working_name": "纯黑", "supplier_color_code": "C-001" },
+        { "variant_code": "GRY", "working_name": "岩灰", "supplier_color_code": "C-041" }
+      ]
+    }
+  ],
+  "sample_images": {
+    "_readme": [
+      "**素材按颜色挂,不按 SKU 挂。** 这是与 products.csv 那套最大的形状差别:",
+      "一个颜色的三张样品图对该颜色下的每一个尺码都算数,而 §5.3 的颜色作用域",
+      "指纹正是按 `color_variant_id` 分组的。",
+      "",
+      "按 SKU 挂的话,同一个颜色的三个尺码会各存一份同样的图 —— 而去重键会把",
+      "后两份挡掉,于是 S 码有图、M/L 没有,表现是「同一个颜色有的尺码缺图」。",
+      "",
+      "文件名:`<spu_code>-<variant_code>_<view>.jpg`,通用图是 `<spu_code>__<view>.jpg`",
+      "(变体段为空,双下划线)。通用图只进共享作用域,不进任何颜色子集 ——",
+      "它存在的意义是让「补一张通用图不该 stale 掉颜色事实」这条在样例上验得到。"
+    ],
+    "views": ["front", "back", "detail"],
+    "shared_views": ["detail"]
+  }
+}

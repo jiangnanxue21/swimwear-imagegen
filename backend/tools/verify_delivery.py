@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -438,13 +439,21 @@ WIRED_MODULES: dict[str, tuple[str, ...]] = {
     # 而 `_material_facts` 仍然用那句「有 role 就算数」判定完整度,
     # M3 的角色识别一落地,每一张 AI 候选图都会满足「至少一张正面图」。
     #
-    # 只登记 **SPU 作用域那一半**用得到的四个函数。`variant_gate_roles` /
-    # `variant_confirmable_roles` 不在表里:归属外键(`color_variant_id`)
-    # 今天不存在,登记了这条门禁会红,而让它变绿的最省事做法是拿
-    # `variant_hint` 凑一下 —— 那是让模型猜出来的值决定运营能不能往下走,
-    # 恰恰是 §6.2 收紧 role 口径要禁的那件事。欠账改由
+    # 只登记 **SPU 作用域那一半**用得到的四个函数。
+    #
+    # **A45-batch14-21 修了这段的一句陈旧理由。** 原文写的是
+    # 「归属外键(`color_variant_id`)今天不存在」,并引用一条名叫
     # `test_the_variant_scope_cannot_be_wired_yet_and_here_is_exactly_why`
-    # 记账:那一列落库那天它会红,那时接线并删掉它。
+    # 的守卫。两句都不成立了:那一列在**迁移 0037** 就落了,守卫也按它
+    # 自己的约定翻转并改了名(现名
+    # `test_the_variant_scope_is_wired_now_that_the_attribution_column_exists`),
+    # 而 `variant_gate_roles` 从 14-15 起就在 `workbench/_material_facts`
+    # 里被调着。§3.33:**一条过期的理由比没有理由更糟** —— 下一个人照着
+    # "列不存在"去查,会发现列就在那儿。
+    #
+    # 今天不登记的只剩 `variant_confirmable_roles` 一个,而理由换成了真的
+    # 那一条:它没有调用点。颜色作用域的"还差哪几个角色可以补"要等按颜色
+    # 上传的界面(阶段 2 剩余项),没有那个界面,算出来的清单没有地方显示。
     # A45-batch14-20(阶段 4)。同一条道理,而这三处的失效方式各不相同:
     #
     # `generation_plan` 不接线的话,方案表建了、界面能配,而 `create_task`
@@ -542,12 +551,23 @@ WIRED_MODULES: dict[str, tuple[str, ...]] = {
     # 算出来的是一个所有素材都长得一样的指纹 —— 不报错、不抛异常,
     # 只是换了图也不 stale。那是本模块最安静的坏法。
     #
-    # `facts_stale` / `changed_scopes` **不在表里**:它们要等 §5.3 的事实侧
-    # 也带上指纹列(属性值行的 `input_fingerprint`),那是阶段 4 的事。
-    # 今天登记会红,而让它变绿最省事的做法是拿 run 行的指纹去比属性值 ——
-    # 两者的作用域根本不同。欠账由 14-9 的
-    # `test_the_stored_fingerprint_has_a_column_to_land_in` 顶着。
-    "app/attributes/scope_fingerprint.py": ("fingerprints", "views"),
+    # A45-batch14-21:`facts_stale` / `changed_scopes` 这一层也接上了。
+    # 上一版这两个不在表里,理由是「要等属性值行也带上指纹列」——
+    # 迁移 0042 落了 `product_attribute_values.input_fingerprint`,借口消失。
+    #
+    #   facts_stale     唯一调用点 `attributes/service.stale_fields`。不接线
+    #                   的话系统回答不了「这条商品事实还成不成立」,而 AC-21
+    #                   不是会答错,是没有任何地方在算
+    #   changed_scopes  调用点在 `media/service` 的隔离 / 放行 / 改角色。
+    #                   不接线的话「为什么这堆事实突然要重新确认」这个问题
+    #                   在审计里没有答案 —— 派生比较证明得了它们过期了,
+    #                   证明不了是哪一次动作造成的
+    "app/attributes/scope_fingerprint.py": (
+        "fingerprints",
+        "views",
+        "facts_stale",
+        "changed_scopes",
+    ),
     "app/attributes/queue_policy.py": ("bucket_fields",),
     "app/media/provenance_conflict.py": ("verdict", "may_fill_role"),
     "app/services/spend.py": ("record_cost", "summary"),
@@ -691,6 +711,214 @@ def check_every_wired_module_is_actually_called() -> None:
         )
 
 
+#: 欠账守卫的自述标记。docstring 里出现这句话 = 这条守卫记的是一笔欠账。
+#:
+#: 用一句中文而不是装饰器 / 命名前缀:纯层用例刻意不依赖 pytest,没有
+#: 装饰器可用;而命名前缀会诱导人靠改名绕过。标记写在文档里,和它解释的
+#: 那件事在同一处 —— 而**下面这条门禁让"写了标记"这件事有代价**。
+DEBT_GUARD_MARKER = "记的是欠账"
+
+#: **只在 docstring 的第一段里找那句标记。**
+#:
+#: 第一版扫全文,当场被自己咬了两次:先是 14-10 那条**已还清**的守卫
+#: (叙述里留着"原来记的是欠账"),后是本批**盯着这条门禁自己**的两条
+#: 元守卫——它们在解释这套机制时必须引用那句标记,于是被判成欠账。
+#:
+#: 第二次那个方向值得记一句:**一条守卫要讲清它守的是什么,就得说出那件
+#: 事的名字;而按全文匹配的判据会把"说出名字"当成"就是那件事"。**
+#: 这是 §3.26「docstring 是源码的一部分」的又一个方向——前几次是文档把
+#: 断言喂成平凡真,这次是文档把判据喂成假阳。
+#:
+#: 收进第一段是有依据的,不是为了绕开:仓库里四条欠账守卫的声明**全都**
+#: 写在第一行,形如「**这条守卫记的是欠账,不是成绩。还款日:阶段 N。**」。
+#: 也就是说这条规矩本来就存在,只是原来没写下来——**声明写在开头,
+#: 解释可以出现在任何地方。**
+DEBT_DECLARATION_PARAGRAPHS = 1
+
+#: 已还清的标记。这个仓库的习惯是把欠账守卫**翻转**成正向守卫、并在文档里
+#: 留一段"原来记的是欠账,某批把它收了" —— 那段叙述很有价值,是这里最好读的
+#: 一类注释。
+#:
+#: 但它会让上面那个标记在**过去时**里命中(第一版当场误伤了 14-10 那条)。
+#: 所以还清的那一刻要显式说一句 —— **三种状态各有一句话,不靠时态去猜。**
+#: §3.26 那条:按字符串在源码里找东西,找到的从来不保证是你以为的那个位置;
+#: 解法不是把正则写得更巧,是让每一种状态都有自己的一句话。
+DEBT_REPAID_MARKER = "欠账已还"
+
+#: 欠账守卫的命名式。名字里有这些的必须带标记 —— 否则"不写标记"就是
+#: 一条绕过整条门禁的捷径,而绕过不会有任何征兆。
+DEBT_GUARD_NAME_HINTS = (
+    "_and_this_is_the_ledger",
+    "cannot_be_wired_yet",
+    "_still_owed_",
+    "_not_reachable_yet",
+    "_have_no_writer_yet",
+)
+
+#: 还款日。**只有一种写法:交付阶段。**
+#:
+#: 第一版这里还有一种「还款日:条件式」,意思是"某件事落地那天守卫自己会红,
+#: 判据长在自己身上,不用外部盯"。写完之后回头核了一遍仓库里那四条欠账,
+#: **没有一条用得上它** —— 每一条都自称"接线那天这条会红",而每一条同时
+#: 都有一个真实的阶段死线。
+#:
+#: 留着一个永远不被走的分支,这条门禁的覆盖就有一格是假的(与"别把明知
+#: 抓不住的变异列进脚本"同一条规矩)。删掉。真遇到没有死线的欠账时,
+#: 诚实的做法也是**挑一个阶段**:"没有死线"正是欠账被忘掉的方式,
+#: 而这条门禁存在的全部理由就是那件事。
+_DUE_STAGE = re.compile(r"还款日\s*[:：]\s*阶段\s*([0-9]+)")
+_DUE_ANY = re.compile(r"还款日\s*[:：]")
+
+#: 当前交付阶段。**从 `docs/STATUS.md` 的机器可读标记读,不写在这里。**
+#: 写在这个脚本里的话,它会和 STATUS 里那张阶段清点表分叉,而分叉的表现是
+#: 门禁按一个没人维护的数字判到期。
+_CURRENT_STAGE = re.compile(r"<!--\s*DELIVERY_STAGE\s*[:：]\s*([0-9]+)\s*-->")
+
+
+def _declared_stage() -> int:
+    status = PROJECT_ROOT / "docs" / "STATUS.md"
+    if not status.exists():
+        raise Failure(f"{status} 不存在 —— 还款日门禁没有当前阶段可比")
+    match = _CURRENT_STAGE.search(status.read_text(encoding="utf-8"))
+    if not match:
+        raise Failure(
+            "docs/STATUS.md 里找不到 `<!-- DELIVERY_STAGE: N -->` 标记。"
+            "少了它，「欠账到期没还」这件事又回到没有任何机制会响的状态。"
+            "把它写在文件顶部那一格里，和阶段清点表放在一起。"
+        )
+    return int(match.group(1))
+
+
+def check_no_debt_guard_is_past_its_due_stage() -> None:
+    """欠账守卫必须声明还款日，而且不许过期。
+
+    ## 这条门禁是被一笔"到期没还"的欠账换来的
+
+    §3.34 立的规矩是「欠账要么写成会变红的守卫,要么就不要写」,而那条规矩
+    有一个当时没看见的缺口:**守卫钉的是"没接线"这个事实,不钉"什么时候
+    该接"。**
+
+    `facts_stale` 那条欠账的还款日写在 docstring 里 —— 「要等属性值行也带上
+    指纹列,**那是阶段 4 的事**」。阶段 4 落码了,这件事没做,而守卫**没有
+    变红**:它断言的是"这两个不许被登记成接线",而"没登记"这件事仍然为真。
+
+    一般化:**判据落在别人身上的守卫,守不住自己。**
+
+    ## 还款日的语义:阶段 N 之前必须还清
+
+    `还款日:阶段 N` 读作「交付阶段推进到 N 之前要还清」,所以
+    `N <= 当前阶段` 就是逾期。选这个语义而不是"阶段 N 期间还",是因为前者
+    能被一个数字判定,而后者要判"这个阶段做完了没有" —— 那是一句没有人
+    能机械回答的话。
+
+    拿本批那笔欠账验一遍:它的还款日写的是"阶段 4",而当前阶段正是 4 ——
+    **这条门禁要是早一批存在,它会当场红。**
+
+    ## 自己会红,不等于到期会红
+
+    仓库里四条欠账守卫都写着"接线那天这条会红",而那是真的:它们断言的是
+    "还没人接",接了就红。但**没人接的时候它们永远是绿的** —— 那正是
+    `facts_stale` 那笔欠账躺过一整个阶段的方式。自翻转是还款的**确认**,
+    不是还款的**催促**,两者都要有。
+
+    ## 三种状态,三句话,不靠时态去猜
+
+        欠着      docstring 有 `记的是欠账` + `还款日:阶段 N`
+        已还清    docstring 有 `欠账已还`(翻转成正向守卫时补上这一句)
+        不相干    两句都没有
+
+    第二句是必须的:把还清的欠账守卫翻转成正向守卫、并留一段"原来记的是
+    欠账,某批把它收了"的叙述,是这个仓库的习惯 —— 而那段叙述会让第一个
+    标记在过去时里命中(第一版当场误伤了 14-10 那条)。
+
+    ## 反向也钉:不写标记不能当成绕过
+
+    名字里带欠账命名式(`..._and_this_is_the_ledger` 等)却没有标记的,
+    一律红。少了这一条,整条门禁最省事的绕法就是把那句话删掉。
+
+    ## 为什么当前阶段读 STATUS 而不是写在这里
+
+    写在脚本里的常量没有人会记得改,而 STATUS 顶部那张阶段清点表是每批都要
+    动的东西。标记就放在它旁边,读的是同一个人刚写下的判断。
+    读不到标记时**红**,不是静静跳过 —— 静静跳过等于这条门禁自己也变成
+    一笔没有还款日的欠账。
+    """
+    stage = _declared_stage()
+    root = PROJECT_ROOT / "backend" / "tests" / "pure"
+    if not root.is_dir():
+        raise Failure(f"找不到 {root} —— 这条门禁失去了对象")
+
+    undeclared: list[str] = []
+    overdue: list[str] = []
+    unmarked: list[str] = []
+    seen_debt = 0
+
+    for path in sorted(root.rglob("test_*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+                continue
+            doc = ast.get_docstring(node) or ""
+            # 声明只认开头那一段,见 DEBT_DECLARATION_PARAGRAPHS 上面那段
+            head = "\n\n".join(doc.split("\n\n")[:DEBT_DECLARATION_PARAGRAPHS])
+            where = f"{path.name}::{node.name}"
+            if DEBT_REPAID_MARKER in head:
+                continue
+            if DEBT_GUARD_MARKER not in head:
+                if any(hint in node.name for hint in DEBT_GUARD_NAME_HINTS):
+                    unmarked.append(where)
+                continue
+            seen_debt += 1
+            due = _DUE_STAGE.search(doc)
+            if not due:
+                undeclared.append(
+                    where
+                    + ("（写了还款日但不是「阶段 N」）" if _DUE_ANY.search(doc) else "")
+                )
+                continue
+            if int(due.group(1)) <= stage:
+                overdue.append(f"{where}（还款日 阶段 {due.group(1)}）")
+
+    problems: list[str] = []
+    if unmarked:
+        problems.append(
+            "这些守卫的名字说它记的是欠账，而 docstring 里没有那句标记："
+            + "、".join(unmarked)
+            + f"。补一句「{DEBT_GUARD_MARKER}」和「还款日：阶段 N」；"
+            f"已经还清的话补「{DEBT_REPAID_MARKER}」。不写标记不是绕过的办法。"
+        )
+    if undeclared:
+        problems.append(
+            "这些欠账守卫没有声明还款日："
+            + "、".join(undeclared)
+            + "。写「还款日：阶段 N」，读作「阶段 N 之前必须还清」。"
+            "没有还款日的欠账有两种下场——被忘掉，或者在还清之后继续吓唬人。"
+        )
+    if overdue:
+        problems.append(
+            f"当前交付阶段是 {stage}，而这些欠账的还款日已经到了："
+            + "、".join(overdue)
+            + "。这正是 facts_stale 那笔欠账的形状——守卫钉的是「没接线」这个事实，"
+            "不钉「什么时候该接」，于是到期不还没有任何东西会响。"
+            "现在要么还上它，要么把还款日往后改并写清为什么改。"
+        )
+    if problems:
+        raise Failure("；".join(problems))
+
+    # 反向：一条欠账都找不到时**红**。今天仓库里确实有四条，归零只可能是两种
+    # 情况——真的全还清了（那时该连这条门禁一起重新想），或者标记被人顺手删了。
+    # 后者才是常见的那一种，而它的表现是这条门禁静静地永远绿
+    if not seen_debt:
+        raise Failure(
+            "一条带标记的欠账守卫都没找到。要么欠账真的全还清了"
+            "（那时该重新想这条门禁还盯不盯得住东西），"
+            f"要么「{DEBT_GUARD_MARKER}」这句标记被删掉了——后者的表现是本条永远绿。"
+        )
+
+
 def check_the_decision_log_has_no_duplicate_section_numbers() -> None:
     """`docs/DECISIONS.md` 里同一个 §编号不许出现两次。
 
@@ -731,6 +959,44 @@ def check_the_decision_log_has_no_duplicate_section_numbers() -> None:
         raise Failure("docs/DECISIONS.md 里一节都没有 —— 这条门禁失去了对象")
 
 
+def check_every_column_can_say_who_writes_it() -> None:
+    """每一列都要回答「谁写它」——判定在 `tools/audit_column_writers.py`。
+
+    ## 为什么这条门禁要存在
+
+    §3.38 把「一列落库了、被判定读取,而没有任何写入路径」点成了一个类。
+    这个仓库为它付过两次代价:`media_assets.color_variant_id` 躲了五批,
+    §4.8 新去重键躲了六批。**两次都是人逐条对着 PRD 核才核出来的。**
+
+    第三次不会有人这么核 —— 一条只在有人手工复核时才会发现的规矩,
+    等于没有规矩(§3.34 立那条时说的就是这句话)。
+
+    ## 判定不写在这里
+
+    与「欠账守卫都在还款日之内」同一个理由:这条要遍历 `app/` 全部源码、
+    建每个模型的列表与写入点索引,几百行。写进本文件会让 `verify_delivery`
+    变成一个既是门禁又是分析器的东西,而它的定位是**串起所有门禁**。
+
+    审计脚本自己可以单独跑(`make audit-columns`),输出带分类与原因;
+    这里只判它的退出码。
+    """
+    script = PROJECT_ROOT / "backend" / "tools" / "audit_column_writers.py"
+    if not script.exists():
+        raise Failure(f"找不到 {script} —— 这条门禁失去了判定")
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=script.parent.parent,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise Failure(
+            "有列答不出「谁写它」。逐条见下,处理方式是补写入路径、"
+            "或者进 `audit_column_writers.LEDGER` 并写清原因与还款日:\n"
+            + (proc.stdout or proc.stderr).strip()
+        )
+
+
 CHECKS = [
     ("仓库树里没有凭据文件", check_no_secret_material_in_the_working_tree),
     ("仓库树里没有构建产物", check_no_build_artifacts_in_the_working_tree),
@@ -738,14 +1004,16 @@ CHECKS = [
     ("打包脚本先排除再复验", check_the_pack_script_excludes_and_then_verifies),
     ("backend/.dockerignore 排除密钥目录", check_backend_dockerignore_excludes_the_key_directory),
     ("每条前端门禁脚本都有人调用", check_every_frontend_gate_script_is_invoked),
-    ("CI 覆盖全部 12 条门禁", check_ci_runs_every_gate),
+    ("CI 覆盖全部 13 条门禁", check_ci_runs_every_gate),
     ("CI 的 pytest 有 PostgreSQL + Redis", check_ci_backs_pytest_with_redis),
     ("make check 覆盖前端门禁", check_the_offline_gate_is_honest_about_its_coverage),
     ("Vitest 四件事都接上了", check_the_frontend_test_runner_is_actually_wired),
     ("前端用例 0 skip", check_no_skipped_frontend_tests),
     ("迁移链单一 head", check_the_migration_chain_has_a_single_head),
     ("决策日志编号不重复", check_the_decision_log_has_no_duplicate_section_numbers),
+    ("欠账守卫都在还款日之内", check_no_debt_guard_is_past_its_due_stage),
     ("落地的模块真的被接线了", check_every_wired_module_is_actually_called),
+    ("每一列都答得出谁写它", check_every_column_can_say_who_writes_it),
 ]
 
 

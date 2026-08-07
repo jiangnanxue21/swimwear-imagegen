@@ -220,8 +220,12 @@ def variant_gate_roles(
 ) -> frozenset[str]:
     """颜色作用域:该颜色够格样品的角色集合。
 
-    **今天没有调用点**,因为归属外键还没落库(模块文档末段)。
-    判定本身已经验过,接线那一天不需要重新证明它。
+    **A45-batch14-21 改掉了这里的一句陈旧理由。** 原文写的是「今天没有
+    调用点,因为归属外键还没落库」—— 外键在迁移 0037 就落了,而这个函数
+    从 14-15 起就在 `workbench/service._material_facts` 里被逐颜色调着。
+
+    §3.33:一条过期的理由比没有理由更糟。照着它去查的人会发现列就在那儿,
+    然后不知道该信文档还是信代码。
     """
     return _roles_of(
         (a for a in assets if _in_variant(a, variant_id)),
@@ -289,7 +293,15 @@ def confirmable_roles(
 def variant_confirmable_roles(
     assets: Iterable[Any], variant_id: str, *, imported_url_trusted: bool = False
 ) -> tuple[str, ...]:
-    """颜色作用域的同一件事。今天没有调用点,理由同 `variant_gate_roles`。"""
+    """颜色作用域的同一件事。**今天确实没有调用点,但理由和上面那个不同。**
+
+    上面那个的"没有调用点"在 14-15 就不成立了(见它的文档)。这一个还成立,
+    而原因不是缺列,是**缺界面**:"该颜色还差哪几个角色、哪几张现有素材
+    可以补上去"这句话要显示在按颜色上传的界面里,而那是阶段 2 的剩余项。
+    算出来没有地方显示的清单,接了也只是多一个没人读的返回值(§3.32)。
+
+    判定本身已经穷举验过,那个界面落地的那天不需要重新证明它。
+    """
     subset = [a for a in assets if _in_variant(a, variant_id)]
     return _confirmable(
         subset,

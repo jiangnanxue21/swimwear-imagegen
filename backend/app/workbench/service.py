@@ -212,6 +212,18 @@ def _attribute_facts(
         #
         # 混成一个的后果写在 `AttributeStatus` 自己的文档字符串里。
         candidate_only=buckets.evidence_only,
+        # §5.3 / AC-21。**这一层不判定,只把结果递过去** —— 判定在
+        # `attributes.service.stale_fields`,它是 `facts_stale` 的唯一调用点。
+        #
+        # 在这里就地写"取指纹、按 owner 找作用域、比一比"的话,写入侧
+        # (`apply_evidence` / `confirm`)和读取侧就会各有一套集合口径,
+        # 而漂移的表现是**一条刚确认完的事实立刻显示已过期** ——
+        # 两边都不报错,而运营会一直点同一个字段。
+        #
+        # 多一次取数(深度 0,一件商品一条 SELECT)。查询预算棘轮断言的是
+        # 形状不是总数,这一条不踩红;真要省的话该省的是让
+        # `_material_facts` 与它共用素材行,那是另一件事,不在本批范围。
+        stale=attr_service.stale_fields(session, product, values),
         extraction_count=int(extraction_count),
     )
 

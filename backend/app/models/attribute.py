@@ -255,6 +255,19 @@ class ProductAttributeValue(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     confidence_breakdown: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1")
     calibration_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: 这条事实产生/确认时,**它自己那个作用域**的样品指纹(§4.5 / §5.3)。
+    #: 迁移 0042。`scope_fingerprint.facts_stale` 拿它和当前作用域指纹比。
+    #:
+    #: **不是 run 行上那一列。** 那一列(0040,`ProductAttributeExtraction`)
+    #: 记的是"这次 run 吃进去的是哪批素材";这一列记的是"这条事实是按哪批
+    #: 素材立起来的"。一次 run 产出多条事实,一条事实跨多次 run 存活 ——
+    #: 拿 run 行的指纹比属性值,共享事实与颜色事实会共用同一个答案,
+    #: 于是给颜色 A 补图会 stale 掉 B 色事实,正是 D1 那个问题从后门回来。
+    #:
+    #: 该比哪个作用域由 `validation.fingerprint_scope()` 按 owner 决定,
+    #: 不由写入点各自判断。空值一律判过期(算不出来就算过期),
+    #: **不回填**的理由写在迁移 0042 里
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     valid_from: Mapped[datetime | None] = mapped_column(nullable=True)

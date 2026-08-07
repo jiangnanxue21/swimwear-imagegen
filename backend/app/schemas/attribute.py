@@ -105,6 +105,15 @@ class AttributeValueOut(BaseModel):
     #: 因子分解。前端要能回答"0.71 是因为只有一张图还是因为图太糊"
     confidence_breakdown: dict[str, Any] | None = None
     evidence_ids: list[str] = []
+    #: 这条事实依据的那批样品变了没有(§5.3 / AC-21)。
+    #: 由 `attributes.service.stale_fields` 派生,**库里没有这一列** ——
+    #: §8.2 写死了「下游过期一律派生比较,不写 STALE 列」。
+    #:
+    #: 默认 True 是刻意的:这个字段的两个来源(接口层填、Pydantic 兜底)
+    #: 里,兜底那条意味着**没有人算过它**,而"没算过"必须显示成"证明不了
+    #: 它仍然成立"。默认 False 的话,一次忘记赋值的表现是全库事实显示正常,
+    #: 而那正是这一整条机制要防的事。
+    facts_stale: bool = True
     confirmed_by: str | None = None
     confirmed_at: datetime | None = None
 

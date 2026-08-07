@@ -200,9 +200,18 @@ async def upload_asset(
     session: Session = Depends(db_session),
     file: UploadFile = File(...),
     asset_type: AssetType = Form(...),
+    #: 这张图是哪个颜色的样品(§4.8)。**表单可选** —— 不给就是通用图,
+    #: 与本参数存在之前的行为逐字相同。
+    #:
+    #: 校验落在服务层而不是这里:一个不属于本商品所在 SPU 的颜色 id 是
+    #: **语义**错误,不是格式错误,而 §4.3 那条「跨 SPU 同名颜色是常态」
+    #: 意味着光看 UUID 分不出它属于谁
+    color_variant_id: UUID | None = Form(None),
     storage=Depends(get_storage),
 ) -> AssetUploadResult:
     product = product_service.get_product(session, product_id)
+    if color_variant_id is not None:
+        product_service.assert_colour_belongs_to(session, product, color_variant_id)
 
     limit = settings.max_upload_bytes
     data = await read_within_limit(file, limit)
@@ -215,6 +224,7 @@ async def upload_asset(
         asset_type=asset_type,
         storage=storage,
         actor=current_actor(request),
+        color_variant_id=color_variant_id,
     )
     # 字节已经落到存储层了,这一次提交决定的是「库里认不认这张图」。
     # 提交失败时存储里会留一个没有素材行的孤儿文件 —— 与提交成功后

@@ -1,4 +1,4 @@
-.PHONY: help init up down logs migrate revision seed test test-pure smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
+.PHONY: help init up down logs migrate revision seed test test-pure smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-columns fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
 
 help:
 # 字符类里带上数字:`p0-gate` 这类带编号的目标原来会被这条 grep 静默滤掉 ——
@@ -63,6 +63,9 @@ verify-imports: ## app.* 的 import 是否都指向真实存在的东西(零依�
 # 对象跑起来,本身就是事故。`ast` 只要求语法合法,秒级、零子进程,进离线子集。
 audit-anchors: ## 变异脚本的锚点还对不对(只解析,不执行)
 	cd backend && python3 tools/audit_anchors.py
+
+audit-columns: ## 每一列都答得出「谁写它」(落库无写入路径的列会被点名)
+	cd backend && python3 tools/audit_column_writers.py
 
 audit-guards: ## 守卫的窗口封不封闭(反向断言不许吃切窄的源码)
 	cd backend && python3 tools/audit_source_guards.py

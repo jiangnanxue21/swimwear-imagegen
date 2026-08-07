@@ -132,8 +132,15 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "F2",
         "步骤状态重新把 CANDIDATE 算成「等人点头」(完成度虚高到 0.6)",
         FLOW,
-        "            if all(m in facts.suggested for m in missing)",
-        "            if all(m in facts.suggested or m in facts.candidate_only for m in missing)",
+        # A45-batch14-21 重锚:那一行加进了 `or m in stale_confirmed`
+        # (过期字段算「等人点头」,理由在 flow.py 那段注释里)。
+        # **锚点必须跟着走** —— 失锚的变异不报错、不变红,只是安静地什么
+        # 都没验,而这条 F2 钉的是 §11 修过的那个具体缺陷
+        "            if all(m in facts.suggested or m in stale_confirmed for m in missing)",
+        "            if all(\n"
+        "                m in facts.suggested or m in stale_confirmed or m in facts.candidate_only\n"
+        "                for m in missing\n"
+        "            )",
     ),
     (
         "F3",

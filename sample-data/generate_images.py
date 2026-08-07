@@ -4,10 +4,27 @@
 这些不是真实商品照片,只是带图案的占位图 —— 目的是让阶段 2 的上传、去重、
 尺寸探测和详情页展示能在没有真实素材时也跑通。
 接入真实 Provider(阶段 5)前请替换为真实商品图。
+
+## 两套命名,因为素材的归属层级不同(阶段 1 / §5.3)
+
+    <sku>_<view>.jpg                    老结构:按 SKU 挂。products.csv 那 10 件
+    <spu>-<variant>_<view>.jpg          新结构:**按颜色挂**
+    <spu>__<view>.jpg                   新结构:通用图(不属于任何颜色)
+
+按颜色挂是新结构的要点。一个颜色的样品图对该颜色下的每一个尺码都算数,
+而 §5.3 的颜色作用域指纹正是按 `color_variant_id` 分组的。
+
+按 SKU 挂的话,同一个颜色的三个尺码会各存一份同样的图 —— 去重键把后两份
+挡掉,于是 S 码有图、M/L 没有,表现是「同一个颜色有的尺码缺图」。
+
+通用图那一档存在的意义很具体:它让「补一张通用图**不该** stale 掉颜色事实」
+这条(§5.3 模块文档第二条)在样例数据上验得到。少了它,颜色维整个被关掉的
+缺陷会表现成「全都不过期」,而那看起来很像正常。
 """
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -88,6 +105,56 @@ def render(sku: str, view: str, primary: str, secondary: str, pattern: str, labe
     return path
 
 
+#: 颜色 working_name -> 调色板里的键。样例里的颜色名是中文,而 `COLORS`
+#: 的键是英文 —— 缺一条映射的表现不是报错,是那个颜色回落到灰色占位,
+#: 于是三个颜色的图**看起来一样但哈希不同**,肉眼查不出来,而它恰恰会让
+#: 「这张图是哪个颜色的」在演示时失去意义
+VARIANT_PALETTE = {
+    "BLK": ("black", "gold"),
+    "COR": ("coral", "white"),
+    "NVY": ("navy", "white"),
+    "WHT": ("white", "beige"),
+    "GRY": ("beige", "black"),
+}
+
+
+def render_new_structure() -> int:
+    """按新结构出图:每个颜色一组,外加每个 SPU 一张通用图。
+
+    复用上面那个 `render()` —— **不写第二个渲染器**。写第二个的代价不是
+    重复,是两套占位图会漂移(尺寸、质量、水印文案),而上传校验的
+    `min_edge_px` 只在其中一套上被验过。
+    """
+    manifest = HERE / "spus.json"
+    if not manifest.exists():
+        print(f"缺少 {manifest},跳过新结构样例图", file=sys.stderr)
+        return 0
+
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    views = tuple(data["sample_images"]["views"])
+    shared_views = tuple(data["sample_images"]["shared_views"])
+
+    count = 0
+    for spu in data["spus"]:
+        code = spu["spu_code"]
+        for variant in spu["color_variants"]:
+            primary, secondary = VARIANT_PALETTE.get(
+                variant["variant_code"], ("teal", "white")
+            )
+            for view in views:
+                render(
+                    f"{code}-{variant['variant_code']}", view, primary, secondary,
+                    "SOLID", f"{spu['internal_name']} · {variant['working_name']}",
+                )
+                count += 1
+        # 通用图:文件名里变体段为空(双下划线)。它只进共享作用域
+        for view in shared_views:
+            render(f"{code}_", view, "teal", "beige", "GEOMETRIC",
+                   f"{spu['internal_name']} · 通用")
+            count += 1
+    return count
+
+
 def main() -> int:
     csv_path = HERE / "products.csv"
     if not csv_path.exists():
@@ -104,7 +171,8 @@ def main() -> int:
                     row.get("pattern_type", "SOLID"), row["name"],
                 )
                 count += 1
-    print(f"生成 {count} 张示例素材 -> {OUT}")
+    new_count = render_new_structure()
+    print(f"生成 {count} 张老结构素材 + {new_count} 张新结构素材 -> {OUT}")
     return 0
 
 

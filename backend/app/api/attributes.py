@@ -37,16 +37,28 @@ from app.schemas.attribute import (
 router = APIRouter(tags=["attributes"], dependencies=[Depends(require_operator)])
 
 
-def _out(row) -> AttributeValueOut:
-    """属性行 + 它的字段类型(BLOCK-11)。
+def _out(row, *, stale: frozenset[str]) -> AttributeValueOut:
+    """属性行 + 它的字段类型(BLOCK-11)+ 它过没过期(§5.3)。
 
     **两个返回属性值的端点都必须走这里。** 只在 list 上带 spec、confirm 上
     不带的话,前端在确认之后会拿到一条没有类型的行,于是那一行的编辑控件
     退化回纯文本 —— 缺陷会以"确认过一次之后才复现"的形状回来,
     而那是最难被测出来的形状。
+
+    ## `stale` 是必传的,没有默认值
+
+    同一个理由的第二次应用。给它一个默认值(无论 True 还是 False)的话,
+    第三个端点写出来时会**忘记传**而不报错:默认 False 让全库事实显示正常,
+    默认 True 让全库事实显示过期,两个方向都是一句没人算过的话。
+    必传的话,忘记传是一个 TypeError,在写的那一刻就红。
+
+    传集合而不是布尔:调用方一次拿到多行,逐行算一次等于逐行取一次数
+    (`stale_fields` 内部要查素材),而**两次取数之间素材可能变** ——
+    同一个响应里的几行分属不同的输入快照,一个查不出来的不一致。
     """
     out = AttributeValueOut.model_validate(row)
     out.spec = FieldSpecOut(**field_spec_out(row.field_name))
+    out.facts_stale = row.field_name in stale
     return out
 
 
@@ -104,9 +116,20 @@ def extract_attributes(
 def list_attributes(
     product_id: UUID, session: Session = Depends(db_session)
 ) -> list[AttributeValueOut]:
-    _product(session, product_id)
-    values = attr_service.effective_map(session, product_id)
-    return [_out(v) for v in sorted(values.values(), key=lambda r: r.field_name)]
+    product = _product(session, product_id)
+    # 带 `product=` 才读得到分层后的值(SPU / VARIANT / SKU 三个 owner),
+    # 不带只读 legacy 那一处。原来这里不带 —— 而作用域判定要 owner,
+    # 拿 legacy 行去问"该比哪个颜色的指纹"会一律得到共享作用域,
+    # 于是颜色事实的过期判断静静地退化成 SPU 级(D1 从后门回来)
+    values = attr_service.effective_map(session, product_id, product=product)
+    # 全都看,不只看已确认的(`settled_only=False`)。接口回答的是
+    # "库里这一行的指纹对不对得上",而工作台问的是"该不该催人" ——
+    # 后者才需要只看已确认的那一档,理由在 `stale_fields` 的文档里
+    stale = attr_service.stale_fields(session, product, values, settled_only=False)
+    return [
+        _out(v, stale=stale)
+        for v in sorted(values.values(), key=lambda r: r.field_name)
+    ]
 
 
 @router.post(
@@ -146,8 +169,20 @@ def confirm_attributes(
                 http_status=422,
                 detail={"field_name": exc.field_name, "reason": exc.reason},
             ) from exc
+    # **确认完照样算一次,不假设"刚写的一定不过期"。**
+    #
+    # 多数情况下它确实是 False。但有一种情况不是:这个字段落在一个今天
+    # 没有任何证据素材的颜色上 —— `fingerprint_for_owner` 查不到那个键,
+    # 存进去的就是 NULL,而 NULL 判过期。硬写 False 的话,界面会说
+    # "已确认",刷新之后工作台说"样品已变",两句话都来自同一次动作。
+    stale = attr_service.stale_fields(
+        session,
+        product,
+        {row.field_name: row for row in written},
+        settled_only=False,
+    )
     session.commit()
-    return [_out(v) for v in written]
+    return [_out(v, stale=stale) for v in written]
 
 
 @router.get("/extractions/{extraction_id}", response_model=ExtractionDetailOut)

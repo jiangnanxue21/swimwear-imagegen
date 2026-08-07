@@ -33,6 +33,23 @@ from app.services import audit, generation_plan_service
 logger = get_logger(__name__)
 
 
+def _angle_value(raw) -> str | None:
+    """把入参角度归一成库里存的那个字符串。
+
+    入参层已经用 `ImageAngle` 枚举卡过一次(拼错的角度停在 422),
+    这里处理的是**另一条路**:`create_set` 的 items 是 `dict`,
+    调用方可以是接口层(值已是枚举)、也可以是内部调用(值可能是字符串)。
+
+    `StrEnum` 直接 `str()` 得到的是取值本身,所以两条路在这里合流。
+    空串归一成 None —— 库里 NULL 与 `''` 都表示"没标注",
+    留两种形状会让 `covered_angles` 的集合里多出一个空元素。
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
 def _now():
     return utc_now()
 
@@ -429,6 +446,13 @@ def create_set(
                             is_primary=bool(item.get("is_primary", False)),
                             enabled=bool(item.get("enabled", True)),
                             derivative_purpose=item.get("derivative_purpose"),
+                            # §6.5 的两列。**没有这两个 kwarg 时它们恒为默认值**,
+                            # 而 `_to_view` 与 `_section_6_5` 都在读它们 ——
+                            # 后果不是「少了个功能」:`angle` 恒 NULL 会让配了方案的
+                            # 颜色永远覆盖不了必要角度,而门禁报出来的是「缺正面图」。
+                            # 运营会去补图,补多少张都没用。
+                            shared_opt_in=bool(item.get("shared_opt_in", False)),
+                            angle=_angle_value(item.get("angle")),
                         )
                     )
                 session.flush()

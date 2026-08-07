@@ -36,6 +36,7 @@ from app.core.enums import MediaRole, MediaSource, MediaStatus, RoleSource
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.sorting import normalize_sort
+from app.attributes import scope_fingerprint
 from app.media import evidence_rules, provenance_conflict
 from app.media.mapping import (
     LEGACY_CANDIDATE,
@@ -78,6 +79,19 @@ def ingest(
     role: MediaRole | None = None,
     role_source: RoleSource = RoleSource.UNSET,
     role_confidence: float | None = None,
+    #: 素材属于哪个颜色(§4.8 归属外键,迁移 0037)。`None` = 通用素材,
+    #: **只进共享作用域,不进任何颜色子集**(§5.3 模块文档第二条)。
+    #:
+    #: A45-batch14-22 之前这一列**没有任何写入路径** —— 列在、
+    #: `sample_completeness` 与 `scope_fingerprint` 两处判定都读它、
+    #: 而全仓恒为 NULL。表现不是报错,是**颜色维整个塌成一维**:
+    #: 每一张图都算通用图,于是「给 A 色补图」和「补一张通用图」在指纹上
+    #: 完全一样,AC-21 那条全称命题在真数据上永远平凡成立。
+    #:
+    #: 与 `variant_hint` 严格分开:那是模型猜的字符串,这是人给的外键。
+    #: 两者混用正是 §6.2 收紧 role 口径要禁的那件事 —— 让模型的猜测决定
+    #: 一份已确认的事实什么时候过期
+    color_variant_id: UUID | None = None,
     variant_hint: str | None = None,
     status: MediaStatus = MediaStatus.READY,
     quality: dict[str, Any] | None = None,
@@ -122,6 +136,7 @@ def ingest(
     if existing is not None:
         _fill_missing_role(existing, role=role, role_source=role_source,
                            role_confidence=role_confidence)
+        _fill_missing_colour(existing, color_variant_id=color_variant_id)
         if conflict is provenance_conflict.Verdict.SOURCE_CONFLICT:
             # **去重命中这一路不改状态。** 命中的那条很可能就是生成链路
             # 自己的候选行(`candidate.media_asset_id` 指着它),隔离它等于
@@ -141,6 +156,32 @@ def ingest(
             )
         return existing, True
 
+    # §4.8 证据等级。**这里调派生函数,不手写值。**(A45-batch14-26)
+    #
+    # 落成存储列之后仍然只有这一个应用层写入点 —— 这一行是"派生 + 存储 +
+    # CHECK"三件套里"存储"那一件的全部实现。写成字面量、或者在这里补一个
+    # `if source == ...` 的分支,就是风险表 D3 描述的第二个判定点。
+    #
+    # **位置是刻意的:排在冲突判定之前。** 派生只依赖来源、溯源、角色,
+    # 与隔离与否无关。排在后面的话,它会插进
+    # `status = MediaStatus.QUARANTINED` 与 `asset = MediaAsset(` 之间 ——
+    # 而 `mutate_batch14_11.py` 的 W3 锚点靠这两行相邻。本批第一版就是
+    # 那么写的,`audit_anchors` 当场报「锚点过期」:那条变异从此什么都没验。
+    #
+    # 复用 `_IMPORTED_URL_TRUSTED`,**不新开一个口径**。它与
+    # `attributes.service.EVIDENCE_IMPORTED_URL_TRUSTED` 同值(见其定义处)。
+    # 这里单独写 True/False 就有了第三处,而三处漂移之后,落库时算出的
+    # evidence_class 与白名单读取时算出的可以不一致 —— 表现是"这张图在
+    # 素材页上是商品证据,识别却不吃它"。
+    evidence_class = evidence_rules.derive_evidence_class(
+        source=source.value,
+        generation_task_id=generation_task_id,
+        generation_candidate_id=generation_candidate_id,
+        role=role.value if role else None,
+        legacy_asset_type=None,
+        imported_url_trusted=_IMPORTED_URL_TRUSTED,
+    )
+
     if conflict is provenance_conflict.Verdict.SOURCE_CONFLICT:
         # §11:「拒绝并提示来源冲突,**落隔离待人工放行**」——两件事都要。
         # 不抛异常:影子写和业务写在同一个事务里(见模块顶部),抛出去会把
@@ -159,11 +200,18 @@ def ingest(
 
     asset = MediaAsset(
         product_id=product.id,
+        # §4.8 归属:权威是外键,`spu` 字符串是它的反规范化副本(0043)。
+        # 两个都写、且都从 `product` 抄 —— 商品自己没有 SPU 时两个都是空,
+        # 那批行走 0044 的兜底去重键。**不要在这里从 `product.spu` 字符串
+        # 反查 SPU 行补外键**:那个码可能因改名而断开,反查出来的是错的。
+        spu_id=product.spu_id,
         spu=product.spu,
+        evidence_class=evidence_class.value,
         source=source.value,
         role=role.value if role else None,
         role_source=role_source.value,
         role_confidence=role_confidence,
+        color_variant_id=color_variant_id,
         variant_hint=variant_hint,
         storage_path=storage_path,
         mime_type=mime_type,
@@ -252,15 +300,48 @@ def _fill_missing_role(
     asset.role_confidence = role_confidence
 
 
+def _fill_missing_colour(asset: MediaAsset, *, color_variant_id: UUID | None) -> None:
+    """去重命中时,只在归属**还没定过**的情况下补一次。
+
+    与 `_fill_missing_role` 同一条口径,理由也同一条:一条归属为空的素材
+    对下游是"通用图",而通用图不进任何颜色子集(§5.3)—— 真是某个颜色的
+    样品却挂成通用,表现是那个颜色的完整度门禁永远缺图,而运营明明传过。
+
+    **已经定过的一律不动。** 改归属是一次有后果的动作:§5.3 明写
+    「修改素材颜色归属 A→B → 原颜色、新颜色、共享三个指纹同时变化」,
+    也就是三批事实同时过期。让一次**重复上传**顺手触发它,是最难查的一类
+    数据变更 —— 运营做的动作是"再传一次同一张图",看到的结果是
+    "另外两个颜色的事实全部退回待确认"。
+
+    要改归属,走显式的改归属动作(它会留下审计与
+    `changed_fingerprint_scopes`),不走这里。
+    """
+    if color_variant_id is None:
+        return
+    if asset.color_variant_id is not None:
+        return
+    asset.color_variant_id = color_variant_id
+
+
 # ------------------------------------------------------------------ 影子写
 
 
-def shadow_from_product_asset(session: Session, product: Product, asset) -> MediaAsset:
+def shadow_from_product_asset(
+    session: Session,
+    product: Product,
+    asset,
+    *,
+    color_variant_id: UUID | None = None,
+) -> MediaAsset:
     """人工上传 / 外链导入(迁移 A)。
 
     `check_passed=False` 的素材落成 `QUARANTINED` 而不是 `READY`:
     旧模型里那是一个「记了一笔但照用不误」的标记,新模型里它必须真的
     挡住下游 —— 上架用图不能是一张没通过检查的图。
+
+    `color_variant_id` 由上传方给(A45-batch14-22)。**默认 None = 通用图**,
+    与老路径行为一致 —— 老路径不带颜色,而新结构下不带颜色的图确实是通用图,
+    两者在这一列上恰好同解,所以这里不需要一个"过渡值"。
     """
     status = MediaStatus.READY if asset.check_passed else MediaStatus.QUARANTINED
     role = role_for_legacy_asset_type(asset.asset_type)
@@ -275,6 +356,7 @@ def shadow_from_product_asset(session: Session, product: Product, asset) -> Medi
         byte_size=asset.file_size,
         source=MediaSource.MANUAL_UPLOAD,
         role=role,
+        color_variant_id=color_variant_id,
         # 旧枚举是人工在上传时选的,所以角色来源是 HUMAN。
         # 但 GARMENT_CUTOUT -> FLAT_LAY、MODEL_REFERENCE -> MODEL_FRONT
         # 这两条映射是有损的,素材库页面应当提示复核
@@ -619,6 +701,63 @@ def usable_asset_count(session: Session, product_id: UUID) -> int:
 # ------------------------------------------------------------------ 人工操作
 
 
+# ------------------------------------------------------------------ §8.1 第 2 行
+
+
+def _evidence_views(session: Session, product_id: UUID) -> list[Any]:
+    """一件商品当前证据素材的**指纹入参快照**(§5.3)。
+
+    经 `views()` 而不是把 ORM 行留在手里,有一个具体的理由:ORM 行是**活的**。
+    SQLAlchemy 的身份映射会让"改之前取的那一批"和"改之后取的那一批"是同一批
+    Python 对象,于是 before 与 after 逐字段相同,`changed_scopes()` 永远返回
+    空集 —— 不报错,只是让 §8.1 第 2 行那一格恒定说"什么都没变"。
+
+    `AssetView` 在构造时把每一项 getattr 下来,所以它是死的、是快照。
+    """
+    return scope_fingerprint.views(
+        evidence_assets_for(
+            session, product_id, imported_url_trusted=_IMPORTED_URL_TRUSTED
+        )
+    )
+
+
+#: 与 `attributes.service.EVIDENCE_IMPORTED_URL_TRUSTED` 同值,理由写在那边。
+#: 两处不同的话,素材侧算出"某作用域变了"而事实侧按另一个集合算指纹,
+#: 于是审计说变了、事实说没变 —— 两句话都查得到,谁也对不上谁。
+_IMPORTED_URL_TRUSTED = True
+
+
+def _scope_change_payload(
+    before: list[Any], after: list[Any]
+) -> dict[str, list[str]]:
+    """哪些作用域的样品指纹被这次动作改变了(§8.1 第 2 行,AC-21)。
+
+    ## 为什么记进审计,而不是就地 stale 掉事实
+
+    §8.2:「下游过期一律**派生比较**,不写 STALE 列」。事实过没过期由
+    `facts_stale` 在读取时拿存下的指纹和当前指纹比,这里写一列的话就有
+    两个事实源,而没人知道该信哪个。
+
+    那记它做什么?**因为"为什么这堆事实突然要重新确认"今天回答不了。**
+    运营隔离一张图,第二天发现三个字段回到待确认 —— 派生比较能证明它们
+    确实过期了,但证明不了是哪一次动作造成的。这一行审计就是那个答案,
+    而且是 AC-21 在真环境里唯一能被**直接观察**的地方:隔离一张 A 色图,
+    审计里写着 `["SHARED", "<A 色 id>"]`,B 不在里面。
+
+    共享作用域在 payload 里写成 `"SHARED"` 而不是 `null`:JSON 里的 null
+    在日志检索时和"这个键不存在"长得一模一样,而两者的含义相反。
+    """
+    changed = scope_fingerprint.changed_scopes(
+        before, after, imported_url_trusted=_IMPORTED_URL_TRUSTED
+    )
+    return {
+        "changed_fingerprint_scopes": sorted(
+            "SHARED" if scope is scope_fingerprint.SHARED else str(scope)
+            for scope in changed
+        )
+    }
+
+
 def set_role(
     session: Session,
     media_id: UUID,
@@ -653,12 +792,25 @@ def set_role(
             code=ErrorCode.INPUT_INVALID,
             http_status=409,
         )
+    # `role` 是指纹元素之一(§5.3 的元素清单),所以改角色会改指纹 ——
+    # 快照必须取在赋值**之前**
+    before = _evidence_views(session, asset.product_id)
     asset.role = role.value
     asset.role_source = RoleSource.HUMAN.value
     # 人工定的角色没有「把握程度」这回事,清掉模型留下的数字。
     # 留着它会让 can_be_primary 之类的判断读到一个已经无意义的值
     asset.role_confidence = None
-    _audit(session, actor, asset, "set_role", {"role": role.value})
+    session.flush()
+    _audit(
+        session,
+        actor,
+        asset,
+        "set_role",
+        {
+            "role": role.value,
+            **_scope_change_payload(before, _evidence_views(session, asset.product_id)),
+        },
+    )
     return asset
 
 
@@ -676,6 +828,7 @@ def quarantine(
     asset = get_asset(session, media_id)
     if asset.status == MediaStatus.DELETED.value:
         raise ValidationError("已删除的素材不能隔离", code=ErrorCode.INPUT_INVALID)
+    before = _evidence_views(session, asset.product_id)
     asset.status = MediaStatus.QUARANTINED.value
     asset.quarantine_reason = (reason or "")[:2000] or None
     session.flush()
@@ -695,13 +848,21 @@ def quarantine(
 
     _audit(
         session, actor, asset, "quarantine",
-        {"reason": reason[:200], "downgraded_image_sets": len(downgraded)},
+        {
+            "reason": reason[:200],
+            "downgraded_image_sets": len(downgraded),
+            **_scope_change_payload(before, _evidence_views(session, asset.product_id)),
+        },
     )
     return asset
 
 
 def release(session: Session, media_id: UUID, *, actor: str) -> MediaAsset:
-    """放行一条被隔离的素材。"""
+    """放行一条被隔离的素材。
+
+    放行同样改指纹,而且方向和隔离相反:这张图**重新进入**证据集合。
+    §8.1 第 2 行那一格点的就是这件事 —— 补、换、隔离、放行都是同一类变化。
+    """
     asset = get_asset(session, media_id)
     if asset.status != MediaStatus.QUARANTINED.value:
         raise ValidationError(
@@ -709,9 +870,17 @@ def release(session: Session, media_id: UUID, *, actor: str) -> MediaAsset:
             code=ErrorCode.INPUT_INVALID,
             http_status=409,
         )
+    before = _evidence_views(session, asset.product_id)
     asset.status = MediaStatus.READY.value
     asset.quarantine_reason = None
-    _audit(session, actor, asset, "release", {})
+    session.flush()
+    _audit(
+        session,
+        actor,
+        asset,
+        "release",
+        _scope_change_payload(before, _evidence_views(session, asset.product_id)),
+    )
     return asset
 
 

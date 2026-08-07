@@ -70,8 +70,20 @@ def upload_asset(
     asset_type: AssetType,
     storage: ObjectStorage,
     actor: str,
+    color_variant_id: UUID | None = None,
 ) -> tuple[ProductAsset, bool]:
-    """返回 (素材记录, 是否命中去重)。"""
+    """返回 (素材记录, 是否命中去重)。
+
+    ## `color_variant_id`:这张图是哪个颜色的样品(§4.8)
+
+    A45-batch14-22 起这条路收得下归属。在此之前 `media_assets.color_variant_id`
+    **没有任何写入路径** —— 列在、两处判定读它、而全仓恒为 NULL,
+    于是颜色维整个塌成一维:每张图都算通用图。
+
+    `None` 是通用图,不是"待定"。两者要区分的话得再加一列,而 §5.3 已经
+    给通用图定了明确语义(只进共享作用域),再加一档只会让判定多一个分支
+    而没有对应的业务动作。
+    """
     validated = validate_upload(
         data,
         asset_type=asset_type,
@@ -133,7 +145,9 @@ def upload_asset(
     # 会产出一个"看起来成功"的迁移,而它要到切换读路径那天才暴露。
     from app.media import service as media_service
 
-    media_service.shadow_from_product_asset(session, product, asset)
+    media_service.shadow_from_product_asset(
+        session, product, asset, color_variant_id=color_variant_id
+    )
 
     product_service.refresh_status_after_asset_change(session, product)
 

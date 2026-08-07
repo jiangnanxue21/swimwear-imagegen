@@ -213,14 +213,55 @@ def test_the_migration_chain_has_exactly_one_head():
     一条迁移」。CLAUDE.md 里「条数不写在这里」那条规矩说的是同一件事:
     **规矩要写成不变式(只有一个 head),不是写成当时那个值。**
     好在这次是红不是静默过期 —— 但它仍然是噪音。
+
+    ## A45-batch14-21:这条守卫十二批以来一直是瞎的
+
+    正则原来写的是 `^revision: str = "..."`,**只认带类型标注那一种写法**。
+    而迁移 0041 写的是 `revision = "0041"`(裸赋值),于是它从来没进过这张
+    链表。
+
+    后果不是当时会红,是当时**碰巧绿**:0041 是 head,不出现在任何
+    `down_revision` 里,它不在 keys 也就不在 heads,`len(heads) == 1` 照样
+    成立。守卫说"链上只有一个 head",而它看的是一条缺了一节的链。
+
+    照出它的是 0042 —— 挂在 0041 下面,断点第一次落在链**中间**,heads
+    变成 `{0040, 0042}`。红的信息对,红的理由错:不是有人建了两个 head,
+    是它一直数不全。
+
+    **修法不是顺手放宽正则。** 放宽之后它照样证明不了自己看全了 ——
+    下一种写法(`revision: Final = ...`、多行赋值)会让同一件事再来一次,
+    而且同样表现为"碰巧绿"。所以这次加的是一条**覆盖率断言**:解析出的
+    revision 条数必须等于 `versions/` 下的迁移文件数。少看见一个文件当场红。
+
+    正则本身与 `tools/verify_delivery.check_the_migration_chain_has_a_single_head`
+    对齐 —— 那一条一直是对的,两处同一条不变式两个实现,瞎了的是这一个。
+    真要收成一份的话该收进被两边 import 的地方,而纯层不许 import
+    `tools/`;所以这里的做法是**让它自己证明自己看全了**,而不是指望
+    两份实现永远同步。
     """
-    revisions = {}
-    for path in MIGRATIONS.glob("*.py"):
+    files = sorted(p for p in MIGRATIONS.glob("*.py") if p.name != "__init__.py")
+    assert files, "versions/ 下一个迁移文件都没有 —— 这条守卫失去了对象"
+
+    revisions: dict[str, str | None] = {}
+    for path in files:
         text = path.read_text(encoding="utf-8")
-        rev = re.search(r'^revision: str = "([^"]+)"', text, re.M)
-        down = re.search(r'^down_revision: Union\[str, None\] = "?([^"\n]+)"?', text, re.M)
-        if rev:
-            revisions[rev.group(1)] = down.group(1).strip('"') if down else None
-    heads = set(revisions) - {d for d in revisions.values() if d}
-    assert len(heads) == 1, f"迁移链有 {len(heads)} 个 head:{sorted(heads)}"
+        rev = re.search(r"^revision(?::\s*[^=]+)?\s*=\s*[\"']([^\"']+)[\"']", text, re.M)
+        down = re.search(
+            r"^down_revision(?::\s*[^=]+)?\s*=\s*(?:[\"']([^\"']+)[\"']|None)", text, re.M
+        )
+        assert rev, f"{path.name} 里找不到 revision 声明 —— 它不会进链表,而那不报错"
+        revisions[rev.group(1)] = down.group(1) if down and down.group(1) else None
+
+    # **覆盖率断言。** 少了它,一种没被正则认出来的写法会让那个文件静静
+    # 缺席,而缺席的表现取决于它在链上的位置:在末端就碰巧绿,在中间才红。
+    # 一条守卫的正确性不该取决于被它漏掉的东西恰好在哪
+    assert len(revisions) == len(files), (
+        f"解析出 {len(revisions)} 条 revision,而 versions/ 下有 {len(files)} 个迁移文件"
+        " —— 有文件没被认出来(重号会覆盖,新写法会漏掉)。"
+        "这条守卫在看一条缺了节的链,而缺节时它可能碰巧是绿的"
+    )
+
+    referenced = {d for d in revisions.values() if d}
+    heads = sorted(set(revisions) - referenced)
+    assert len(heads) == 1, f"迁移链有 {len(heads)} 个 head:{heads}"
     assert "0037" in revisions, "本批那条 revision 不在链上了"

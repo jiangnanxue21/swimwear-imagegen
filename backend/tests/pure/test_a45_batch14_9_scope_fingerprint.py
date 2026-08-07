@@ -389,7 +389,11 @@ def test_modifying_a_confirmed_fact_is_a_new_version_not_a_stale_flag():
 
 
 def test_the_six_change_sources_still_owed_to_section_8_1_are_listed():
-    """**这条守卫记的是欠账,不是成绩。**
+    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+
+    清单里剩的四行,机制多半要等阶段 5 的颜色结构化字段(见下面那段
+    关于「修改素材颜色归属」为什么补不了的注释)。所以死线定在阶段 5 之前
+    —— 到那时要么补上,要么把补不上的理由重写一遍。
 
     §8.1 除了 FACTS 列还要求新增六个变更源。它们没进矩阵,因为
     `test_every_effective_cell_names_a_mechanism_that_exists_in_code`

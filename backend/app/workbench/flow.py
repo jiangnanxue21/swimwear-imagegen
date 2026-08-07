@@ -417,12 +417,43 @@ class AttributeFacts:
     suggested: frozenset[str] = frozenset()
     conflicted: frozenset[str] = frozenset()
     candidate_only: frozenset[str] = frozenset()
+    #: 输入指纹对不上的字段(§5.3 / AC-21)。判定在
+    #: `attributes.service.stale_fields`,这一层只把结果递进来。
+    #:
+    #: **不是"未确认"的另一种说法**:这些字段有值、被人点过头,只是它们
+    #: 当初依据的那批样品变了 —— 下一步是"再看一眼",不是"去填一个值"。
+    #: 两者混成一句话的后果写在 `_evaluate_attribute` 那个分支里。
+    stale: frozenset[str] = frozenset()
     extraction_count: int = 0
 
     @property
+    def stale_confirmed(self) -> frozenset[str]:
+        """确认过、且输入指纹对不上的字段。**取交是刻意的,不是保险。**
+
+        `stale` 与 `confirmed` 的关系是一条不变式(判定侧只对 `SETTLED`
+        那一档算过期),而**不变式不该靠调用点守规矩** —— 这个仓库刚刚
+        为「判据落在别人身上的守卫守不住自己」付过一次学费(§3.37)。
+
+        取交之后,一个没确认过的字段无论怎么被塞进 `stale`,都不会走到
+        「已确认的事实过期」那条分支上去说一句假话。下面两个消费者
+        (`missing_required` 与问题码分支)都读这一个属性,不读 `stale`。
+        """
+        return self.stale & self.confirmed
+
+    @property
     def missing_required(self) -> tuple[str, ...]:
-        """必填但尚未确认的字段。"""
-        return tuple(f for f in self.required_fields if f not in self.confirmed)
+        """必填但**尚不满足完成条件**的字段。
+
+        §6.3 的完成条件在双指纹修订之后是两句话:「必填事实 `CONFIRMED`」
+        **且**「其 `input_fingerprint` 匹配当前作用域指纹」。所以过期的
+        已确认字段照样算欠着 —— 少了后半句,给颜色 A 换掉全部样品之后,
+        A 色事实仍然带着旧结论进导出,而界面显示"已完成"。
+        """
+        return tuple(
+            f
+            for f in self.required_fields
+            if f not in self.confirmed or f in self.stale_confirmed
+        )
 
 
 @dataclass(frozen=True)
@@ -690,6 +721,11 @@ def _evaluate_attribute(
         summary = "受众待确认 · " + summary
     if facts.conflicted:
         summary += f",冲突 {len(facts.conflicted)}"
+    # 单独报出来,不并进上面那个分数。**分子已经把它扣掉了** ——
+    # 只扣不说的话,运营看到的是"已确认 3/5",而他明明确认过 5 个,
+    # 于是他会再点一次那两个已经确认过的字段,以为自己刚才漏了
+    if facts.stale_confirmed:
+        summary += f",样品已变 {len(facts.stale_confirmed)}"
 
     if not material_ready:
         # 上游没就绪时**不产出字段级问题**。以前这里照常产出,于是一件
@@ -742,9 +778,43 @@ def _evaluate_attribute(
             )
         )
 
+    stale_confirmed = facts.stale_confirmed
     for name in missing:
         if name in facts.conflicted:
             continue  # 已经作为冲突报过一次,不重复计数
+
+        # **过期排在最前面,因为它是唯一一个"有值"的欠账。**
+        #
+        # 这些字段在 `confirmed` 里,所以它们既不在 `suggested` 也不在
+        # `candidate_only` —— 不单开一支的话,它们会掉进最后那个 `else`,
+        # 而那句话是「尚无可用值」。那是**假的**:值就在那儿,人也点过头,
+        # 变的是它依据的那批样品。
+        #
+        # 说错话的代价很具体:「尚无可用值」的建议是"先跑一次属性识别",
+        # 于是运营去跑一次付费识别 —— 而识别产出的是 CANDIDATE,
+        # 盖不掉已有的 MANUAL 值(§6.2 规则 4),那个字段照样过期。
+        # 花了钱,什么都没变。
+        #
+        # 级别取 NEEDS_CONFIRM 不取 BLOCKING:阻断数要能被信任,而这一条
+        # 欠的是"人再看一眼",与冲突同一档。它照样拦得住流程 ——
+        # `missing_required` 已经把它算成欠账,属性步进不了 DONE。
+        if name in stale_confirmed:
+            issues.append(
+                Issue(
+                    level=IssueLevel.NEEDS_CONFIRM,
+                    code="ATTR_FACT_STALE",
+                    message=f"{name} 依据的样品已变化,需重新确认",
+                    target_step=FlowStep.ATTRIBUTE,
+                    hint=(
+                        "这个字段确认过,但它当初依据的那批样品图变了"
+                        "(补图、换图、隔离或改颜色归属)。核对一下结论还成不成立,"
+                        "再确认一次即可;不必重跑识别 —— 识别产出的是建议值,"
+                        "盖不掉人工确认过的值"
+                    ),
+                    ref=name,
+                )
+            )
+            continue
 
         # **CANDIDATE 不在这个 `or` 里,那是 §11 修的那条。**
         #
@@ -807,9 +877,13 @@ def _evaluate_attribute(
         # 原来会落进 NEEDS_CONFIRM,而那一档在 `STATE_PROGRESS` 里记 0.6 分 ——
         # 于是它在列表里排得比真的做了一半的商品还靠后,而运营点进去
         # 一个可确认的值都找不到。
+        #
+        # 过期字段**算**「等人点头」:它有值、有人点过头,运营点进去就有
+        # 一个可以确认的东西。这与 CANDIDATE 的处境相反(那一档点进去
+        # 什么都没有),所以它跟 `suggested` 归一档而不是跟 `candidate_only`。
         state = (
             StepState.NEEDS_CONFIRM
-            if all(m in facts.suggested for m in missing)
+            if all(m in facts.suggested or m in stale_confirmed for m in missing)
             else StepState.IN_PROGRESS
         )
     else:

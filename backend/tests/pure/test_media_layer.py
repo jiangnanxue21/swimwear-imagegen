@@ -72,19 +72,19 @@ def test_media_asset_model_keeps_source_and_role_in_separate_columns():
     assert "purpose" not in columns, "用途属于派生版本,不属于素材"
 
 
-def test_dedupe_key_is_product_scoped():
-    """去重键是 (product_id, sha256),**不是全局 sha256**。
+def test_the_dedupe_key_is_never_global():
+    """去重键**不是全局 sha256**。这一条与阶段无关,任何一版都成立。
 
     跨商品不去重是刻意的:两个 SKU 用同一张图是两条记录,因为角色、
     变体绑定、授权、隔离状态都是按商品算的。物理层的内容寻址
-    已经保证字节只存一份。
+    已经保证字节只存一份。全局唯一会让第二个商品根本存不进去。
+
+    这一条从原 `test_dedupe_key_is_product_scoped` 拆出来。原来那条把
+    「不许全局」和「今天是 product 作用域」写在一个断言组里,而前者是
+    永久不变量、后者是一笔欠账 —— 混在一起的后果见下一条。
     """
     source = (APP_DIR / "models" / "media_asset.py").read_text(encoding="utf-8")
-    assert 'UniqueConstraint("product_id", "sha256"' in source
-    # 全局唯一会让第二个商品根本存不进去
     assert 'UniqueConstraint("sha256"' not in source
-
-
 def test_derivative_uniqueness_includes_transform_version():
     """派生版本的唯一键必须带算法版本。
 
