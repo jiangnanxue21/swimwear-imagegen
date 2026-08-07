@@ -34,8 +34,14 @@
  *     package.json  加 "test": "vitest run"
  *     Makefile      fe-check 里加 npm run test
  *
- * `backend/tests/pure/test_delivery_hygiene.py` 会在 vitest 出现的那一刻
- * 开始盯这三件事,不必靠人记。
+ * **这三件事今天已经全部做完了**(vitest 在 devDependencies、`npm run test` 在
+ * package.json、`fe-check` 里有 `npm run test`),这批用例是活的。
+ *
+ * 盯着它们不被拆掉的是 `backend/tools/verify_delivery.py` —— 这里原来写的是
+ * `backend/tests/pure/test_delivery_hygiene.py`,那个文件在方案 v4.1 §8.2
+ * 已整体搬进 `verify_delivery.py`,树里不存在。两处失实叠在一起:
+ * **点错了文件,而且把已经发生的事写成了将来时**。后半句更贵 ——
+ * 它让人以为这批用例还在等一个未来的开关。
  *
  * ## 为什么用 adapter 而不是去翻 interceptors.handlers
  *

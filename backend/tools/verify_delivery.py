@@ -1004,7 +1004,7 @@ CHECKS = [
     ("打包脚本先排除再复验", check_the_pack_script_excludes_and_then_verifies),
     ("backend/.dockerignore 排除密钥目录", check_backend_dockerignore_excludes_the_key_directory),
     ("每条前端门禁脚本都有人调用", check_every_frontend_gate_script_is_invoked),
-    ("CI 覆盖全部 13 条门禁", check_ci_runs_every_gate),
+    ("CI 覆盖全部 14 条门禁", check_ci_runs_every_gate),
     ("CI 的 pytest 有 PostgreSQL + Redis", check_ci_backs_pytest_with_redis),
     ("make check 覆盖前端门禁", check_the_offline_gate_is_honest_about_its_coverage),
     ("Vitest 四件事都接上了", check_the_frontend_test_runner_is_actually_wired),

@@ -121,10 +121,26 @@ def create_product(session: Session, data: dict[str, Any], *, actor: str) -> Pro
     # 而且它会成为第二条建档路径,`seed_sample_data` 当初刻意不写第二条,
     # 理由在那边(§"seed 走 spu_service.create_spu(),不另写建档路径")。
     #
-    # 查不到就拒绝,错误信息指向"先建 SPU"。**代价写明**:CSV 导入从此
-    # 要求 SPU 先存在。这是真实的行为变更,不是兼容性疏漏 ——
+    # 查不到就拒绝,错误信息指向"先建 SPU"。**代价写明**:走 `POST /api/products`
+    # 这条路建商品从此要求 SPU 先存在。这是真实的行为变更,不是兼容性疏漏 ——
     # 放行的代价是每一条走老路径的商品继续绕过受众必填,而那批商品
     # 正是将来 `spu_id` 收 NOT NULL 时挡在路上的那批。
+    #
+    # **这道闸的作用范围到此为止:CSV 导入不走这个函数。**
+    # 这里原来写的是「CSV 导入从此要求 SPU 先存在」——**那句话是错的**,
+    # 而它是这个文件里最贵的一行:它告诉下一个读代码的人缺口已经关了。
+    # `import_products` 直接 `Product(**row)` 构造,既不解析 `spu` 码、
+    # 不抄 `audience`、也不过 C-03 品类闸,于是 CSV 那条路今天仍然在写
+    # `spu_id = NULL` / `audience = NULL` —— 恰好就是上一段说的"将来收
+    # NOT NULL 时挡在路上的那批"。`test_csv_import_creates_products` 与
+    # `test_reimport_is_idempotent` 照样是绿的,因为它们走的正是这条没关的路。
+    #
+    # 为什么本批不顺手关掉它:关法有两种,而两种对运营的可感知行为不一样 ——
+    # (a) SPU 不存在的行计入 `errors` 跳过;(b) 按 CSV 里的 `spu` 码自动建一个
+    # 最简 SPU 再挂 SKU。这是**决定**不是缺代码(§3.41 那条分界线),
+    # 由产品侧拍板。在拍板之前,这段注释与实现的一致性由
+    # `tests/pure/test_a45_batch16_doc_truth.py` 盯着:哪天 `import_products`
+    # 真的开始解析 SPU 而这段话没跟着改,那条守卫会红。
     spu_code = (data.get("spu") or "").strip()
     if not spu_code:
         raise ValidationError(
@@ -497,6 +513,22 @@ def import_products(session: Session, parsed: ImportResult, *, actor: str) -> di
     """落库导入结果。
 
     已存在的 SKU 视为跳过而非错误 —— 批量导入经常是增量补充,重复执行必须安全(幂等)。
+
+    ## 这条路**不过** `create_product` 的 SPU 闸(已知缺口,batch14-26 起)
+
+    下面是 `Product(**row)` 直构,不是 `create_product(...)`。于是 batch14-26
+    在 `create_product` 里关掉的那条 §4.2 缝,在这条路上**原封不动**:
+
+        spu 码            不解析      → `products.spu_id` 落 NULL
+        audience          不从 SPU 抄 → `products.audience` 可为 NULL,§4.2 受众必填绕过
+        garment_block_reason  不调用   → C-03 受众 × 品类组合校验绕过
+
+    不是疏忽:`create_product` 那段注释里写了两种关法(跳过 / 自动建最简 SPU),
+    两种对运营的可感知行为不一样,属于**决定**而非缺代码,等产品侧拍板。
+
+    在拍板之前,这份 docstring 与实现的一致性有守卫盯着 ——
+    `tests/pure/test_a45_batch16_doc_truth.py`。**改了这里的行为就得改这段话**,
+    反过来也一样。
     """
     created_ids: list[UUID] = []
     skipped = 0

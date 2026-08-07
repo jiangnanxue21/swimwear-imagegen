@@ -4,7 +4,9 @@
 的过程中发现的一个更严重的洞(VARIANT 属性的 owner_id 里没有 SPU)。
 
 **全部是纯判定,没有一条碰库。** 真库那一半(迁移回填、并发建集)
-写在 `tests/test_variant_key_db.py`,带 `requires_db`,本轮跑不了。
+写在 `tests/test_a45_batch13_spu_db.py` 与 `tests/test_a45_batch13_3_db.py`,
+带 `requires_db`,本轮跑不了。(这里原来指向 `tests/test_variant_key_db.py`,
+树里不存在。)
 """
 from __future__ import annotations
 

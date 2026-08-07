@@ -2457,3 +2457,202 @@ PRD v3.1 §4.8 明文要求它改成 `UNIQUE(spu_id, COALESCE(color_variant_id,'
 
 一条什么都没验的变异比没有变异更糟(14-22 S3)。而这两条在本批之后
 都会**安静地**什么都不验——`audit_anchors` 是唯一会说话的地方。
+
+---
+
+## §3.42 A45-batch15-merged:一句说缺口已关的话,比一句过期的话贵得多;过程文档删掉的同时,结论要有去处
+
+本批不改任何业务行为。交付的是**四处失实陈述的订正 + 两道让这一类以后会变红的门禁 + docs 目录的一次清账**。
+
+### 一、这四处是同一类,而那一类不是「文档过期」
+
+    `create_product` 注释      「CSV 导入从此要求 SPU 先存在。这是真实的行为变更」
+    `README.md`                「make check 离线全部门禁,不需要网络」
+    `audit_anchors.py`         「今天只剩 mutate_contract_tests.py 用 CASES 形状」
+    四份纯测试 docstring        「真库层的闭环在 tests/test_api_*.py」
+
+逐条核过之后,四句话**全部在宣告一件没有发生的事**,而且宣告方向一致:
+**都说某个缺口是关着的。**
+
+- `import_products` 根本不调 `create_product`,它直接 `Product(**row)`——
+  不解析 spu 码、不抄 audience、不过 C-03 闸。CSV 那条路今天照旧写 `spu_id = NULL`。
+- Makefile 里 `check: check-offline fe-check`,而 `fe-check` 第一步是 `npm ci`。
+  离线跑得动的是 `check-offline`。用例数写的 `1270+` 停在很早以前(今天 2459)。
+- `mutate_contract_tests.py` 在 batch14-3 就退役了,全仓今天**零个** CASES 表。
+- `tests/test_api_attributes.py` / `test_api_media.py` / `test_api_prompts.py` /
+  `test_variant_key_db.py` —— 四个文件**树里不存在**。
+  (说"从来不存在"我证不了 —— 这棵树没带 git 历史。**能证的是现在指不到**,
+  而那已经足够:一句指不到的"那边已覆盖"照样让人不去看那边。)
+
+**分界线值得记住:过期的文档让人多走弯路,这一类文档让人不走。**
+读到「那边已经覆盖了」的人不会再去看那边有没有东西;读到「不认它就漏 18 条锚点」
+的人不会去删那段死分支。一句失实的理由能把一段没有用户的代码一直养着。
+
+`README` 那条还多一层:照旧文案在没网的机器上敲 `make check`,
+得到的是一个装依赖失败的红 —— 于是人会怀疑门禁本身坏了,而不是文档写错了。
+
+### 二、守卫钉一致性,不钉现状
+
+`tests/pure/test_a45_batch16_doc_truth.py` 五条,每一条都能同时容纳
+「缺口开着」与「缺口关上」,只拒绝**两份真相对不上**。理由是 §3.31 那条:
+钉现状的守卫会因为进步而变红,而那种红会训练人去改守卫。
+
+    CSV 那条    实现走不走 SPU 闸  ==  注释里说走不走
+    清册那条    正文里悬空的章节集合 == PRD 开头清册列的集合
+    README 那条 Makefile 里 check 依不依赖 fe-check == README 敢不敢说它离线
+
+所以 CSV 那笔债该怎么还,守卫**不表态**。怎么还是一个决定(§3.41):
+可以让 SPU 缺席的行计入 `errors`,也可以按 CSV 里的 spu 码自动建最简 SPU ——
+两种对运营的可感知行为不一样,要产品侧拍板。守卫只保证:**做了决定的那天,
+那几句话得跟着改。**
+
+### 三、变异验证逼出来的一个数:驳斥窗口 = 0 行
+
+本批修法的一部分是**把假话原样引出来再驳掉**(「这里原来写的是……那句话是错的」)。
+于是守卫必须放行被引述的假话,否则它会逼人删掉真话 —— 一道让人删真话的门禁比没有门禁贵。
+
+放行靠"驳斥标记在封闭窗口内"。窗口半径最初写 2 行,**变异 M1(把假注释改回去)
+不响** —— 那段注释里本来就有一句「原来写的是……那句话是错的」,它在 ±2 行内
+**替另一句假话作了担保**。收到 0 行(必须同一行)之后 M1 变红。
+
+    一句驳斥只能管它自己引的那句,管不了邻居。
+
+六条变异现在全红:改回假注释 / 清册删行 / README 说成离线 / PRD 改回旧文件名 /
+正文新增一处沿用 v3.0 / `import_products` docstring 退回原版。
+
+### 四、`audit_doc_refs.py`:第 14 道门禁,以及它为什么分两档
+
+`verify_delivery` 盯"门禁有没有人调用",`audit_anchors` 盯"变异锚点还在不在" ——
+**没有任何一道门禁盯"这句话指的东西还在不在"**。这份补那个空档。
+
+分两档,只有一档拦:
+
+    ERROR   活文档 + 活代码。指错就是把人送错地方
+    WARN    历史台账,只有四份:STATUS / DECISIONS / REVIEW / HANDOVER
+
+分档不是宽严之别,是这两类文本的语义不同。台账是追加写的历史记录:
+「batch14-21 的合入说明写在 MERGE-A45-BATCH14-21-FACTS-STALE.md」这句话
+在写下那天是真的,那份文档后来按规矩删了,**这句话仍然是那天的事实**。
+把它判成错误,只会逼人去改历史,或者把台账整个加进白名单 —— 两条路都比现状糟。
+
+同样的封闭窗口口径也用在这里:带退役标记(`退役` / `已删` / `原来是` / `并入` …)
+的引用放行,但标记要落在同一行或紧邻上下一行。**标记要挨着它说的那个名字,
+不能挨着这份文件** —— 窗口开宽了,一句文件级免责声明就能豁免全文。
+
+### 五、docs 清账:删 42 份 / 59 份,但删之前先问三个问题
+
+判据用仓库自己的规矩(CLAUDE.md:「过程文档不留档 —— 结论进 docs/DECISIONS.md」)。
+**这条规矩的后半句和前半句一样重要**,所以删之前逐份查了三件事:
+
+    一、有没有门禁 `read_text` 它?      —— 一份都没有(唯一被读的是 STATUS.md,3 处)
+    二、有没有活代码的 docstring 点名它? —— 有 5 份
+    三、它的结论在 DECISIONS.md 里吗?    —— 那 5 份对应的批次查不到
+
+**第二、三条一起成立的那 5 份予以保留。** 删掉它们等于用一个悬空引用
+换掉另一个 —— 而那正是本批要修的缺陷。上一轮的清单把它们划进了删除范围,
+这一轮撤回:
+
+    MERGE-A45-BATCH14-20-STAGE4-IMAGE-PRODUCTION.md   ← mutate_batch14_20_stage4.py:24
+    REVIEW-A44-BATCH7.md                              ← test_a44_batch7_fixes.py:4
+    REVIEW-A45-BATCH12-2.md                           ← test_a45_batch12_2_fixes.py:24
+    REVIEW-A45-BATCH12-3.md                           ← test_a45_batch12_3_fixes.py:26
+    REVIEW-A45-BATCH14-3.md                           ← test_a45_batch14_4_fixes.py:9
+
+另外三份按各自的自述保留:`REVIEW-A28-TRACKING.md`(自述了为什么不能随 HANDOVER
+被整份替换)、`REVIEW-A44-A45-MERGED.md`(还有 3 条未处理)、`OPS-REVIEW.md`
+(25 处代码注释锚定它的 P1/P4 编号)。
+
+**解锁条件写明**:那 5 份要能删,得先把它们各自被点名的那一节内容搬进
+`DECISIONS.md`,再改 docstring 指过来。本批没做,因为搬的是行为验证记录,
+搬错了比不搬贵。
+
+### 六、归档台账:42 份文档的结论今天在哪
+
+| 已删文档 | 主题 | 结论今天在哪 |
+|---|---|---|
+| `MERGE-A42.md` | 四个补丁并成一棵树 | `STATUS.md` 同批条目 |
+| `MERGE-A44-BATCH8-PATCH.md` | `a44-batch8-fixes.patch` → batch9 树 | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH13-3.md` | A45-batch13-3 → batch14 | `DECISIONS.md` §3.25 |
+| `MERGE-A45-BATCH14-10-SAMPLE-COMPLETENESS.md` | 样品完整度门禁的单点派生(§6.2) | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-11-GATES.md` | 第一台装得齐后端依赖的机器,把欠的门禁跑了 | `DECISIONS.md` §3.27 |
+| `MERGE-A45-BATCH14-11-QUEUE-AND-PROVENANCE.md` | §11 的两条新场景(确认队列口径 + AI 图伪装拦截) | `DECISIONS.md` §3.27 |
+| `MERGE-A45-BATCH14-12-RUN-STATE.md` | 识别 run 的终态、取消与幂等键(§4.6 / §9.2) | `DECISIONS.md` §3.28 |
+| `MERGE-A45-BATCH14-13-SCOPE-OUTCOME.md` | §11 第一行 —— 按作用域的失败归集 | `DECISIONS.md` §3.29 |
+| `MERGE-A45-BATCH14-14-SOURCE-WINDOWS.md` | 守卫的窗口必须是封闭的 | `DECISIONS.md` §3.30 |
+| `MERGE-A45-BATCH14-15-ATTRIBUTION.md` | 素材归属外键落库,四批欠账收其二 | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-16-PROVENANCE.md` | 溯源列落库,候选落盘写入(§4.8) | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-17-URL-FILTERS.md` | 筛选状态住进 URL,阶段 0 最后一条代码项收口(GAP-033) | `DECISIONS.md` §3.31 |
+| `MERGE-A45-BATCH14-18-PROVIDER-USAGE.md` | 计费量问厂商要,并记下这个数是谁说的 | `DECISIONS.md` §3.32 |
+| `MERGE-A45-BATCH14-19-EVIDENCE-QUERY.md` | §5.1 白名单成为取数入口 | `DECISIONS.md` §3.33 |
+| `MERGE-A45-BATCH14-20-RUN-IDENTITY.md` | 识别 run 的身份落库与 §9.2 幂等接线 | `DECISIONS.md` §3.34 |
+| `MERGE-A45-BATCH14-21-FACTS-STALE.md` | `facts_stale` 派生接线 + 欠账还款日门禁 | `DECISIONS.md` §3.37 |
+| `MERGE-A45-BATCH14-22-COLOUR-ATTRIBUTION.md` | 素材颜色归属的写入路径 + 新结构样例数据 | `DECISIONS.md` §3.38 |
+| `MERGE-A45-BATCH14-23-ITEM-COLUMNS-AND-DEDUPE.md` | §6.5 两列的写入路径 + §4.8 去重键拆账 | `DECISIONS.md` §3.39 |
+| `MERGE-A45-BATCH14-24-COLUMN-WRITER-AUDIT.md` | 「每一列都答得出谁写它」——把 §3.38 变成会红的门禁 | `DECISIONS.md` §3.40 |
+| `MERGE-A45-BATCH14-25-WRITE-EVIDENCE-AUDIT.md` | 审计自己的证据链——`height` 那条假阳性不是孤例,是三个缺陷的其中一个出口 | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-26-DECISIONS.md` | 三笔决定类欠账 + 老建档路径切 SPU | `DECISIONS.md` §3.41 |
+| `MERGE-A45-BATCH14-7.md` | 两份 patch → batch14-6 | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-8-EVIDENCE-CLASS.md` | 阶段 2 的 `evidence_class` 单点派生 | `STATUS.md` 同批条目 |
+| `MERGE-A45-BATCH14-9-SCOPE-FINGERPRINT.md` | 双作用域样品指纹与 `facts_stale` 派生 | `STATUS.md` 同批条目 |
+| `REVIEW-A43-RESPONSE.md` | 对 A42-merged 复查意见的逐条答复 | `DECISIONS.md` §3.15 |
+| `REVIEW-A44-BATCH3.md` | A44 第三批修复说明（A-01 ～ A-06 · A-19 · A-20 · A-25 … | `STATUS.md` 同批条目 |
+| `REVIEW-A44-BATCH4.md` | A44 第四批修复说明（十条 P1/P2/P3 毛边） | `STATUS.md` 同批条目 |
+| `REVIEW-A44-BATCH5.md` | A44 第五批修复说明（C-13 · B-07 · 十一条毛边） | `STATUS.md` 同批条目 |
+| `REVIEW-A44-BATCH6.md` | A44 第六批修复说明（十条） | `STATUS.md` 同批条目 |
+| `REVIEW-A44-FINAL-verified-r3.md` | swimwear-imagegen A44 评审核验报告（最终版 · 修订三 —— 七批修… | `DECISIONS.md` §3.18 |
+| `REVIEW-A44-RESPONSE.md` | 稳定 variant ID | `DECISIONS.md` §3.18 |
+| `REVIEW-A45-BATCH12-4-RESPONSE.md` | 修 batch12-3 回归报告里的五条 | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH12-4-SELFCHECK.md` | 复核上一轮的五处修改 | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH12-5-RESPONSE.md` | A45 batch12-5 回归评审 —— 修复报告 | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH12.md` | 人工审核与自动流水线的交叉口，以及批量付费的自动重跑上限 | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH13-2.md` | A45-batch13-2(阶段 1 第一批 + 走读修复) | `DECISIONS.md` §3.23 |
+| `REVIEW-A45-BATCH14-4.md` | A45-batch14-4(把退役 `mutate_contract_tests.py` … | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH14-5.md` | A45-batch14-5(收掉 batch14-4 §五的三条遗留) | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH14-6.md` | A45-batch14-6(阶段 P0:1/6 -> 4/6,真库 pytest 第一次跑… | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH14.md` | A45-batch14(阶段 3 第一批 + 合入 batch13-3 之后的走读) | `DECISIONS.md` §3.24 |
+| `REVIEW-A45-BATCH8.md` | A45 第八批修复说明（第一批 4 条 + 第二批 20 条 + **五条结构性门禁**） | `STATUS.md` 同批条目 |
+| `REVIEW-A45-BATCH9.md` | Celery 任务的故障恢复语义（自查发现，不在任何一份评审里） | `STATUS.md` 同批条目 |
+「`STATUS.md` 同批条目」不是敷衍:`STATUS.md` 是这个仓库的历史台账,
+每一批都有自己那一段,合入说明的结论在那里能查到。`STATUS.md` 里指向已删文档的引用共 **23 份 / 26 处**,因此不是断头路 ——
+顺着批号能走到这张表,再走到 STATUS 的对应段。
+
+### 七、PRD 的两处
+
+**文件名与版本不符**:文件叫 `..._prd_v3_1.md`,正文第 3 行写 v3.1.1。
+差一个小版本号,而这个仓库里「v3.1 说的」和「v3.1.1 说的」是两回事
+(§0.4 专门讲两者差别)。已改名为 `..._prd_v3_1_1.md`,守卫钉住文件名与自报版本一致。
+
+**v3.0 原文缺失**:v3.1 用增量写法,凡 v3.0 写对的地方写「沿用 v3.0」而不重述。
+这在 v3.0 拿得到时合理,拿不到时**它把 21 个章节号变成了指向空地的引用**(实测 21 处)。
+原文补不回来 —— 但可以让这笔债不再是藏在正文里的一行话。PRD 开头加了一张
+逐条清册,守卫钉「清册列的章节集合 == 正文里真正悬空的章节集合」。
+
+其中 §14.1 最贵:AC-01~AC-20 是 §14.3 人工测试准入的判据,**判据本身拿不到**。
+这与 P0 那 5 项的「未验证」是两种东西 —— P0 缺的是机器,补一台就能推进;
+AC-01~20 缺的是判据,补一百台也没用。**AC-02 / AC-06 / AC-07 / AC-20 连
+阶段归属都反推不出来**:§13 四条阶段验收行的并集只覆盖 16 条。
+
+### 八、自查发现的四条,以及第一条为什么最值得记
+
+订正完四处失实陈述之后回头审自己写进去的话,抓到四条。**前三条是同一个动作
+的两面**:一边指责别人把易变的事实写进散文,一边自己在做同一件事。
+
+**一、README 里那个用例数。** 订正时我写了当时的真值 2459,而本批新增 5 条
+守卫当场把它作废成 2464。改法不是改成 2464 —— 下一批照样烂。
+**根因是把一个每批都在变的事实复制进了散文。** 真值由 `make test-pure`
+自己打印,README 里不留第二份。这一条比它订正的那一条更值得记:
+**订正一句失实的话时,最容易犯的错就是用另一句将来会失实的话替换它。**
+
+**二、「四个文件从来没有存在过」。** 我只验证了它们**现在**不存在 ——
+这棵树不带 git 历史,"从来"我证不了。已改成"树里不存在"。能证的那一半
+已经足够:一句指不到的"那边已覆盖"照样让人不去看那边。
+
+**三、清册写「20 个章节」,实测 21 个章节号。** §7.4 与 §7.5 在正文里合写
+一个标题,按标题数是 20,按章节号是 21。守卫比对的是章节号集合,
+所以数字必须按章节号写。
+
+**四、`_LEDGERS` 里有三份是我防御性加的,没验过需不需要。**
+实测 `AC-VERIFICATION.md` 与 `REVIEW-A28-TRACKING.md` 一处 ERROR 都没有,
+`REVIEW-A44-A45-MERGED.md` 只有一处(指向已删的 BATCH8),改成过去时后也干净。
+三份全部移出,宽松档从 6 份收到 4 份。**这一条是我自己 docstring 里
+写的那句话的现场演示:没有理由的豁免会长大,而我就是那个往里加的人。**

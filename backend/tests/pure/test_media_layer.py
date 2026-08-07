@@ -2,7 +2,9 @@
 
 这批用例不碰数据库 —— 它们测的是**映射规则与判定逻辑**,而那正是
 迁移期最容易出错、也最需要能快速穷举的部分。真库层的行为
-(唯一约束真的生效、外键真的级联)在 `tests/test_api_media.py`。
+(唯一约束真的生效、外键真的级联)在 `tests/test_models.py`,
+颜色归属那一段在 `tests/test_a45_batch14_22_colour_attribution_db.py`。
+(这里原来指向 `tests/test_api_media.py` —— 树里不存在那个文件。)
 """
 from __future__ import annotations
 

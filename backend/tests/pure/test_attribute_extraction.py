@@ -1,6 +1,8 @@
 """M3:识别 Schema、归一化、置信度、决策表(零三方依赖)。
 
-真库层的闭环(识别→证据→建议→确认)在 `tests/test_api_attributes.py`。
+真库层的落库行为在 `tests/test_a45_batch14_extraction_db.py`。
+(这里原来指向 `tests/test_api_attributes.py` —— 那个文件树里不存在,
+从来没有人能顺着它走过去。)
 这里测的是**规则**,而规则正是最需要能穷举、也最不需要数据库的部分。
 """
 from __future__ import annotations

@@ -298,17 +298,29 @@ npm run dev
 ## 测试
 
 ```bash
-make check         # 离线全部门禁:1270+ 纯逻辑用例 + ruff。不需要 node_modules,不需要网络
-make fe-check      # 前端全部门禁:npm ci → typecheck → lint → build → syntax-check(需联网)
+make check         # 全部门禁 = check-offline + fe-check。**需联网**:fe-check 要 npm ci
+make check-offline # 离线子集:全部纯逻辑用例 + 六道审计。不需要 node_modules,不需要网络
+make fe-check      # 前端全部门禁:npm ci → typecheck → lint → test → build → syntax-check(需联网)
 
 make test-pure     # 只跑纯逻辑用例
 make smoke         # 端到端冒烟:对着跑起来的系统走一遍完整闭环
 make test          # 容器内 pytest 全量(含需要 PostgreSQL 的模型/API/迁移测试)
 ```
 
-**`make check` 跑绿 ≠ 全都过了。** 它覆盖不到类型与构建 —— 那两层要靠 `make fe-check`,
-而在 A20 之前它们**从未被执行过**(`docs/STATUS.md` 从 A12 起就记着这件事)。
-交付前两条都要跑。
+**`make check-offline` 跑绿 ≠ 全都过了。** 它覆盖不到前端类型、lint、Vitest 与构建 ——
+那四层只有 `make check`(或单独的 `make fe-check`)会跑,而它们需要网络装依赖。
+`check-offline` 目标自己会在末尾打印这句话。交付前两条都要跑。
+
+> 这一段在 A45-batch15-merged 之前是**反的**:它把 `make check` 写成「离线全部门禁,
+> 不需要网络」,把「覆盖不到类型与构建」也记在 `make check` 头上。实际上
+> `check: check-offline fe-check`,离线的是 `check-offline`。照着旧文案做的人
+> 会在一台没网的机器上敲 `make check`,得到一个装依赖失败的红,
+> 然后以为门禁本身坏了。
+>
+> 旧文案里还写着「1270+ 纯逻辑用例」。**这一版把用例数整个删掉了,不是改新。**
+> 订正这一段时我先写了当时的真值,然后本批自己新增 5 条守卫就把它作废了 ——
+> 根因不是数字抄错,是**把一个每批都在变的事实复制进了散文**。
+> 真值由 `make test-pure` 自己打印,这里不留第二份。
 
 测试分两层:
 
