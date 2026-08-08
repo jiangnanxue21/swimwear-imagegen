@@ -17,8 +17,13 @@ batch13-2 的教训写在它自己的文件头上:守卫挡得住"有人把决�
     请求体里出现了哪些字段、没出现哪些          不是"适配器被调用了"
 
 `run_extraction` 需要 Session,纯测试里没有数据库 —— 用一个记账用的
-假 session(只收集 `add()` 进来的对象)。它测的是**这个函数决定写什么**,
-那正是缺陷发生的地方;"写进去了吗"由真库用例负责(已写、未执行)。
+假 session(收集 `add()` 进来的对象;`begin_nested()` 给一个只计数的
+假保存点,因为 batch14-20 起建行段包在保存点里)。它测的是**这个函数
+决定写什么**,那正是缺陷发生的地方;"写进去了吗"由真库用例负责
+(已写、未执行)。
+
+素材从哪里来,由 `_EVIDENCE_ENTRY` 一处收口 —— 那个常量下面写着它为什么
+不能再是四份散落的字面量。
 """
 from __future__ import annotations
 
@@ -54,18 +59,44 @@ def _func(path, name: str):
 # ================================================================ 假 session
 
 
+class _FakeSavepoint:
+    """`begin_nested()` 的返回值。只记账,不回滚任何东西。
+
+    真实的保存点在 batch14-20 被加进 `run_extraction` 的建行段:幂等键
+    撞唯一索引时整个事务会进 aborted,不开保存点就没法继续跑完这次识别。
+    纯测试里撞不到约束(假 session 不落库),所以这两个方法都只是计数 ——
+    它们存在是为了**让那一段能跑到**,不是为了验保存点的语义。
+    """
+
+    def __init__(self):
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
 class _FakeSession:
     """只记账,不落库。`run_extraction` 在纯测试里唯一需要的东西。"""
 
     def __init__(self):
         self.added = []
         self.flushes = 0
+        self.savepoints = []
 
     def add(self, obj):
         self.added.append(obj)
 
     def flush(self):
         self.flushes += 1
+
+    def begin_nested(self):
+        sp = _FakeSavepoint()
+        self.savepoints.append(sp)
+        return sp
 
     def scalars(self, *_a, **_k):
         return iter(())
@@ -93,8 +124,12 @@ class _FakeAsset:
         # 判定会**复查** `status = READY`(`is_extraction_input` 的第一个条件)。
         # 这一行曾经缺失,而本文件恰好在缺 pydantic/sqlalchemy 的机器上整体
         # skip —— 于是四条用例带着"2148/2148 全绿"的记录红了一整批
-        # (batch14-11 撞破)。生产路径由 `usable_assets()` 保证只给 READY 行,
-        # 假对象必须复刻同一前提,否则测的是一条生产里到不了的分支。
+        # (batch14-11 撞破)。生产路径由取数入口保证只给 READY 行,假对象
+        # 必须复刻同一前提,否则测的是一条生产里到不了的分支。
+        #
+        # 那个入口 batch14-19 起是 `evidence_assets_for()`,不再是
+        # `usable_assets()`(见 `_EVIDENCE_ENTRY`)—— 换名字那一轮,这份
+        # 注释和下面四处打桩一起过期了,而跳过让它们又躺了一批。
         self.status = "READY"
         self.quality_json = None
 
@@ -141,8 +176,86 @@ def test_the_fake_asset_still_passes_the_evidence_whitelist():
     assert evidence_rules.asset_is_extraction_input(_FakeAsset("probe")), (
         "本文件的 _FakeAsset 不再满足 §5.1 白名单 —— 白名单新增了条件而夹具"
         "没跟上。去 evidence_rules.asset_is_extraction_input 看它现在读哪些"
-        "字段,把缺的补进 _FakeAsset(生产语义:usable_assets 给出的 READY"
-        " 人工上传行),不要反过来放宽白名单。"
+        "字段,把缺的补进 _FakeAsset(生产语义:evidence_assets_for 给出的"
+        " READY 人工上传行),不要反过来放宽白名单。"
+    )
+
+
+#: `run_extraction` 今天从 `media_service` 上取证据素材用的那个名字。
+#:
+#: **这里写成常量,是因为它曾经在这份文件里散成四份字面量而集体过期。**
+#: batch14-19 把取数入口从 `usable_assets()` 换成 `evidence_assets_for()`
+#: (§5.1「白名单查询助手成为唯一取数入口」),下面四条用例还在打旧名字的桩:
+#: 假素材永远到不了 `run_extraction`,假 session 又查不出任何行,于是全部
+#: 撞「该商品没有可用于识别的素材」。而本文件在缺 sqlalchemy 的机器上整体
+#: skip —— 换名字那一轮没有任何地方变红。
+#:
+#: 这和 batch14-11 撞破的是**同一型事故**(见 `_FakeAsset.status` 那段注释):
+#: 生产改了前提、夹具没跟上、跳过掩盖了红。补法也和那次一样 —— 不放宽被测
+#: 的东西,而是把夹具和生产前提之间的那根线**接到会报警的地方**:
+#: `test_the_patched_entry_point_is_the_one_run_extraction_calls` 直接读
+#: `run_extraction` 的 AST,下一次换名字会在这里先红,并把新名字念出来。
+_EVIDENCE_ENTRY = "evidence_assets_for"
+
+
+class _evidence_returns:
+    """让 `run_extraction` 的取数入口返回指定的假素材。
+
+    用上下文管理器而不是四处 try/finally:打桩点只剩一处,常量只有一份,
+    恢复不会漏。
+    """
+
+    def __init__(self, assets):
+        self._assets = list(assets)
+        self._original = None
+
+    def __enter__(self):
+        from app.media import service as media_service
+
+        self._original = getattr(media_service, _EVIDENCE_ENTRY)
+        setattr(media_service, _EVIDENCE_ENTRY, lambda *_a, **_k: list(self._assets))
+        return self
+
+    def __exit__(self, *_exc):
+        from app.media import service as media_service
+
+        setattr(media_service, _EVIDENCE_ENTRY, self._original)
+        return False
+
+
+def _media_service_calls_in(fn_name: str) -> set[str]:
+    """`app/attributes/service.py` 的某个函数里,`media_service.X(...)` 的 X 集合。"""
+    fn = _func(ATTR_SERVICE, fn_name)
+    return {
+        node.func.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "media_service"
+    }
+
+
+def test_the_patched_entry_point_is_the_one_run_extraction_calls():
+    """打桩的名字必须是 `run_extraction` 真的用来取证据的那一个。
+
+    没有这条,取数入口再改一次名,下面四条用例会再一次静默地打空气 ——
+    在有 sqlalchemy 的机器上红成「该商品没有可用于识别的素材」,让人以为
+    是白名单误伤;在没有的机器上连红都不红。
+
+    `usable_asset_count` 不算数:它只在证据为空时被调来把错误话说准,
+    **不返回行**(见 `media/service.py` 那个函数的文档)。所以这里断言的是
+    「打的桩在集合里」而不是「集合只有一个元素」。
+    """
+    called = _media_service_calls_in("run_extraction")
+    assert _EVIDENCE_ENTRY in called, (
+        f"本文件打的桩是 media_service.{_EVIDENCE_ENTRY},而 run_extraction 现在调的是 "
+        f"{sorted(called)} —— 取数入口改名了。把 _EVIDENCE_ENTRY 改成新名字,"
+        "不要给 _FakeSession 加返回行的查询方法来绕过去"
+    )
+    assert "usable_assets" not in called, (
+        "run_extraction 退回了 usable_assets —— 它返回未过滤的行,"
+        "AI 生成图会被喂进付费抽取器(§5.1)"
     )
 
 
@@ -373,11 +486,8 @@ def test_a_paid_extractor_refuses_to_fan_out_over_the_ceiling():
     extractor = _ScriptedExtractor([], billable=True)
 
     from app.attributes import service as attr_service
-    from app.media import service as media_service
 
-    original = media_service.usable_assets
-    media_service.usable_assets = lambda *_a, **_k: assets
-    try:
+    with _evidence_returns(assets):
         error = expect_raises(
             ValidationError,
             attr_service.run_extraction,
@@ -385,10 +495,8 @@ def test_a_paid_extractor_refuses_to_fan_out_over_the_ceiling():
             product=product,
             extractor=extractor,
         )
-        assert extractor.calls == [], "已经开始调用了才拒绝 —— 钱已经花出去一部分"
-        assert "分批" in str(error)
-    finally:
-        media_service.usable_assets = original
+    assert extractor.calls == [], "已经开始调用了才拒绝 —— 钱已经花出去一部分"
+    assert "分批" in str(error)
 
 
 def test_the_ceiling_does_not_apply_to_the_mock():
@@ -402,17 +510,12 @@ def test_the_ceiling_does_not_apply_to_the_mock():
     extractor = _ScriptedExtractor([_result() for _ in range(30)], billable=False)
 
     from app.attributes import service as attr_service
-    from app.media import service as media_service
 
-    original = media_service.usable_assets
-    media_service.usable_assets = lambda *_a, **_k: assets
-    try:
+    with _evidence_returns(assets):
         row = attr_service.run_extraction(
             session, product=_FakeProduct(), extractor=extractor
         )
-        assert row.image_count == 30
-    finally:
-        media_service.usable_assets = original
+    assert row.image_count == 30
 
 
 def test_the_call_budget_boundaries_are_exact():
@@ -537,19 +640,13 @@ def test_every_paid_call_writes_a_usage_row_including_the_failed_ones():
             billable=True,
         )
         assets = [_FakeAsset("a"), _FakeAsset("b")]
-        from app.media import service as media_service
-
-        original_assets = media_service.usable_assets
-        media_service.usable_assets = lambda *_a, **_k: assets
-        try:
+        with _evidence_returns(assets):
             attr_service.run_extraction(
                 session,
                 product=_FakeProduct(),
                 extractor=extractor,
                 fields=("primary_color",),
             )
-        finally:
-            media_service.usable_assets = original_assets
     finally:
         attr_service._record_extraction_usage = original
 
@@ -563,22 +660,19 @@ def test_a_free_extractor_writes_no_usage_rows():
     calls = []
 
     from app.attributes import service as attr_service
-    from app.media import service as media_service
 
     original = attr_service._record_extraction_usage
-    original_assets = media_service.usable_assets
     attr_service._record_extraction_usage = lambda session, **kw: calls.append(kw)
-    media_service.usable_assets = lambda *_a, **_k: [_FakeAsset("a")]
     try:
-        attr_service.run_extraction(
-            session=_FakeSession(),
-            product=_FakeProduct(),
-            extractor=_ScriptedExtractor([_result()], billable=False),
-            fields=("primary_color",),
-        )
+        with _evidence_returns([_FakeAsset("a")]):
+            attr_service.run_extraction(
+                session=_FakeSession(),
+                product=_FakeProduct(),
+                extractor=_ScriptedExtractor([_result()], billable=False),
+                fields=("primary_color",),
+            )
     finally:
         attr_service._record_extraction_usage = original
-        media_service.usable_assets = original_assets
     assert calls == []
 
 

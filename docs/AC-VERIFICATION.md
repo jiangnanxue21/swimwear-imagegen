@@ -469,3 +469,70 @@ npm run lint        # 6 warnings,exit 0
 npm run build       # exit 0
 # npm run test     ← root-owned .vite/,EACCES
 ```
+
+---
+
+## 8. 2026-08-08 本机 PostgreSQL 复验:A45-BATCH16 报告中的失败已关闭
+
+本节是一次**带日期的历史快照**,不是会自动更新的当前测试总数。上面第 7 节保留的
+`11 failed, 2 passed` 是问题被发现时的原始证据;本节记录修复后的复验结果,并取代
+它作为这两组用例的当前结论。仓库凭据规则不允许在这里记录本机密码或完整连接串。
+
+### 8.1 环境与边界
+
+- PostgreSQL:本机 `127.0.0.1:5432`,专用库 `imagegen_test`。
+- 测试库原先不存在,本次新建后由夹具清空 `public` schema,再走 Alembic 全链迁移。
+- 迁移链成功从 base 升到 `0045`,没有使用 `create_all()` 代替迁移。
+- 本机未运行 Redis;本节目标真库用例不依赖 Redis,因此没有设置 `CI=1`。
+- 生产库和远程 `imagegen` 均未操作。
+
+Windows 本机另有两项**执行环境兼容处理**,均不是业务修复:
+
+1. Alembic 当前按系统 locale(CP936)读取 `alembic.ini`,其中的 UTF-8 中文注释会让
+   迁移在读配置时抛 `UnicodeDecodeError`。复验时临时换成等义 ASCII 注释,
+   结束后已恢复,工作树没有留下这项临时改动。
+2. 受限执行环境不允许 pytest 在默认临时目录创建 `tmp_path`;最终在沙箱外以独立
+   `--basetemp` 运行。此前的 `PermissionError` 没有进入业务断言,不计为用例失败。
+
+### 8.2 报告点名的两类失败
+
+| 范围 | 复验结果 | 结论 |
+|---|---:|---|
+| `test_a45_batch12_4_recovery_db.py` + `test_a45_batch12_5_lease_and_billing_db.py` | 13/13 passed | 原报告中的 3 条 reaper 真库失败已消失;测试连接固定 UTC 的修复在真实 PostgreSQL 上成立 |
+| 报告点名的 4 条 Stage 3 抽取器纯测试 + 入口漂移守卫 + UTC 引擎守卫 | 9/9 passed | 过期的素材入口桩、假保存点缺口及其防回归守卫均通过 |
+
+Stage 3 的目标范围是以下四条原失败用例:
+
+```text
+test_a_paid_extractor_refuses_to_fan_out_over_the_ceiling
+test_the_ceiling_does_not_apply_to_the_mock
+test_every_paid_call_writes_a_usage_row_including_the_failed_ones
+test_a_free_extractor_writes_no_usage_rows
+```
+
+同时执行了 `test_the_patched_entry_point_is_the_one_run_extraction_calls` 和
+`test_engine_timezone_pin.py` 全文件,避免只验证当下行为而没有守住下一次入口改名
+或新建引擎时的回归。
+
+### 8.3 关联真库回归
+
+以下三组在同一个本机 PostgreSQL 专用测试库上重建 schema 后执行:
+
+```text
+tests/test_a45_batch12_7_billed_unknown_db.py
+tests/test_batch_receipt_lifecycle_db.py
+tests/test_batch_lease_concurrency_db.py
+```
+
+结果为 **28/28 passed**。它们覆盖计费状态未知、回执生命周期以及租约并发,
+用于确认 UTC 修复没有把同一链路的恢复和并发语义改坏。
+
+### 8.4 本次结论
+
+本次有最终 pytest 汇总的范围合计 **50/50 passed**(13 条报告相关真库 +
+28 条关联真库 + 9 条报告相关纯测试/守卫)。因此 A45-BATCH16 验证报告中点名的
+「4 条 Stage 3 纯测试失败」与「3 条 reaper 真库失败」均已关闭。
+
+本结论只覆盖上面列出的 50 条历史快照,不等于 `make check`、全部后端集成测试、
+前端门禁或 AC-01~AC-22 全部通过。要取得当前计数,仍应重新运行对应命令,
+不要从本节抄数字。

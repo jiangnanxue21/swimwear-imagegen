@@ -39,6 +39,40 @@ test.beforeEach(async ({ page }) => {
       })
       return
     }
+    // 外壳自己会拉的两个接口:环境状态条和预算横幅。
+    //
+    // 它们不是列表,兜底那句 `{ items: [], total: 0 }` 对它们是**错的形状** ——
+    // `EnvironmentBanner` 读 `data.facets.filter(...)`、`SpendAlertBanner` 读
+    // `data.budget.should_alert`,拿到 undefined 当场抛,而这两个组件在
+    // `AppLayout` 里、在页面级 ErrorBoundary **外面**,于是整页
+    // 「Unexpected Application Error」——外壳根本没渲染出来,
+    // 而这三条用例断言的正是外壳。
+    //
+    // 这两处给的是「一切正常、没什么要说的」那一档:两个横幅都自行返回 null,
+    // 外壳干干净净地起来 —— 正是「不连后端也要能起来」想验的那个状态。
+    if (url.includes('/api/environment')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          fidelity: 'REAL',
+          trustworthy: true,
+          facets: [],
+          deployment: { batch_execution_mode: 'e2e', storage_backend: 'e2e' },
+        }),
+      })
+      return
+    }
+    if (url.includes('/api/usage/spend')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          budget: { level: 'OK', should_alert: false, used_ratio: 0 },
+        }),
+      })
+      return
+    }
     await route.fulfill({
       status: 200,
       contentType: 'application/json',

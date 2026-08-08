@@ -23,6 +23,19 @@
  * 全局开 jsdom 会让这 29 条每次多背一个 DOM 实现的启动开销，
  * 而且会掩盖「这批用例不需要 DOM」这个已经被论证过的事实。
  *
+ * ## 为什么是 `projects` 而不是 `environmentMatchGlobs`
+ *
+ * 上面那件事本来是 `environmentMatchGlobs` 做的。Vitest 3 把它标了废弃，
+ * **Vitest 4 直接删掉了** —— 而删掉的方式是「配置项不认识就忽略」，
+ * 不是报错。表现因此格外坏：升上去之后 `tests/component/**` 会安安静静地
+ * 掉回 `environment: 'node'`，然后 21 条用例在 `document is undefined` 上炸掉，
+ * 而配置文件里那一行还好端端地写着。
+ *
+ * 换成 `projects` 之后，环境是每个 project 自己的必填项，
+ * 「哪个目录跑在哪个环境」不再依赖一个可能被静默忽略的匹配规则。
+ * `extends: true` 让两个 project 继承本文件的 plugins / resolve / setupFiles /
+ * `passWithNoTests`，重复的只有 name、environment、include 三行。
+ *
  * ## `passWithNoTests: false` 是刻意的
  *
  * 这个仓库刚刚才从「29 条用例写好了但一次也没跑过」的状态里爬出来。
@@ -53,19 +66,43 @@ export default defineConfig({
    */
   cacheDir: '.vite-cache',
   resolve: {
-    alias: { '@': path.resolve(__dirname, './src') },
+    // `import.meta.dirname` 而不是 `__dirname`:Vite 8 的原生配置加载器
+    // (`configLoader: 'native'`,下个大版本会变成默认)不提供 CJS 的 `__dirname`,
+    // 现在每次 dev/build/test 都会为此打一条警告。换掉它是为了别让这条常驻警告
+    // 把真正的构建警告淹掉 —— 需要 Node >= 20.11,CI 与 Dockerfile 都是 22。
+    alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
   test: {
     globals: false,
-    environment: 'node',
-    environmentMatchGlobs: [['tests/component/**', 'jsdom']],
     setupFiles: ['./tests/setup.ts'],
-    include: ['tests/**/*.test.{ts,tsx}'],
     // Playwright 用例在 tests/e2e 下，由 playwright.config.ts 跑。
     // 不排除的话 Vitest 会把它们当成自己的用例收进来，然后在
-    // `import { test } from '@playwright/test'` 上炸掉
+    // `import { test } from '@playwright/test'` 上炸掉。
+    //
+    // 下面两个 project 的 include 已经不覆盖 tests/e2e 了，这一行是第二道锁：
+    // 哪天有人把 include 放宽回 `tests/**`，它还挡得住。
     exclude: ['node_modules/**', 'dist/**', 'tests/e2e/**'],
     passWithNoTests: false,
     reporters: ['default'],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          environment: 'node',
+          include: ['tests/unit/**/*.test.{ts,tsx}'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'component',
+          environment: 'jsdom',
+          // component 目录下有 .ts 也有 .tsx（download.test.ts 不渲染组件，
+          // 但要 Blob / URL.createObjectURL，仍然得在 jsdom 里）
+          include: ['tests/component/**/*.test.{ts,tsx}'],
+        },
+      },
+    ],
   },
 })

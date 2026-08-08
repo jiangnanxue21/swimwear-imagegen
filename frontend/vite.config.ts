@@ -17,7 +17,11 @@ export default defineConfig({
   cacheDir: '.vite-cache',
   plugins: [react()],
   resolve: {
-    alias: { '@': path.resolve(__dirname, './src') },
+    // `import.meta.dirname` 而不是 `__dirname`:Vite 8 的原生配置加载器
+    // (`configLoader: 'native'`,下个大版本会变成默认)不提供 CJS 的 `__dirname`,
+    // 现在每次 dev/build/test 都会为此打一条警告。换掉它是为了别让这条常驻警告
+    // 把真正的构建警告淹掉 —— 需要 Node >= 20.11,CI 与 Dockerfile 都是 22。
+    alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
   server: {
     port: 5173,

@@ -27,7 +27,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { MemoryRouter, useSearchParams } from 'react-router-dom'
+import { MemoryRouter, useNavigate, useSearchParams } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { NAV, router } from '../../src/App'
 import {
@@ -133,7 +133,9 @@ function mount<S extends Parameters<typeof useUrlFilters>[0]>(spec: S, initial: 
   return renderHook(
     () => {
       const [params] = useSearchParams()
-      return { filters: useUrlFilters(spec), query: params.toString() }
+      // navigate 一并暴露出来:「后退」那一条要走 router 自己的历史栈,
+      // 不能走 window.history(理由写在那条用例里)
+      return { filters: useUrlFilters(spec), query: params.toString(), navigate: useNavigate() }
     },
     { wrapper: wrapper(initial) },
   )
@@ -259,7 +261,20 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
 
   it('后退能回到上一组筛选条件（§8.2「后退保留」）', () => {
     // 这一条是整批的落点：patch 走 push 而不是 replace，
-    // 所以浏览器后退回到的是上一组条件，而不是直接离开这一页
+    // 所以后退回到的是上一组条件，而不是直接离开这一页。
+    //
+    // ## 为什么是 navigate(-1) 而不是 window.history.back()
+    //
+    // 这条用例原来写的是 `window.history.back()`，而上面的 wrapper 是
+    // `<MemoryRouter>` —— 它的历史栈**在内存里**，根本不监听 window.history。
+    // 于是 back() 打在 jsdom 自己那个栈上，router 一无所知，
+    // `values.step` 停在 EXPORT，断言恒失败。
+    //
+    // 它不是 react-router 7 带来的：换 router 之前同样红。这条用例从写下来
+    // 那天起就没有通过过，测的也从来不是它声称在测的东西。
+    //
+    // `navigate(-1)` 走的是 MemoryRouter 自己的栈，push/replace 的区别照样验得到：
+    // patch 要是改成 replace，两次 patch 只留一格，navigate(-1) 退不动，这条会红。
     const { result } = mount({ step: enumParam<'GENERATE' | 'EXPORT'>(['GENERATE', 'EXPORT']) }, '/workbench')
 
     act(() => result.current.filters.patch({ step: 'GENERATE' }))
@@ -267,7 +282,7 @@ describe('useUrlFilters：URL 是唯一真相（GAP-033）', () => {
     expect(result.current.filters.values.step).toBe('EXPORT')
 
     act(() => {
-      window.history.back()
+      void result.current.navigate(-1)
     })
 
     return waitFor(() => expect(result.current.filters.values.step).toBe('GENERATE'))

@@ -17,7 +17,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
 from app.models import Base
-from tests.conftest import TEST_DB_URL, requires_db
+from tests.conftest import TEST_CONNECT_ARGS, TEST_DB_URL, requires_db
 
 pytestmark = requires_db
 
@@ -41,8 +41,12 @@ def alembic_config():
 
 @pytest.fixture
 def clean_engine():
-    """给本模块一个干净的库,用完还原成 ORM 建的表。"""
-    engine = create_engine(TEST_DB_URL)
+    """给本模块一个干净的库,用完还原成 ORM 建的表。
+
+    `connect_args` 与 `conftest.TEST_CONNECT_ARGS` 同源:全仓的 `create_engine`
+    都得带那条时区钉子,漏一个就多一处"只在这台库上对"的路径。
+    """
+    engine = create_engine(TEST_DB_URL, connect_args=TEST_CONNECT_ARGS)
     _reset(engine)
     yield engine
     _reset(engine)

@@ -29,6 +29,7 @@ import {
   type ImageAngle,
   type PlanActivationEffect,
 } from '../api/generationPlans'
+import { readError } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 
 interface Props {
@@ -44,23 +45,42 @@ const ANGLE_OPTIONS = (Object.keys(IMAGE_ANGLE_LABEL) as ImageAngle[]).map((valu
 
 export default function GenerationPlanPanel({ spuId, variantLabels = {} }: Props) {
   const { message } = App.useApp()
-  const reportWriteError = useWriteError()
   const [plans, setPlans] = useState<GenerationPlan[]>([])
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [effect, setEffect] = useState<PlanActivationEffect | null>(null)
   const [form] = Form.useForm()
 
+  /**
+   * 重读方案列表。
+   *
+   * ## 为什么这里用 `readError` 而不是 `reportWriteError`
+   *
+   * 原来这一处走的是 `reportWriteError`,而 `useWriteError` 在 `UNKNOWN`
+   * (`client.ts`:没拿到响应 —— 超时或断网)时会回调 `onUnknown` 去重读一次。
+   * 本函数**正是**那个 `onUnknown`,断网时就成了自己调自己的无限重读。
+   *
+   * 而且这是一次**读**:读失败不存在"可能已经发生"的问题,
+   * `UNKNOWN` 那套话术("先刷新、先核对")对它没有意义。
+   *
+   * 顺带说明原来那行为什么没炸成这样:`useWriteError()` 当时一个参数都没传,
+   * `onUnknown` 是 `undefined`,于是断网时报的是
+   * `onUnknown is not a function` —— 类型错误 TS2554 底下压着的是这个。
+   */
   const reload = useCallback(async () => {
     setLoading(true)
     try {
       setPlans(await listGenerationPlans(spuId))
     } catch (error) {
-      reportWriteError(error)
+      message.error(readError(error))
     } finally {
       setLoading(false)
     }
-  }, [spuId, reportWriteError])
+  }, [spuId, message])
+
+  // 写失败且结果未知时重读一次:方案可能已经建了/已经启用了,
+  // 下一个动作是"看一眼现在是什么状态",不是"再点一次"
+  const reportWriteError = useWriteError(reload)
 
   useEffect(() => {
     void reload()

@@ -65,7 +65,16 @@ if (typeof window !== 'undefined') {
 // `expect` 在这里没有别的用途，但导入它能让 setup 文件本身出错时更早暴露
 void expect
 
-afterAll(async (suite) => {
+// Vitest 4 改了套件级钩子的签名:第一个参数变成 fixture context(必须写成
+// 对象解构),原来的 suite 挪到了**第二个**参数。旧写法 `afterAll(async (suite) => ...)`
+// 在 4.x 下不是「拿到 undefined 然后静默失效」,而是 `FixtureParseError` ——
+// 整个文件被判成 Failed Suite,可用例列表里那几十条还是绿的。
+// 这个组合很容易被读成噪声然后被忽略,而它挡的正是「0 skip」这道门禁。
+//
+// `{}` 是官方迁移写法:`afterAll()`(不带 `test.` 前缀)本来就拿不到任何 fixture,
+// 解构出任何一个具名字段都会变成 FixtureAccessError,所以只能留空。
+// eslint-disable-next-line no-empty-pattern
+afterAll(async ({}, suite) => {
   const offenders: string[] = []
 
   const walk = (task: { name?: string; mode?: string; tasks?: unknown[] }, trail: string[]) => {

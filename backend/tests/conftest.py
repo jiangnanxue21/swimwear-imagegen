@@ -124,10 +124,43 @@ def _assert_safe_to_wipe(url_string: str) -> None:
         )
 
 
+#: 测试引擎的连接参数。**必须和 `db/session.py` 的生产引擎带同一条时区钉子。**
+#:
+#: `clock.py` 开头把这件事的后果写全了:全部时间列是 `timestamptz`,而我们
+#: 写进去的是 naive UTC(`utc_now()`),naive 值发给 timestamptz 时
+#: PostgreSQL 按**会话的 TimeZone 参数**解释它。
+#: 生产引擎因此把会话时区钉死成 UTC,并注明「这不是一个偏好设置,是一个
+#: 正确性前提」。
+#:
+#: 这里原来是裸的 `create_engine(TEST_DB_URL)` —— 于是那个正确性前提
+#: **只在生产成立,测试反而是唯一不满足它的地方**。
+#:
+#: ## 它是怎么表现出来的(A45-batch16 后一轮,真库 3 条 reaper 用例)
+#:
+#: 两侧都是 Python naive 时,非 UTC 会话时区让两边**等量偏移**,比较依然
+#: 成立 —— 所以大部分真库用例(例如 `test_batch_lease_concurrency_db.py`,
+#: 全程 naive↔naive)在一台 `timezone=Asia/Shanghai` 的库上照样全绿。
+#: 咬人的是**DB 侧 `now()` 摆现场 + Python naive 判定**的混用形态::
+#:
+#:     UPDATE ... SET updated_at = now() - interval '1 hour'   真实 instant T-1h
+#:     cutoff = utc_now() - 60s(naive,被按 +08 解释)         真实 instant T-8h-60s
+#:
+#: `updated_at < cutoff` 于是恒假,`reap_stalled()` 一条都收不回来,而
+#: **没有任何地方报错** —— 看上去正是"回收器坏了"。`_lease_is_not_alive()`
+#: 里的 `phase_lease_until < now` 同理。
+#:
+#: 换句话说:少这一行,回收器相关的真库用例会在非 UTC 库上诬告业务代码。
+#: 钉住它,那些用例问的才是它们自称在问的那件事。
+TEST_CONNECT_ARGS = {"options": "-c timezone=utc"}
+
+
 def _database_error() -> str | None:
     """连得上返回 None,连不上返回原因。"""
     try:
-        engine = create_engine(TEST_DB_URL, connect_args={"connect_timeout": 2})
+        engine = create_engine(
+            TEST_DB_URL,
+            connect_args={"connect_timeout": 2, **TEST_CONNECT_ARGS},
+        )
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         engine.dispose()
@@ -238,8 +271,23 @@ def engine():
     # 纯逻辑用例不该因为没设环境变量就跑不起来。
     _assert_safe_to_wipe(TEST_DB_URL)
 
-    eng = create_engine(TEST_DB_URL)
+    eng = create_engine(TEST_DB_URL, connect_args=TEST_CONNECT_ARGS)
     with eng.connect() as conn:
+        # 钉子生效了吗 —— **当场问一次库,不靠"参数传了就等于生效了"。**
+        # 传错键名、驱动不认、或者哪天有人把 connect_args 覆盖掉,都会让
+        # 上面那段注释变成一句不成立的话,而后果是无声的(见 TEST_CONNECT_ARGS)。
+        # 建库是每次真库运行的第一步,失败发生在这里,读到的是原因而不是
+        # 十几条"回收器没回收"。
+        tz = conn.execute(text("SHOW TimeZone")).scalar_one()
+        if str(tz).lower() not in {"utc", "etc/utc"}:
+            raise RuntimeError(
+                f"测试库会话时区是 {tz!r},不是 UTC —— 连接上的 "
+                f"{TEST_CONNECT_ARGS} 没有生效。\n"
+                "naive UTC 值写进 timestamptz 会被按这个时区解释,于是"
+                "「DB 侧 now() 摆现场 + Python naive 判定」的用例会无声地"
+                "判错(退避、租约、卡死回收全在其中)。\n"
+                "先修连接参数,不要去改被诬告的业务代码。"
+            )
         # 上一次跑剩下的东西全部清掉,包括 alembic_version ——
         # 留着它 upgrade 会以为已经是最新的,直接建出一个空库
         conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public;"))
