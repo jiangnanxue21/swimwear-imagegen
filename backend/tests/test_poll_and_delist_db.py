@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.channels import simulator
 from app.core.enums import DraftStatus, PublishOperation, PublishStatus, RejectionStatus
@@ -446,17 +447,137 @@ def test_an_untagged_update_does_not_erase_the_batch_tag(session):
     assert listing.test_batch_tag == "uat-2026-08"
 
 
-def test_a_listing_that_never_reached_the_platform_is_not_on_the_inventory(session):
-    """没有外部 ID 就等于那次提交从没到达平台,它不占任何位置。
+def test_a_listing_that_definitely_never_reached_the_platform_is_not_on_the_inventory(session):
+    """**鉴权失败**没有外部 ID,而且确定没到达平台 —— 这一类不上清单。
 
     列出来只会让清单变长、让真正要核对的行更难看见。
+
+    ## A45-batch18 / P1-3:这条用例原来的名字和结论都太宽
+
+    它叫 `..._never_reached_the_platform_...`,用的却只是鉴权失败这一种
+    **确定没到达**的无 ID 场景,然后把结论泛化成"所有无 ID 行都没到达平台"。
+    `cleanup_service.inventory()` 当时正是照着这个泛化写的
+    (`external_spu_id IS NOT NULL AND != ''`),于是一次 CREATE 到达平台、
+    响应在返回 ID 前超时的行也被一起滤掉 —— 而那一行是平台上的孤儿商品。
+
+    判据因此不是"有没有 ID",是"**知不知道**"。鉴权失败的行本地状态是
+    `SUBMIT_FAILED`(我们收到了平台的明确拒绝),它确实不必上清单;
+    结果未知的行由下面 `test_an_unknown_submit_without_an_id_stays_on_the_inventory`
+    覆盖。两条用例必须同时存在,少了任何一条都会让另一半重新滑回去。
     """
     product = _product(session, sku="SW-C-6", spu="SW-C-6")
     draft = _draft(session, product, spu_in_payload="SIM-AUTH-C6")
     svc.enqueue(session, product=product, draft=draft, shop_id=SHOP, actor="tester")
     svc.run_due(_factory(session), limit=10)
 
+    listing = session.scalars(
+        select(ChannelListing).where(ChannelListing.product_id == product.id)
+    ).one()
+    assert listing.status != PublishStatus.SUBMIT_RESULT_UNKNOWN.value, (
+        "这条用例的前提是「确定没到达平台」;它变成结果未知的话,"
+        "断言的就是另一件事了"
+    )
     assert cleanup_service.inventory(session, shop_id=SHOP).total == 0
+
+
+def test_an_unknown_submit_without_an_id_stays_on_the_inventory(session):
+    """**A45-batch18 / P1-3 的核心用例。**
+
+    CREATE 到达了平台并创建了商品,响应却在返回外部 ID 之前超时。本地
+    如实落 `SUBMIT_RESULT_UNKNOWN`,而修复之前那一行会从 inventory、plan、
+    verify **同时**消失,清理报告说 clean=true —— 平台上留着一个本系统
+    检索不到、核对不了、下架不掉的孤儿商品,正是 4.1 节 H 要防的结局。
+
+    直接改库造这个状态,不去模拟一次超时:被测的是清单的取数口径,
+    不是超时怎么落状态(那个由 `tests/pure/test_publish_policy.py` 的
+    `test_a_timed_out_create_is_never_resent_automatically` 钉着)。
+    """
+    product = _product(session, sku="SW-C-7", spu="SW-C-7")
+    draft = _draft(session, product, spu_in_payload="SIM-CREATE_OK-C7")
+    svc.enqueue(session, product=product, draft=draft, shop_id=SHOP, actor="tester")
+    svc.run_due(_factory(session), limit=10)
+
+    listing = session.scalars(
+        select(ChannelListing).where(ChannelListing.product_id == product.id)
+    ).one()
+    listing.status = PublishStatus.SUBMIT_RESULT_UNKNOWN.value
+    listing.external_spu_id = None
+    session.flush()
+
+    report = cleanup_service.inventory(session, shop_id=SHOP)
+    assert report.total == 1, "不确定的那一行必须留在清单上"
+    assert report.unreconciled == 1
+    assert report.clean is False, (
+        "clean 是 4.1 节 H 要的结论,也是 CLI 的退出码。"
+        "它在「我不知道」的时候必须说 False"
+    )
+
+    row = report.rows[0]
+    assert row.needs_reconcile is True
+    assert row.delistable is False, "没有 ID 就构造不出下架报文"
+    # 人拿着去平台后台找它的线索。没有这几项,"需人工核对"是一句空话
+    assert row.locator["shop_id"] == SHOP
+    assert row.locator["spu"] == "SW-C-7"
+
+
+def test_an_unknown_row_is_skipped_rather_than_queued_and_says_why(session):
+    """它进计划、进 skipped,**不进队列**(A45-batch18 / P1-3)。
+
+    从计划里滤掉的话,人动手前看到的是一份干净的清单,而事实不是;
+    排进队列的话,`publish_service.enqueue` 会拿一个没有目标的下架报文去发。
+    两种都不对,正确的是"列出来 + 说明白为什么自动流程处理不了"。
+    """
+    product = _product(session, sku="SW-C-8", spu="SW-C-8")
+    draft = _draft(session, product, spu_in_payload="SIM-CREATE_OK-C8")
+    svc.enqueue(session, product=product, draft=draft, shop_id=SHOP, actor="tester")
+    svc.run_due(_factory(session), limit=10)
+    listing = session.scalars(
+        select(ChannelListing).where(ChannelListing.product_id == product.id)
+    ).one()
+    listing.status = PublishStatus.SUBMIT_RESULT_UNKNOWN.value
+    listing.external_spu_id = None
+    session.flush()
+
+    before = session.query(PublishOutbox).count()
+    result = cleanup_service.run_delist(session, actor="tester", shop_id=SHOP)
+
+    assert result["queued"] == []
+    assert session.query(PublishOutbox).count() == before, "没有 ID 的行不许排队"
+    skipped = result["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["needs_reconcile"] is True
+    assert skipped[0]["locator"]["spu"] == "SW-C-8", (
+        "一句「跳过了 1 行」而不说是哪一行,等于没说"
+    )
+
+
+def test_a_channel_only_scope_can_preview_but_cannot_delist(session):
+    """**A45-batch18 / P1-4。**
+
+    `delist --channel GENERIC --apply` 原来会把该渠道下全部店铺、全部批次的
+    真实商品排进下架队列。一次参数遗漏(少打一个 `--tag`)扩大成一次
+    生产批量下架,而在平台上下架通常撤不回来。
+
+    预览仍然允许只给渠道:看一眼整个渠道有哪些行,恰恰是决定要不要动手
+    之前该做的事。
+    """
+    _live(session, sku="SW-C-9", spu="SW-C-9", trigger="SIM-LIVE-C9")
+    listing = session.scalars(
+        select(ChannelListing).where(ChannelListing.shop_id == SHOP)
+    ).first()
+    channel = listing.channel
+
+    # 看得了
+    cleanup_service.plan_delist(session, channel=channel)
+
+    before = session.query(PublishOutbox).count()
+    try:
+        cleanup_service.run_delist(session, actor="tester", channel=channel)
+    except ValidationError as exc:
+        assert "只给渠道" in str(exc)
+    else:  # pragma: no cover - 走到这里就是护栏没了
+        raise AssertionError("只给渠道时 run_delist 必须拒绝")
+    assert session.query(PublishOutbox).count() == before, "拒绝之后一行都不许排出去"
 
 
 # ---------------------------------------------------------------- 清理

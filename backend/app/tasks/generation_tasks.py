@@ -47,6 +47,7 @@ from app.models.generation import GenerationAttempt, GenerationCandidate, Genera
 from app.models.model_template import ModelTemplate
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
+from app.providers import call_accounting
 from app.providers.base import GenerationMode, GenerationRequest, settle_billable_units
 from app.providers.errors import ProviderError, ResultDownloadError
 from app.providers.registry import get_provider, next_configured_provider
@@ -797,10 +798,25 @@ def _run(
             AttemptStatus.TIMEOUT if unknown else AttemptStatus.FAILED,
             error=exc,
         )
+        # **失败也要按发出去的请求数记账**(A45-batch18 / P2-2)。
+        #
+        # 原来这里不传 `billable_units`,于是走 `record_usage` 的默认值
+        # `max(candidate_count, 1)` —— 失败分支 candidate_count 是 0,恒为 1。
+        # 四次提交前三次成功第四次失败时少记 3 笔已经花掉的钱;
+        # 素材下载在第一个 POST 之前失败时,又凭空记了一笔从没花过的钱。
+        # 判定在 `providers/call_accounting.py`(纯模块),这里只取数。
+        failed_units, units_source = call_accounting.failed_submit_units(
+            getattr(exc, "detail", None)
+        )
         gs.record_usage(
             session, provider=task.provider, task_id=task.id, attempt_id=attempt.id,
             operation="submit", succeeded=False, error_code=str(exc.code),
             duration_ms=int((time.monotonic() - started) * 1000),
+            billable_units=failed_units,
+            units_source=units_source,
+            provider_attempts=call_accounting.attempted_calls(
+                getattr(exc, "detail", None)
+            ),
             # 这条 attempt 的生成费用身份。走到这里说明这一笔已经记过账了,
             # 后面任何一条路径(续跑成功、收尾)都只会更新它,不会再记一笔
             billing_key=gs.submit_billing_key(attempt.id),

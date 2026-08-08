@@ -266,7 +266,11 @@ class MultimodalClient:
         self._http_client = http_client
 
     async def send(
-        self, request: LLMRequest, *, send_once: Any | None = None
+        self,
+        request: LLMRequest,
+        *,
+        send_once: Any | None = None,
+        on_attempt: Any | None = None,
     ) -> tuple[dict[str, Any], int]:
         """发送并按策略重试。
 
@@ -274,6 +278,21 @@ class MultimodalClient:
         重试策略(退避、抖动、Retry-After、什么错不该重试)只有这一份,
         换往返实现不影响它 —— 这两件事本来就该分开:识别层将来要接
         批量接口时,需要的是另一种往返,而不是另一套退避。
+
+        ## ``on_attempt``:**这一层是唯一知道"发出去了几次"的地方**
+        ## (A45-batch18 / P1-2)
+
+        重试对调用方是透明的 —— 这正是它的价值,也正是记账的洞:
+        `max_retries=2` 时一次业务调用最多发出 3 个请求,而调用方只看到
+        一个返回值或一个异常,于是费用台账固定按 1 次记。
+
+        回调在**每一次往返之前**触发,参数是第几次(从 1 开始)。
+        放在 try 之前而不是之后:计的是"发出去了几次",不是"成功了几次" ——
+        厂商在收到请求那一刻就开始计费,超时不退钱。真正的判定在
+        `extractors/call_accounting.py`(纯模块),这里只负责如实报数。
+
+        回调抛异常不吞:一个坏掉的计数器把一次正常调用变成失败,
+        比少一个数字更容易被发现,而这正是想要的方向。
         """
         import asyncio
 
@@ -287,6 +306,8 @@ class MultimodalClient:
         async with self._client() as client:
             while attempt <= self.config.max_retries:
                 try:
+                    if on_attempt is not None:
+                        on_attempt(attempt + 1)
                     return await round_trip(request, client)
                 except ProviderError as exc:
                     last_error = exc

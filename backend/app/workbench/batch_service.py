@@ -1502,6 +1502,50 @@ def renew_lease(
     return held
 
 
+def lease_budget_shortfall() -> str | None:
+    """**部署的配置**下,租约还够不够长。够就返回 None(A45-batch18 / P2-1)。
+
+    `batch.py` 里那条模块级 `if` 用的是三项配置的**默认值**,它挡得住
+    "有人改了常量却忘了改租约",挡不住"运维在设置页把单张超时从 60 调到
+    120、把图片上限从 12 调到 20"。后者一样会让租约短于单件合法耗时,
+    而后果是一样的:回收器从一个正在正常工作的 worker 手里抢走条目,
+    那次付费调用的结果被 fencing 丢弃。
+
+    做成"返回一句话"而不是直接抛:这个函数在**启动**时被调用,
+    而一份让服务起不来的配置错误,和一份让批次偶尔重复付费的配置错误,
+    严重程度不是一个量级。调用方(`main.lifespan`)按 error 记日志,
+    人看得见、也改得动。
+
+    读配置用 `provider_int` / `provider_float` 那一套,和识别层
+    (`extractors/vision.ExtractorModelConfig.from_settings`)同一个来源 ——
+    自己再读一遍 `settings` 的话,数据库覆盖那一层会被跳过,而设置页改的
+    正是那一层。
+    """
+    from app.extractors import call_budget
+    from app.providers._config import provider_float, provider_int
+
+    budget = rules.longest_legal_item_seconds(
+        timeout_seconds=provider_float("EXTRACTOR_MODEL_TIMEOUT_SECONDS", 60.0),
+        max_retries=provider_int("EXTRACTOR_MODEL_MAX_RETRIES", 2),
+        max_images=call_budget.effective_ceiling(
+            provider_int(
+                "EXTRACTOR_MAX_IMAGES_PER_RUN", call_budget.DEFAULT_MAX_IMAGES_PER_RUN
+            )
+        ),
+    )
+    covered = rules.ITEM_LEASE_SECONDS
+    if covered > rules.CLAIM_CHUNK * budget:
+        return None
+    return (
+        f"当前配置下单件 EXTRACT 最长合法耗时 {budget} 秒"
+        f"(超时 × (1+重试) × 单次图片上限),而条目租约只有 {covered} 秒。"
+        "一件正在正常跑的条目会被回收器判过期并被另一个 worker 抢走,"
+        "旧 worker 那次**已经付过费**的调用结果随后被 fencing 丢弃。"
+        "请调低 EXTRACTOR_MODEL_TIMEOUT_SECONDS / EXTRACTOR_MAX_IMAGES_PER_RUN,"
+        "或调高 workbench/batch.ITEM_LEASE_SECONDS"
+    )
+
+
 def run_batch(
     session: Session,
     job: BatchJob,
@@ -1624,6 +1668,23 @@ def run_batch(
                     "这一件的执行权已经不在本 worker 手上(租约被回收或已被重试重置),"
                     "本次不再执行"
                 )
+            if commit_each:
+                # **续租必须在付费调用之前变成别的会话看得见的事实**
+                # (A45-batch18 / P2-1)。
+                #
+                # 原来这条 UPDATE 留在外层事务里,而外层事务要等 `_execute()`
+                # 跑完、结果保存完才提交。也就是说:整个付费调用期间,
+                # `reap_expired_leases` 在它自己的会话里读到的仍然是**领取时**
+                # 那个 `lease_until`。续租等于没续 —— 它挡住的只是"我已经
+                # 出局了"这一种情况,挡不住"我正在跑却被判过期"。
+                #
+                # 提交在这里是安全的:上一件已经在 `persist` 里提交过,
+                # 本轮 `claim_items` 之后也提交过,此刻事务里只有这一条
+                # UPDATE,没有任何半成品业务写入会被一起提交出去。
+                #
+                # `commit_each=False` 那条路径是测试夹具,它只有一个 session,
+                # 本来就不存在"别的 worker 看不看得见"这个问题
+                session.commit()
             savepoint = session.begin_nested()
             try:
                 result = _execute(

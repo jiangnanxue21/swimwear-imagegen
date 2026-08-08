@@ -254,21 +254,42 @@ def model_for(mode: GenerationMode) -> FashnModel:
 #: 因为拼错一个字母的后果是「凭证看起来记下来了,其实没有」,而且不报错。
 PARTIAL_IDS_KEY = "partial_external_ids"
 
+#: **已经发出去几个 POST**(A45-batch18 / P2-2)。
+#:
+#: 与 `PARTIAL_IDS_KEY` 是两个数,差别正是这次要修的洞:
+#: 四次提交中第四次失败时,受理成功的 ID 有 3 个,而**发出去的请求是 4 个** ——
+#: 第四个已经到了 FASHN 那里,很可能已经计费。按 ID 数记账少记一次;
+#: 而在第一个 POST 之前就失败的那种(素材下载失败、输入校验不过),
+#: 一个请求都没发,却按默认值记了 1 次。
+#:
+#: 键缺席 = 这个异常在 `submit()` 之外抛出(`_require_config` /
+#: `validate_request` / 缺模特图),同样是 preflight。判定在
+#: `providers/call_accounting.py`,不在调用点上各自 if 一遍。
+ATTEMPTED_CALLS_KEY = "attempted_calls"
 
-def _with_partial_ids(exc: ProviderError, ids: list[str]) -> ProviderError:
-    """把已成功提交的外部 ID 挂到异常上,**保持异常类型与重试策略不变**。
+
+def _with_partial_ids(
+    exc: ProviderError, ids: list[str], *, attempted: int = 0
+) -> ProviderError:
+    """把已受理的外部 ID **与已发出的请求数**挂到异常上,
+    **保持异常类型与重试策略不变**。
 
     重建一个同类异常而不是原地改 `detail`:`AppError` 的 detail 是构造时
     定下来的,原地改会绕过它自己的组装逻辑。类型必须保住 —— 重试与切换
     策略挂在类上(`RetryPolicy`),换成基类会让「内容安全」这种绝不能自动
     重试的错误变成可重试的。
 
-    没有已提交的 ID 时原样返回:不给一条正常的失败凭空加一个空列表字段。
+    ID 列表为空时**不再原样返回**(A45-batch18 / P2-2)。原来那句
+    "不给一条正常的失败凭空加一个空列表字段"只顾到了 ID:一次
+    "第一个 POST 就失败"的调用确实没有 ID,但它**已经发出去一个请求**,
+    而那正是记账要的数。所以现在 ID 为空时仍然挂次数 —— 包括 0,
+    因为 0 是"确认没发出去"这个结论本身,和"没人报"必须分得开
+    (见 `providers/call_accounting.failed_submit_units`)。
     """
-    if not ids:
-        return exc
     detail = {k: v for k, v in (exc.detail or {}).items() if k != "provider"}
-    detail[PARTIAL_IDS_KEY] = list(ids)
+    if ids:
+        detail[PARTIAL_IDS_KEY] = list(ids)
+    detail[ATTEMPTED_CALLS_KEY] = int(attempted)
     return type(exc)(exc.message, provider=exc.provider, detail=detail)
 
 
@@ -736,11 +757,18 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
 
         sizes = batch_sizes(request.candidate_count, model.max_per_call)
         ids: list[str] = []
+        #: **发出去几个 POST**,不是受理成功几个(A45-batch18 / P2-2)。
+        #: 在 `_request` **之前**加,不在之后 —— 计的是"发出去了几次",
+        #: 不是"成功了几次":FASHN 在收到请求那一刻就可能开始计费,
+        #: 超时不退钱。与识别链路 `llm/transport` 的 `on_attempt` 同一条口径
+        attempted = 0
         try:
             for index, size in enumerate(sizes):
                 # 每次提交换一个 seed:同 seed 同输入会得到同一张图,拿 4 张一样的没有意义
                 seed = None if request.seed is None else request.seed + index
+                # 素材准备在计数之前:它失败时一个请求都没发出去
                 inputs = await self.build_inputs(request, model, count=size, seed=seed)
+                attempted += 1
                 body, _ = await self._request(
                     "POST", RUN_PATH, json={"model_name": model.model_name, "inputs": inputs}
                 )
@@ -767,7 +795,7 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
             # 跟着异常一起出去,由编排层落库,而不是在这里被吞掉。
             #
             # 不在这里写库:providers 层不认识 session,这是架构契约。
-            raise _with_partial_ids(exc, ids) from None
+            raise _with_partial_ids(exc, ids, attempted=attempted) from None
 
         return COMPOSITE_SEPARATOR.join(ids)
 

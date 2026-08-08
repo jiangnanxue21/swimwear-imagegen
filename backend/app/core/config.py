@@ -189,6 +189,11 @@ class Settings(BaseSettings):
     #: none | low | medium | high。千问 VL 用 none:思考内容会破坏标准 JSON
     EXTRACTOR_MODEL_REASONING_EFFORT: str = "low"
     EXTRACTOR_MODEL_SEND_PUBLIC_URLS: bool = False
+    #: 发不发 `Idempotency-Key` 头(A45-batch18 / P1-2)。传输层对超时与 5xx
+    #: 自动重试,而"客户端超时"不等于"供应商没收到" —— 幂等键是唯一能让
+    #: 供应商把重发认成同一笔的手段。**默认关**:不认识这个头的严格网关
+    #: 会直接 400,而那时表现是"识别整条不通",排查方向和幂等毫无关系
+    EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY: bool = False
     #: 显式声明端点无鉴权。自建但挂公网域名时用它,不必迁就主机名启发式
     EXTRACTOR_MODEL_ALLOW_ANONYMOUS: bool = False
     #: 付费抽取器单次识别的图片上限。识别还是同步路径(异步化在阶段 3 第二批),

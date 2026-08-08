@@ -366,6 +366,24 @@ class ProviderUsageRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: 计费单位数。**不等于 candidate_count** —— 一次失败但已计费的调用
     #: 可能 units=1 而一张图都没产出,而那正是最需要被记上账的一种
     billable_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 这一行代表**几次真实的网络请求**(A45-batch18 / P1-2,迁移 0048)。
+    #:
+    #: ## 为什么它不能并进 `billable_units`
+    #:
+    #: 两者在识别链路上恰好相等(一次往返 = 一个计费单位),在生成链路上
+    #: 不等:FASHN 一次 POST 可能出多张图,按额度计价,`x-fashn-credits-used`
+    #: 报的是额度不是请求数。合成一列的话,对账的人拿着它去和供应商后台的
+    #: 调用条数比,在一半的链路上会得到一个必然对不上的数,
+    #: 而**对不上的原因是口径,不是漏账** —— 那是最浪费时间的一种红。
+    #:
+    #: ## 为什么可空,而且 NULL 不等于 0
+    #:
+    #: NULL = 这一类调用还没接上次数上报(评分、轮询、取结果今天都是)。
+    #: 0 = **确认**一个请求都没发出去(preflight 失败:未配置、目标为空、
+    #: Schema 拒绝、图片准备失败)。把"不知道"写成 0 会让一次真实调用
+    #: 在对账表上凭空消失,而那个方向的错误没有人会去发现 ——
+    #: 与 `ProviderUsage.units is None` 是同一条规矩。
+    provider_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: 当时那次调用的单价快照。NULL = **没配价**,不是免费 ——
     #: 两者混同的话看板会画出一条平坦的绿线,而钱照花。
     #: 快照而非实时查价:厂商调价不能让上个月的报表变成另一个数字

@@ -927,6 +927,7 @@ def record_usage(
     billable_units: int | None = None,
     billing_key: str | None = None,
     units_source: str = UnitsSource.INFERRED.value,
+    provider_attempts: int | None = None,
 ) -> ProviderUsageRecord:
     """记一条 Provider 调用流水,**并在这一刻把钱算进去**。
 
@@ -967,6 +968,17 @@ def record_usage(
 
     今天**只有 FASHN 的生成调用**能报出 `provider`;轮询、取结果、评分、
     属性识别四类仍然全是 `inferred`(欠账逐条记在 `docs/STATUS.md`)。
+
+    ## `provider_attempts`:这一行代表**几次真实网络请求**(A45-batch18 / P1-2)
+
+    `billable_units` 回答的是"记几个计费单位",而对账的人先要回答另一个
+    问题:"这一行对应供应商后台的几条调用记录"。两者在识别链路上恰好
+    相等(一次往返 = 一个单位),在生成链路上不等(FASHN 一次 POST 可能
+    出多张图、按额度计价),所以不能合成一列。
+
+    `None` = 这一类调用没有接上次数上报。**不写 0** —— 0 的意思是
+    "确认一个请求都没发出去"(preflight 失败),和"不知道"是两件事,
+    合并之后一次真实调用会在对账表上凭空消失。
 
     ## `billing_key`:同一笔消费只能有一行(A45-batch12-5 / NEW-01)
 
@@ -1028,6 +1040,11 @@ def record_usage(
         # 厂商自述而第一遍没有,`units` 会变成厂商的数,而 `units_source`
         # 留在 `inferred` —— 一行**数对了但标错来源**的流水,比两个都错更难查。
         record.units_source = units_source
+        # 次数与 units 同进同退,理由同上一行:一行数对了但次数留在旧值,
+        # 比两个都旧更难查。`None` 不覆写已有值 —— 恢复那一遍没接上报,
+        # 不代表第一遍数出来的次数不作数
+        if provider_attempts is not None:
+            record.provider_attempts = int(provider_attempts)
         logger.info(
             "updating the existing usage record instead of adding a second one",
             extra={
@@ -1052,6 +1069,9 @@ def record_usage(
             error_code=error_code,
             billing_key=billing_key,
             units_source=units_source,
+            provider_attempts=(
+                None if provider_attempts is None else int(provider_attempts)
+            ),
         )
         session.add(record)
 

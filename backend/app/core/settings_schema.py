@@ -598,6 +598,19 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 advanced=True,
             ),
             Field(
+                key="EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY",
+                label="发供应商幂等键",
+                type=TYPE_BOOL,
+                options=_yes_no(),
+                help=(
+                    "传输层对超时与 5xx 自动重试,而客户端超时不等于供应商没收到 —— "
+                    "同一张图可能被受理两次、计费两次。这个头是让供应商自己"
+                    "认出重发的唯一手段。**开之前先确认端点支持**:不认识它的"
+                    "严格网关会直接 400,表现是识别整条不通。"
+                ),
+                advanced=True,
+            ),
+            Field(
                 key="EXTRACTOR_MODEL_SEND_PUBLIC_URLS",
                 label="发公网 URL 而非图片内容",
                 type=TYPE_BOOL,

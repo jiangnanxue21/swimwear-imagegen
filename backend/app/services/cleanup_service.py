@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.channels.simulator import is_simulated_external_id
@@ -79,6 +79,9 @@ class ExternalListing:
     site: str
     spu: str
     sku: str
+    #: 平台侧 SPU ID。**可以是空串** —— 一次 CREATE 超时后本地落
+    #: `SUBMIT_RESULT_UNKNOWN` 时,商品可能已经在平台上建好了,而我们
+    #: 没拿到 ID。那种行恰恰是最需要人去核对的一行(A45-batch18 / P1-3)
     external_spu_id: str
     status: str
     last_platform_status: str | None
@@ -91,6 +94,16 @@ class ExternalListing:
     #: 能不能自动下架。False 时 `reason` 说明为什么
     delistable: bool
     reason: str | None = None
+    #: **必须由人去平台后台核对的一行**(A45-batch18 / P1-3)。
+    #:
+    #: 今天只有一种来源:状态是 `SUBMIT_RESULT_UNKNOWN` 且没有外部 ID ——
+    #: 提交到达过平台没有,本系统答不出来。自动下架处理不了它
+    #: (没有 ID 就构造不出下架报文),但它绝不能从清单上消失:
+    #: 4.1 节 H 要的是"数量一致",而一个被漏掉的不确定项正是数量对不上的
+    #: 最常见来源。
+    needs_reconcile: bool = False
+    #: 人拿着去平台后台找这件商品的线索。没有外部 ID 时它是唯一的入口
+    locator: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +122,8 @@ class ExternalListing:
             "occupying": self.occupying,
             "delistable": self.delistable,
             "reason": self.reason,
+            "needs_reconcile": self.needs_reconcile,
+            "locator": dict(self.locator),
         }
 
 
@@ -135,6 +150,12 @@ class CleanupReport:
     #: 数量不是一个,那道护栏就只剩一半。
     to_queue: int = 0
     to_skip: int = 0
+    #: **还没核清的不确定行**(A45-batch18 / P1-3)。
+    #:
+    #: 状态是"提交结果未知"且没有外部 ID:平台上可能有这件商品,也可能没有,
+    #: 本系统答不出来。它们不占 `occupying`(那个数问的是"平台上还占着
+    #: 几个位置",而这些行的答案是不知道),但它们必须让 `clean` 变成 False
+    unreconciled: int = 0
     #: 核对时逐行问平台的结果分桶(只有 `verify()` 会填)
     probe: Mapping[str, int] = field(default_factory=dict)
 
@@ -145,8 +166,19 @@ class CleanupReport:
         判据是**真实**商品里没有一个还占着位置。模拟的那些不算 ——
         它们从来没有出现在任何平台上,把它们计入"没清干净"会让这个
         布尔量在人工测试期间永远是 False,然后没人再看它。
+
+        ## 不确定的那些也算没清干净(A45-batch18 / P1-3)
+
+        `unreconciled` 是"提交结果未知且没有外部 ID"的行。原来它们
+        根本不在清单上,于是一次 CREATE 到达平台、响应在返回 ID 前超时的
+        商品会**同时**从 inventory、plan、verify 里消失,而报告说 clean=true。
+        平台上留着一个孤儿商品,本系统检索不到、核对不了、下架不掉。
+
+        `clean` 是 4.1 节 H 真正要的那个结论,也是 CLI 的退出码。
+        它必须在"我不知道"的时候说 False —— 一个把不确定说成干净的布尔量,
+        比没有这个布尔量更危险。
         """
-        return self.occupying == 0
+        return self.occupying == 0 and self.unreconciled == 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +189,7 @@ class CleanupReport:
             "not_delistable": self.not_delistable,
             "to_queue": self.to_queue,
             "to_skip": self.to_skip,
+            "unreconciled": self.unreconciled,
             "clean": self.clean,
             "probe": dict(self.probe),
             "rows": [r.as_dict() for r in self.rows],
@@ -164,18 +197,48 @@ class CleanupReport:
 
 
 def _require_scope(
-    *, test_batch_tag: str | None, shop_id: str | None, channel: str | None
+    *,
+    test_batch_tag: str | None,
+    shop_id: str | None,
+    channel: str | None,
+    destructive: bool = False,
 ) -> None:
-    """至少给一个过滤条件,否则拒绝。
+    """至少给一个过滤条件,否则拒绝。**动手时的门槛比看一眼高。**
 
     这不是防御性编程,是这个模块的核心约束。一次跑成全量的清理会把生产上
     所有在架商品下架,而那个操作在平台上通常撤不回来。要求显式作用域的代价
     是多打一个参数;不要求的代价是一次手滑等于一次事故。
+
+    ## 为什么"只给渠道"可以看、不可以动(A45-batch18 / P1-4)
+
+    原来三个条件是 `any(...)`,预览和执行共用同一道闸。于是
+
+        cleanup_test_listings delist --channel GENERIC --apply
+
+    会把 GENERIC 渠道下**全部店铺、全部批次**里满足状态条件的真实 listing
+    逐行排进 DELIST 队列 —— 包括别人的店铺和根本不属于本轮测试的商品。
+    一次参数遗漏(少打一个 `--tag`)就扩大成一次生产批量下架。
+
+    而 REVIEW.md 4.1 节 H 对真实提交的要求本来就是"严格位于专用测试店铺/
+    类目并与生产凭证分离"。渠道不是那个作用域:它是一整个平台。
+
+    所以破坏性执行必须由 `test_batch_tag` 或 `shop_id` 之一限定 ——
+    这两个都是"这一批 / 这一家"的口径,而 `channel` 是"这个平台"的口径。
+    预览不受这一条限制:看一眼整个渠道有哪些行,恰恰是决定要不要动手
+    之前该做的事。
     """
     if not any((test_batch_tag, shop_id, channel)):
         raise ValidationError(
             "清理必须限定作用域:至少给 test_batch_tag / shop_id / channel 之一。"
             "不限定的话这次调用会覆盖全部渠道的全部商品。",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=400,
+        )
+    if destructive and not any((test_batch_tag, shop_id)):
+        raise ValidationError(
+            "只给渠道不能执行下架:那会覆盖该渠道下全部店铺、全部批次的商品,"
+            "包括不属于本轮测试的。请再给 test_batch_tag(推荐)或 shop_id。"
+            "只想看一眼的话,不加 --apply 的预览允许只给渠道。",
             code=ErrorCode.INPUT_INVALID,
             http_status=400,
         )
@@ -191,11 +254,31 @@ def inventory(
 ) -> CleanupReport:
     """列出「本轮测试创建了哪些外部商品」(4.1 节 H 第二条)。
 
-    只列**拿到过 external_spu_id** 的行:没有外部 ID 就等于那次提交从没到达
-    平台,它不占任何位置,列出来只会让清单变长、让真正要核对的行更难看见。
+    ## 两类行,少一类都不成立
+
+        拿到过 external_spu_id      平台上确实有这件商品
+        SUBMIT_RESULT_UNKNOWN       **不知道**平台上有没有(A45-batch18 / P1-3)
+        且没有 external_spu_id
+
+    第二类原来被 `external_spu_id IS NOT NULL AND != ''` 挡在清单外,
+    理由写的是"没有外部 ID 就等于那次提交从没到达平台"。**那句话是错的**,
+    而且本仓自己的判定就说它是错的:`workflows/publish_policy` 明确允许
+    一次 CREATE 在超时、或在 201/409 没带 ID 时落成 `SUBMIT_RESULT_UNKNOWN`
+    (见 `tests/pure/test_publish_policy.py` 的
+    `test_a_timed_out_create_is_never_resent_automatically`)。那种情况下
+    商品可能已经在平台上建好了,只是我们没拿到它的 ID。
+
+    被漏掉的后果正是 4.1 节 H 那段话描述的结局:那一行从 inventory、
+    plan、verify 里**同时**消失,清理报告说 clean=true,而平台上留着一个
+    谁也检索不到、核对不了、下架不掉的孤儿商品。
+
+    这类行标 `needs_reconcile=True`、`delistable=False`(没有 ID 就构造不出
+    下架报文),并带上 `locator` —— 人拿着店铺 / SPU / 批次 / 时间去平台
+    后台找它,那是唯一的入口。
 
     `include_simulated=False` 是给真实清理用的:拿着一份混着 SIM- 的清单去
-    平台后台核对,核不上,然后这份清单就没人信了。
+    平台后台核对,核不上,然后这份清单就没人信了。**不确定行不受它影响** ——
+    没有外部 ID 就无从判断是不是模拟的,而"无从判断"必须留在清单上。
     """
     _require_scope(test_batch_tag=test_batch_tag, shop_id=shop_id, channel=channel)
 
@@ -203,8 +286,14 @@ def inventory(
         select(ChannelListing, Product)
         .join(Product, Product.id == ChannelListing.product_id)
         .where(
-            ChannelListing.external_spu_id.is_not(None),
-            ChannelListing.external_spu_id != "",
+            or_(
+                and_(
+                    ChannelListing.external_spu_id.is_not(None),
+                    ChannelListing.external_spu_id != "",
+                ),
+                # 没有 ID 但结果未知 —— 这一条正是本次要补的那一类
+                ChannelListing.status == PublishStatus.SUBMIT_RESULT_UNKNOWN.value,
+            )
         )
         .order_by(ChannelListing.created_at)
     )
@@ -217,17 +306,23 @@ def inventory(
 
     rows: list[ExternalListing] = []
     for listing, product in session.execute(stmt).all():
-        simulated = is_simulated_external_id(listing.external_spu_id)
+        has_id = bool((listing.external_spu_id or "").strip())
+        simulated = has_id and is_simulated_external_id(listing.external_spu_id)
+        # `include_simulated=False` 只筛掉**确定是模拟的**那些。
+        # 没有 ID 的不确定行无从判断真假,而"无从判断"恰恰是要人核对的理由
         if simulated and not include_simulated:
             continue
-        rows.append(_row(listing, product, simulated=simulated))
+        rows.append(_row(listing, product, simulated=simulated, has_id=has_id))
 
     return _report(rows)
 
 
-def _row(listing: ChannelListing, product: Product, *, simulated: bool) -> ExternalListing:
+def _row(
+    listing: ChannelListing, product: Product, *, simulated: bool, has_id: bool = True
+) -> ExternalListing:
     occupying = listing.status in OCCUPYING_STATUSES
-    delistable, reason = _delistable(listing, occupying=occupying)
+    delistable, reason = _delistable(listing, occupying=occupying, has_id=has_id)
+    needs_reconcile = not has_id
     return ExternalListing(
         listing_id=listing.id,
         channel=listing.channel,
@@ -244,16 +339,58 @@ def _row(listing: ChannelListing, product: Product, *, simulated: bool) -> Exter
         occupying=occupying,
         delistable=delistable,
         reason=reason,
+        needs_reconcile=needs_reconcile,
+        locator=_locator(listing, product) if needs_reconcile else {},
     )
 
 
-def _delistable(listing: ChannelListing, *, occupying: bool) -> tuple[bool, str | None]:
+def _locator(listing: ChannelListing, product: Product) -> dict[str, Any]:
+    """没有外部 ID 时,人拿什么去平台后台找这件商品(A45-batch18 / P1-3)。
+
+    全部来自库里已有的列,不新增存储:店铺 + SPU 是平台后台搜索框认的两个
+    维度,批次号回答"是不是本轮测试的",时间窗回答"往哪一段翻"。
+
+    时间给的是**提交时刻前后各一小时**而不是一个精确点:平台后台的列表
+    按它自己的受理时间排,两边差几分钟是常态,而一个精确到秒的时间戳
+    会让人以为可以按它精确过滤,然后什么都搜不到。
+    """
+    created = listing.created_at
+    return {
+        "shop_id": listing.shop_id,
+        "channel": listing.channel,
+        "site": listing.site,
+        "spu": product.spu,
+        "sku": product.sku,
+        "test_batch_tag": listing.test_batch_tag,
+        "submitted_around": iso_utc(created),
+        "search_window_hours": 1,
+        "hint": (
+            "本地状态是「提交结果未知」且没有平台 SPU ID:这次 CREATE 可能已经"
+            "在平台上建成了商品。请按店铺 + SPU 在平台后台搜索,"
+            "找到就手工下架并回填 ID,没找到再把本地这行结掉。"
+        ),
+    }
+
+
+def _delistable(
+    listing: ChannelListing, *, occupying: bool, has_id: bool = True
+) -> tuple[bool, str | None]:
     """这一行能不能走自动下架。
 
     不能的那两种都要在报表里写清楚**为什么**,而不是从清单里消失。4.1 节 H
     的最后一条要求"若平台不支持删除、只支持下架,则在文档中写明残留 SKU 的
     处置方式,不留悬空" —— 一个自动流程处理不了的商品,同样不许悬空。
+
+    没有外部 ID 的那一类是第三种(A45-batch18 / P1-3):下架报文的目标
+    由 `external_spu_id` 确定,没有它就构造不出请求。**它不许自动下架,
+    但它必须留在清单上**并标成要人核对 —— 那正是这一行存在的全部意义。
     """
+    if not has_id:
+        return False, (
+            "本地状态是「提交结果未知」且没有平台 SPU ID:平台上可能已经有这件"
+            "商品,本系统答不出来。自动下架构造不出请求,必须人工到平台后台"
+            "按 locator 里的线索核对"
+        )
     if not occupying:
         return False, None
     if listing.draft_id is None:
@@ -271,6 +408,10 @@ def _report(rows: Sequence[ExternalListing], probe: Mapping[str, int] | None = N
         total=len(rows),
         simulated=len(rows) - len(real),
         real=len(real),
+        # 不确定行单独数(A45-batch18 / P1-3)。它们不进 `occupying` ——
+        # 那个数问的是"平台上还占着几个位置",而这些行的答案是不知道 ——
+        # 但它们让 `clean` 变成 False
+        unreconciled=sum(1 for r in rows if r.needs_reconcile),
         # 只数真实商品:模拟的那些从来没有出现在任何平台上
         occupying=sum(1 for r in real if r.occupying),
         not_delistable=sum(1 for r in real if r.occupying and not r.delistable),
@@ -307,7 +448,14 @@ def plan_delist(
         channel=channel,
         include_simulated=include_simulated,
     )
-    return _report([r for r in report.rows if r.occupying], probe=report.probe)
+    # 不确定行**留在计划里**(A45-batch18 / P1-3)。它们 `delistable=False`,
+    # 所以 `run_delist` 会把它们记进 `skipped` 而不是排队 —— 那正是要的:
+    # 动手前那份计划必须让人看见"有几行我处理不了,你得自己去平台后台核"。
+    # 从计划里滤掉的话,人看到的是一份干净的清单,而事实不是
+    return _report(
+        [r for r in report.rows if r.occupying or r.needs_reconcile],
+        probe=report.probe,
+    )
 
 
 def run_delist(
@@ -327,6 +475,16 @@ def run_delist(
 
     真正的下架请求由 `publish_service.run_due` 在事务外发出,这里只排队。
     """
+    # **破坏性作用域比预览严**(A45-batch18 / P1-4)。这一句必须排在
+    # `plan_delist` 之前:排在后面的话,一次 channel-only 的调用会先把
+    # 整个渠道的行读出来,然后才被拒 —— 拒对了,但日志里留下的是一次
+    # 看起来"差一点就执行了"的全渠道扫描,而下一个人会照着它去放宽这道闸
+    _require_scope(
+        test_batch_tag=test_batch_tag,
+        shop_id=shop_id,
+        channel=channel,
+        destructive=True,
+    )
     plan = plan_delist(
         session,
         test_batch_tag=test_batch_tag,
@@ -339,7 +497,17 @@ def run_delist(
     skipped: list[dict[str, Any]] = []
     for row in plan.rows:
         if not row.delistable:
-            skipped.append({"external_spu_id": row.external_spu_id, "reason": row.reason})
+            # 没有外部 ID 的那些也要出现在 skipped 里,并且要带上定位线索 ——
+            # 一句"跳过了 3 行"而不说是哪 3 行,等于没说(A45-batch18 / P1-3)
+            entry: dict[str, Any] = {
+                "external_spu_id": row.external_spu_id,
+                "listing_id": str(row.listing_id),
+                "reason": row.reason,
+            }
+            if row.needs_reconcile:
+                entry["needs_reconcile"] = True
+                entry["locator"] = dict(row.locator)
+            skipped.append(entry)
             continue
         listing = session.get(ChannelListing, row.listing_id)
         draft = session.get(ListingDraft, listing.draft_id) if listing else None
@@ -366,8 +534,10 @@ def run_delist(
             "extra_fields": {
                 "test_batch_tag": test_batch_tag,
                 "shop_id": shop_id,
+                "channel": channel,
                 "queued": len(queued),
                 "skipped": len(skipped),
+                "unreconciled": plan.unreconciled,
                 "actor": actor,
             }
         },

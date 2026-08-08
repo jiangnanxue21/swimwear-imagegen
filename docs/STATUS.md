@@ -2047,7 +2047,7 @@
 | 自动上架与更新 | ✅ 可用 | 幂等创建/更新,三段事务(业务事务 / 事务外调用 / 新事务保存),投递走 `publish_outbox`。提交超时不猜结果,落 `SUBMIT_RESULT_UNKNOWN` 等人确认 |
 | 平台状态轮询 | ✅ 可用 | 到期轮询 + 指数退避(封顶 1 小时,**不通往放弃** —— 轮询是读,停下来等于本地与平台永久分叉)。404 绝不当作已下架。平台驳回自动进既有驳回台账,`located_by=publish_attempt` |
 | 下架与测试清理 | ✅ 可用 | `DELIST` 不看草稿状态、不带报文内容;4.1 节 H 清理预案见 `make cleanup`,必须限定作用域,默认只看不做,`verify` 未清干净时退出码 1 |
-| 发布接口 | ✅ 可用 | 六个端点(提交/清单/详情/刷新状态/下架/清理清单)。状态派生只有一份,在 `workflows/publish_view.py`:后端给 `display_status` / `next_action` / `blocking_reasons` / `allowed_actions`,前端只展示和触发。多一个状态机里没有的 `STALLED` —— listing 说在途而 outbox 已 DEAD 的组合,少了它界面会一直显示「提交中」。前端在 `pages/PublishPage.tsx`(任务 20,B-02 已关闭) |
+| 发布接口 | ✅ 可用 | 六个端点(提交/清单/详情/刷新状态/下架/清理清单)。状态派生只有一份,在 `workflows/publish_view.py`:后端给 `display_status` / `next_action` / `blocking_reasons` / `allowed_actions`,前端只展示和触发。多一个状态机里没有的 `STALLED` —— listing 说在途而 outbox 已 DEAD 的组合,少了它界面会一直显示「提交中」。前端在 `pages/PublishPage.tsx`(**任务 20-A**,B-02 已关闭;浏览器未实测,Playwright 在任务 24) |
 | 身份与权限提示 | ✅ 可用 | `AUTH_FORBIDDEN` 与 `AUTH_FAILED` 分开:「口令不对」与「口令对但角色不够」在前端是两句不同的话。口令写入失败时如实提示仅本次会话有效 |
 | 付费调用花费台账 | ✅ 可用 | 按月/provider/天汇总,预算档位与耗尽日外推;金额取整数微单位。**是本系统台账不是厂商余额**,未配价的调用单独计数不计入金额 |
 | 导出 | ✅ 可用 | 单件与批量,JSON + CSV + XLSX;CRLF + utf-8-sig;批量上限 1000 行 |
@@ -2113,10 +2113,17 @@
 | ~~租约与回收的行为**未在真库验证**~~ **A42 已验** | `tests/test_batch_lease_concurrency_db.py`,8 条双 session 用例,在真 PostgreSQL 16 上跑绿:两个 worker 互不相交(`SKIP LOCKED`)、活租约领不走、过期租约可接管、`lease_until IS NULL` 的存量残骸可领、回收放回队列、超上限落 `WORKER_LOST`、一次只领一件。变异验证过:删掉 `skip_locked` 会在 3 秒锁超时后失败并点名原因(**不是挂起** —— 用例给 B 装了 `lock_timeout`,否则 CI 只会报「作业超时」);领取漏掉 `IS NULL` 分支会让存量残骸那条变红 |
 | 提交这件事集成测试验不了 | `tests/conftest.py` 的 `client` 夹具把 `db_session` 覆盖成一个**不提交**的 session(每个用例一个事务,结束回滚)。同一个 session 里读得到未提交的写,所以「真的提交了」与「只是 flush 了」在 API 测试里完全等价 —— 一个写端点漏掉 commit,现有测试一条都不会红。这不是夹具写错了(用例之间要隔离只能这么写),但代价是提交落在测试射程之外。**唯一防线是 `tests/pure/test_transaction_boundaries.py`「HTTP 边界」那五条**,它们做过变异验证。摘掉请求级自动 commit 这次改动**没有在真库上跑过** |
 | 任务 19 两半都没有运行时证据 | N+1 那半(a38)守的是源码形状,`REVIEW.md` B.8 的「实测 SQL 计数」仍欠;事务边界这半(a42)守的是「谁写了 commit」,不是「事务真的在那一刻结束」。两条都拦得住最容易发生的退化,都**不能替代**真库验证 |
+| 识别与提交的**次数**已进台账,但供应商侧口径未验 | A45-batch18 / P1-2 + P2-2:传输层重试与 FASHN 分批提交原来都按「一次业务调用 = 1 个计费单位」记,于是重试过的少记、preflight 失败的多记。现在识别按**网络往返次数**记(`llm/transport` 的 `on_attempt` → `extractors/call_accounting`),FASHN 失败按**已发出的 POST 数**记(`providers/call_accounting`),次数单独落 `provider_usage_records.provider_attempts`(迁移 `0048`)。**仍未验证的是供应商那一侧**:超时后重发对方到底计不计费、`x-fashn-credits-used` 是本次还是累计、失败时带不带那个头 —— 三个问题都要连真端点才答得出,今天全部按「宁可多记」处理并如实标 `units_source=inferred` |
+| 供应商幂等键默认关着 | `EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY=false`。打开后每张图带一把 `<run 幂等键>:<素材 id>` 的 `Idempotency-Key`,让供应商自己把传输层重发认成同一笔。默认关是因为**不认识这个头的严格网关会直接 400**,而那时的表现是「识别整条不通」,没有人会往幂等这个方向查。开之前先拿一次真实调用确认端点接受它 —— 这件事没做,所以重试仍可能让同一张图被受理两次(台账会如实记 2) |
+| 清理清单现在含**结果未知且无 ID** 的行 | A45-batch18 / P1-3:原来查询强制 `external_spu_id IS NOT NULL`,于是一次 CREATE 到达平台、响应在返回 ID 前超时的行会从 inventory / plan / verify **同时**消失,报告说 `clean=true` 而平台上留着孤儿商品。现在这类行留在清单上,标 `needs_reconcile`、不可自动下架、带 `locator`(店铺 / SPU / 批次 / 时间窗),并让 `clean` 变成 False(CLI 退出码 1)。**没有验证过的是「按 locator 真能在平台后台找到它」** —— 那要真实渠道沙箱 |
+| 破坏性清理禁止 channel-only | A45-batch18 / P1-4:`delist --apply` 现在必须带 `--tag` 或 `--shop`;只给 `--channel` 会被拒。预览不受限。原来两者共用一道 `any(...)` 闸,一次参数遗漏就是该渠道下全部店铺、全部批次的批量下架 |
+| 批次租约的预算算错了三批,现已按识别配置推导 | A45-batch18 / P2-1:`LONGEST_LEGAL_ITEM_SECONDS` 原来是 `90×3×4`,三项全部取自 **VISION_MODEL_\*(评分器)**,而批次里跑的 EXTRACT 读的是 **EXTRACTOR_MODEL_\***。真实上限 `60×3×12 = 2160` 秒 > 当时的租约 1800 秒 —— 那条「租约必须长于单件最长合法耗时」的不变量**在默认配置下根本不成立**,而模块级 `if` 因为被除数取错一次都没红过。现在 `ITEM_LEASE_SECONDS` = 3600、`BATCH_PROGRESS_STALL_SECONDS` = 2700,并加了一条读**实际部署配置**的启动检查(`lease_budget_shortfall()`,设置页改大超时/图片上限时会报 error 日志) |
+| 付费调用前的续租现在是**已提交**的事实 | A45-batch18 / P2-1:A43 加的 `renew_lease()` 顺序一直是对的(在 `_execute()` 之前),但那条 UPDATE 留在外层事务里,而外层事务要等结果保存完才提交 —— 整个付费调用期间回收器读到的仍是**领取时**那个 `lease_until`,续租等于没续。源码扫描看不见这个区别(两种写法顺序完全一样)。现在续租后立即提交,并补了双会话真库用例 `tests/test_a45_batch18_lease_visibility_db.py`(3 条,含一条反向用例证明不提交时确实读不到)。**该用例已写、未跑** |
+| 门禁扫工作树,交付的是版本库 | A45-batch18 / P1-1:外部评审发现 `0046` / `0047` 两条迁移与对应测试**未被 Git 跟踪** —— 本机 `alembic heads` 说 0047、`verify_delivery` 16/16、纯测试全绿,而 clean checkout 的最后一条迁移是 `0045`。新增门禁 `check_every_migration_and_db_test_is_tracked_by_git()`(问 `git ls-files`,不是 Git 工作树时直接失败)。**它写完当场就红了**,红在本批自己新增的 `0048` 和那个新 DB 测试上 |
 | 本地存储 | 后端 `/files` 直接托管,仅适合开发;生产改 `STORAGE_BACKEND=s3` |
 | 上传走内存 | 20 MB 上限下可接受;大文件需改流式落盘 |
 | 平台侧全手工 | 平台状态与驳回原因都靠人录入,不接平台 API |
-| API 驳回关不掉 | `resolve_gate()` 认的「已修复」证据是**驳回之后有一次新的导出**,而 API 自动上架的商品根本不走导出。于是驳回记得进台账(`located_by=publish_attempt`)、却关不掉。当前处置:在工作台手工标记解决。发布接口会如实把这一条报出来(`blocking_reasons` 里的 `REJECTION_CANNOT_AUTO_CLOSE`),不假装没有。**由任务 20 补齐** —— 把「驳回之后有一次新的提交尝试」也算作等价证据,判据落在 `PublishAttempt` 上(时间晚于 `PlatformRejection.created_at` 且草稿指纹变过) |
+| API 驳回关不掉 | `resolve_gate()` 认的「已修复」证据是**驳回之后有一次新的导出**,而 API 自动上架的商品根本不走导出。于是驳回记得进台账(`located_by=publish_attempt`)、却关不掉。当前处置:在工作台手工标记解决。发布接口会如实把这一条报出来(`blocking_reasons` 里的 `REJECTION_CANNOT_AUTO_CLOSE`),不假装没有。**由任务 20-B 补齐** —— 把「驳回之后有一次新的提交尝试」也算作等价证据,判据落在 `PublishAttempt` 上(时间晚于 `PlatformRejection.created_at` 且草稿指纹变过) |
 | 发布页没跑过浏览器 | 界面已补齐(B-02 关闭,`PublishPage.tsx` + 侧栏「发布上架」+ 导出页跳转)。但它和其余前端一样落在 D 类缺口里:**没有 tsc、没有 vitest、没有真的点开过**。门禁只验到"入口存在且不自建第二份判定",验不到"点下去这一步真的发生了" |
 | ~~集成测试有 15 条真实失败~~ **A42 已全部修** | 第一次把 `requires_db` 那批真的跑起来:1652 条 0 跳过,**最初 15 条失败**。根因是三件事:(1)产品缺陷:`POST /api/reviews/{id}/approve|reject|regenerate` 三个接口无条件 500 —— `_basic_review_out` 签名被改而三处调用没改,**这是生产 bug,非测试杂项**;(2)既有夹具缺陷:`celery_eager` 把 `commit` 换成 `flush`,导致应用代码的 `rollback()` 回到用例开头,同一任务被派发两次,第二次抢不到、rollback 全清 —— 改用 `savepoint` 模式;(3)过期断言:人工通过后任务继续走完出图,不停在中间态。修后:1652 全绿,含批次并发 8 条、生成链路 21 条、审核链路 17 条,全部真库双 session/Celery eager 跑过 |
 | 菜单按角色收敛不是权限 | A8 的「系统管理」组只对管理员**显示**;路由对所有人保持注册(新人要能顺着冷启动横幅走进设置页填口令)。真正的边界是后端 `require_admin` |
@@ -2155,7 +2162,7 @@
       12.1 表末,理由见 `docs/DECISIONS.md` §3.11。以下是当时的原始描述:
       `docs/REVIEW.md` 第 12.1 节的任务表里,
       **任务 18 是「Batch Outbox 与异常恢复」**(P3,依赖 17),与发布 API 无关;
-      任务表里根本没有「发布 API」这一项(任务 20 直接依赖 15/16)。
+      任务表里根本没有「发布 API」这一项(任务 20-A 直接依赖 15/16)。
       「任务 18(发布 API)」这个叫法出现在 REVIEW.md 开头的进度快照、
       `CLAUDE.md`、`HANDOVER.md` 三处,是后来某轮意识到 20 之前缺一层接口时
       顺手安的号,撞上了已有的 18。

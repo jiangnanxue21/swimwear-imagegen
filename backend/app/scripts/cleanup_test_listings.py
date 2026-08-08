@@ -17,9 +17,12 @@
 
 ## 两道护栏
 
-**一、必须给作用域。** `--tag` / `--shop` / `--channel` 至少一个,由
-`cleanup_service._require_scope()` 强制。不限定的话这次调用会覆盖全部渠道的
-全部商品,而在平台上下架通常撤不回来。
+**一、必须给作用域,而且动手比看一眼严。** 预览要 `--tag` / `--shop` /
+`--channel` 至少一个;`--apply` 还必须有 `--tag` 或 `--shop` —— **只给
+`--channel` 不许执行**(A45-batch18 / P1-4)。渠道是"这个平台"的口径,
+不是"这一批 / 这一家"的口径:`delist --channel GENERIC --apply` 会把该渠道下
+全部店铺、全部批次的真实商品排进下架队列,而在平台上下架通常撤不回来。
+两道闸都由 `cleanup_service._require_scope()` 强制,脚本这一侧不再判一遍。
 
 **二、默认只看。** `delist` 不加 `--apply` 只打印计划。这与
 `requeue_stranded.py` 的 `--apply` 是同一个约定 —— 一个会改外部世界的脚本,
@@ -76,6 +79,15 @@ def _summary(report: cleanup_service.CleanupReport) -> None:
             f"若执行:排队 {report.to_queue} 行、跳过 {report.to_skip} 行(含模拟行)",
             file=sys.stderr,
         )
+    # **不确定的那几行单独喊一次**(A45-batch18 / P1-3)。埋在 JSON 里的话
+    # 没人会去数,而它们恰恰是"平台上到底还剩几个"这个问题唯一答不出来的部分
+    if report.unreconciled:
+        print(
+            f"其中 {report.unreconciled} 行提交结果未知且没有平台 SPU ID:"
+            "平台上可能已经建成商品。逐行按 locator 去平台后台核对,"
+            "不核清这几行,「清理干净」不会变成是",
+            file=sys.stderr,
+        )
     print(f"清理干净:{'是' if report.clean else '否'}", file=sys.stderr)
 
 
@@ -87,7 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("inventory", "verify", "delist"))
     parser.add_argument("--tag", default=None, help="测试批次号")
     parser.add_argument("--shop", default=None, help="店铺 ID")
-    parser.add_argument("--channel", default=None, help="渠道代号")
+    parser.add_argument(
+        "--channel",
+        default=None,
+        help="渠道代号。**只给它不能配 --apply**:那会覆盖该渠道全部店铺与批次",
+    )
     parser.add_argument(
         "--real-only",
         action="store_true",

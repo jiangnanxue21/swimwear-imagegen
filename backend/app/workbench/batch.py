@@ -1461,17 +1461,52 @@ def job_status(counts: BatchCounts) -> BatchJobStatus:
 #: 而那本身也值得看一眼 —— 所以即使是积压导致的提醒也不算白报。
 BATCH_PICKUP_STALL_SECONDS = 300
 
-#: 单件最慢的**合法**耗时。照 `workflows/dispatch_policy` 的形状算,理由相同:
-#: 阈值必须大于它,否则会把一个正在正常跑的大批次报成卡住。
+#: 一件 EXTRACT 的**单件预算**默认值。三项都取自识别链路自己的配置默认值
+#: (`core/config.Settings`),不是估的 —— 原来这里的注释说"四张图是估的",
+#: 而全仓其实早就有那个常量了(A45-batch18 / P2-1)。
 #:
-#:     VISION_MODEL_TIMEOUT_SECONDS            90   一次视觉调用
-#:     × (1 + VISION_MODEL_MAX_RETRIES = 2)   270   带重试
-#:     × 4 张图                              1080   一件商品的属性识别
+#: 原来这三个数取的是 **VISION_MODEL_\*(评分器)** 的配置,而批次里跑的
+#: EXTRACT 读的是 **EXTRACTOR_MODEL_\***。两组键从一开始就是独立的
+#: (`.env.example` 里那句"即便填同一个端点也要各填一遍"),于是这条不变量
+#: 一直在拿另一条链路的参数守本条链路:
 #:
-#: 注意这四张图是**估的** —— 全仓今天没有一个"单件最多取几张图"的常量,
-#: 所以这个数不像 dispatch_policy 那边那样每一项都钉得住。留余量的方式
-#: 因此不是精算,是直接把阈值抬到它的一倍以上。
-LONGEST_LEGAL_ITEM_SECONDS = 90 * 3 * 4
+#:     算的是   VISION_MODEL_TIMEOUT_SECONDS 90 × 3 × 4 张   = 1080 秒
+#:     实际是   EXTRACTOR_MODEL_TIMEOUT_SECONDS 60 × 3 × 12 张 = 2160 秒
+#:
+#: 而 `ITEM_LEASE_SECONDS` 当时是 1800 —— 也就是说"租约必须长于单件最长
+#: 合法耗时"这条不变量**在默认配置下根本不成立**,而下面那个 `if` 因为
+#: 用了错的被除数,一次都没有红过。一件带 12 张图、每张接近超时并发生重试的
+#: 合法 EXTRACT,会在 30 分钟后被回收器判过期、被另一个 worker 抢走,
+#: 旧 worker 的结果随后被 fencing 丢弃 —— 钱花了,结果不算数。
+DEFAULT_EXTRACT_TIMEOUT_SECONDS = 60      # EXTRACTOR_MODEL_TIMEOUT_SECONDS
+DEFAULT_EXTRACT_MAX_RETRIES = 2           # EXTRACTOR_MODEL_MAX_RETRIES
+DEFAULT_EXTRACT_MAX_IMAGES = 12           # EXTRACTOR_MAX_IMAGES_PER_RUN
+
+
+def longest_legal_item_seconds(
+    *,
+    timeout_seconds: float = DEFAULT_EXTRACT_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_EXTRACT_MAX_RETRIES,
+    max_images: int = DEFAULT_EXTRACT_MAX_IMAGES,
+) -> int:
+    """单件最慢的**合法**耗时。**纯函数,三个入参都是真实配置项。**
+
+    做成函数而不是只留一个常量,是因为这三项运维在设置页上能改
+    (`core/settings_schema.py` 里 `EXTRACTOR_MODEL_TIMEOUT_SECONDS` /
+    `EXTRACTOR_MODEL_MAX_RETRIES` / `EXTRACTOR_MAX_IMAGES_PER_RUN` 都在)。
+    改完之后这条不变量还成不成立,得有一个地方能当场算 ——
+    `batch_service.assert_lease_covers_configured_budget()` 在启动时调它。
+
+    `1 + max_retries` 是传输层的往返次数(`llm/transport.MultimodalClient.send`
+    的循环条件是 `attempt <= max_retries`),不是重试次数本身。
+    这个 off-by-one 正是原来那版把 90 写成"一次视觉调用"却乘 3 的来源。
+    """
+    per_image = float(timeout_seconds) * (1 + max(0, int(max_retries)))
+    return int(per_image * max(1, int(max_images)))
+
+
+#: 默认配置下的单件预算:60 × 3 × 12 = 2160 秒。
+LONGEST_LEGAL_ITEM_SECONDS = longest_legal_item_seconds()
 
 #: 已经开跑的批次多久没有任何条目落地,就算 worker 中途没了。
 #:
@@ -1479,7 +1514,12 @@ LONGEST_LEGAL_ITEM_SECONDS = 90 * 3 * 4
 #: 和一个死掉的 worker,在库里长得一模一样(都是"很久没有新的 finished_at")。
 #: 好在误报的全部后果是一句提示 + 轮询变慢,不改任何状态、不花任何钱 ——
 #: 所以宁可晚报,也不必像 dispatch_policy 那边一样怕到底。
-BATCH_PROGRESS_STALL_SECONDS = 1800
+#:
+#: A45-batch18 / P2-1:从 1800 抬到 2700。1800 小于修正后的
+#: `LONGEST_LEGAL_ITEM_SECONDS`(2160),下面那条 `if` 会当场拒绝启动 ——
+#: 那正是它的意义。取 2160 的 1.25 倍而不是两倍:这一档只是"报一句话",
+#: 误报便宜(见上面那段权衡),所以仍然取偏短的一侧。
+BATCH_PROGRESS_STALL_SECONDS = 2700
 
 # **不能用 `assert`。** 模块级 assert 在 `python -O` 下被整条剥离 ——
 # 而这类"配置常量互相矛盾"的不变量,恰恰是要在**生产**(最可能开 -O 的地方)
@@ -1672,7 +1712,17 @@ def liveness(
 # 不是同一个数,改动其中一个不要顺手改另一个。
 
 #: 一次领取的租约时长(秒)。领走之后这么久没有落地,就认为 worker 没了。
-ITEM_LEASE_SECONDS = 1800
+#:
+#: A45-batch18 / P2-1:从 1800 抬到 3600。1800 小于修正后的单件预算
+#: (2160),也就是说"租约必须长于单件最长合法耗时"这条不变量原来
+#: **在默认配置下不成立** —— 只是因为被除数取错了链路的参数,
+#: 下面那条 `if` 一次都没有红过。
+#:
+#: 取 3600 而不是刚好 2160 + 一点:这一档的误判要花钱(回收一件仍在跑的
+#: 条目 = 同一件事第二次调用付费模型),所以按上面那段权衡取长的一侧,
+#: 留出接近一倍的余量。代价只是"worker 真的死了之后,这一件多等半小时
+#: 才被回收",而那期间界面已经由 `BATCH_PROGRESS_STALL_SECONDS` 报了 STALLED。
+ITEM_LEASE_SECONDS = 3600
 
 #: 剩余租约低于这个比例时就该续租(A43 / BLOCK-02)。
 #:

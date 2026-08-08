@@ -1003,6 +1003,98 @@ def check_no_debt_guard_is_past_its_due_stage() -> None:
         )
 
 
+def check_every_migration_and_db_test_is_tracked_by_git() -> None:
+    """迁移与数据库测试**必须已经被 Git 跟踪**(A45-batch18 / P1-1)。
+
+    ## 这条是被一次"本机全绿、clean checkout 起不来"换来的
+
+    A45-batch17-2 那轮新增了 `0046_stage1_identity_owner_uuid.py` 与
+    `0047_publish_outbox_lease_token.py`,以及对应的并发测试。**三个文件都没有
+    `git add`。** 而已经提交的代码里:
+
+        attributes/validation.py    要求 owner 是 UUID 变体(0046 建的)
+        models/publishing.py        读 publish_outbox.lease_token(0047 建的)
+
+    于是本机 `alembic heads` 说 0047、`verify_delivery` 16/16、纯测试全绿,
+    而从 main 做一次 clean checkout 得到的最后一条迁移是 **0045** ——
+    部署之后发布查询会去访问一个不存在的列(UndefinedColumn),存量
+    VARIANT 属性的颜色事实会读不出来。
+
+    ## 为什么既有门禁全部看不见它
+
+    `check_the_migration_chain_has_a_single_head()` 和 `alembic heads` 扫的都是
+    **当前文件树**。文件就在那里,链也是通的 —— 它们没有任何理由报错。
+    这一整类问题("工作树里有,版本库里没有")只有问 Git 才答得出来,
+    而在这次之前没有任何一条门禁问过 Git。
+
+    ## 为什么不是 git 仓库时直接失败
+
+    这个脚本的定位是"**交付动作**有没有做对"(见模块文档),而交付冻结
+    发生在仓库里。从 tarball 解出来的目录跑不了这一条,也确实不该在那里
+    宣布"交付卫生检查通过" —— 那正是上一次事故里那份 16/16 的作用。
+
+    ## 范围为什么只到迁移与 `*_db.py`
+
+    这两类是"漏提交之后**别人的环境**会坏、而本机一切正常"的那一批:
+    迁移决定新环境的 schema,DB 测试是唯一会在 CI 里跑真库的东西。
+    普通源码漏提交会在 CI 的 import 检查里当场炸,不需要这条兜。
+    范围写窄是刻意的:一条把整个工作树都算进来的检查会在任何人有一个
+    临时脚本时变红,而最省事的消法是把整条门禁删掉(§3.37 第一版当场踩过)。
+    """
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - 取决于机器
+        raise Failure(
+            "找不到 git 命令,这条门禁无法执行。它守的是「工作树里有、版本库里没有」,"
+            "只有 Git 答得出来 —— 交付冻结必须在装了 git 的仓库里做。"
+        ) from exc
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        raise Failure(
+            f"{PROJECT_ROOT} 不是一个 Git 工作树,这条门禁无法执行。\n"
+            "从 tarball 解出来的目录跑不了它,也不该在那里宣布交付卫生通过 —— "
+            "上一次事故里本机那份 16/16 起的正是这个作用。"
+        )
+
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", "backend/migrations/versions", "backend/tests"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if listed.returncode != 0:  # pragma: no cover - 取决于机器
+        raise Failure(f"git ls-files 执行失败:{listed.stderr.strip()}")
+    tracked = {
+        (PROJECT_ROOT / name).resolve()
+        for name in listed.stdout.split("\0")
+        if name.strip()
+    }
+
+    watched: list[Path] = [
+        p
+        for p in (BACKEND / "migrations" / "versions").glob("*.py")
+        if p.name != "__init__.py"
+    ]
+    watched += sorted((BACKEND / "tests").rglob("*_db.py"))
+
+    missing = sorted(
+        str(p.relative_to(PROJECT_ROOT)) for p in watched if p.resolve() not in tracked
+    )
+    if missing:
+        raise Failure(
+            "这些文件在工作树里、但 Git 没有跟踪:\n  "
+            + "\n  ".join(missing)
+            + "\n\n从 main 做 clean checkout 的人拿不到它们。迁移缺席意味着"
+            "新环境的 schema 比代码旧一截,而运行时报的是 UndefinedColumn —— "
+            "在部署之后、在别人的机器上。\n"
+            "把代码、迁移与对应测试作为**同一个提交**交付:git add 上面这些文件。"
+        )
+
+
 def check_the_decision_log_has_no_duplicate_section_numbers() -> None:
     """`docs/DECISIONS.md` 里同一个 §编号不许出现两次。
 
@@ -1094,6 +1186,7 @@ CHECKS = [
     ("Vitest 四件事都接上了", check_the_frontend_test_runner_is_actually_wired),
     ("前端用例 0 skip", check_no_skipped_frontend_tests),
     ("迁移链单一 head", check_the_migration_chain_has_a_single_head),
+    ("迁移与 DB 测试都已被 Git 跟踪", check_every_migration_and_db_test_is_tracked_by_git),
     ("决策日志编号不重复", check_the_decision_log_has_no_duplicate_section_numbers),
     ("欠账守卫都在还款日之内", check_no_debt_guard_is_past_its_due_stage),
     ("落地的模块真的被接线了", check_every_wired_module_is_actually_called),

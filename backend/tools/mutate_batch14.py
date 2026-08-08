@@ -136,8 +136,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "M12",
         "识别流水传 billing_key(第二张图会撞唯一约束)",
         "app/attributes/service.py",
-        "        billable_units=1,\n    )",
-        '        billable_units=1,\n        billing_key="extract",\n    )',
+        "        provider_attempts=reported_attempts,\n    )",
+        '        provider_attempts=reported_attempts,\n        billing_key="extract",\n    )',
     ),
     (
         "M13",

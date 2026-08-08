@@ -56,7 +56,7 @@ from app.core.enums import (
 )
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
-from app.extractors import call_budget
+from app.extractors import call_accounting, call_budget
 from app.extractors.evidence_plan import plan_evidence
 from app.extractors.schema import (
     EXTRACTION_SCHEMA_VERSION,
@@ -305,9 +305,10 @@ def run_extraction(
     # 受众传给抽取器,让 Schema/提示词里的**枚举取值**也按受众收窄。
     # 键名是抽取器模块的契约(`extractors.vision.AUDIENCE_KEY`);
     # 这里写字面量会在两边改名时静默脱钩,所以 import 它
-    from app.extractors.vision import AUDIENCE_KEY
+    from app.extractors.vision import AUDIENCE_KEY, IDEMPOTENCY_KEY
 
     options: dict[str, Any] = {AUDIENCE_KEY: audience} if audience else {}
+
     succeeded = failed = fabricated = 0
     #: 逐图成绩,按作用域归集用(§11 第一行)。**不是两个标量能替代的东西**:
     #: 「3 张图散着失败」与「B 色的 3 张全失败」在计数里一模一样,
@@ -315,12 +316,23 @@ def run_extraction(
     outcomes: list[run_state.ImageResult] = []
     for asset in assets:
         call_started = time.monotonic()
+        # 每张图一把**自己的**供应商幂等键(A45-batch18 / P1-2)。
+        #
+        # 键 = 这次识别的业务身份 + 这张图。整次识别共用一把是错的:
+        # 供应商会把第二张图的请求认成第一张图的重发,直接返回第一张的
+        # 缓存结果 —— 一次识别的全部证据都变成同一张图的答案,而且不报错。
+        #
+        # `identity.key` 为空时不给键(那种情况下这次识别本来就没有稳定身份,
+        # 见 `_run_identity` 的 `no_key_reason`),抽取器据此不发那个头
+        call_options = dict(options)
+        if identity.key:
+            call_options[IDEMPOTENCY_KEY] = f"{identity.key}:{asset.id}"
         try:
             result = extractor.extract(
                 image=asset,
                 target_fields=targets,
                 enum_defs=enum_defs,
-                options=dict(options),
+                options=call_options,
             )
         except Exception as exc:  # noqa: BLE001
             # 一张图失败不毁掉整次识别 —— 这正是逐图调用的好处之一。
@@ -348,6 +360,8 @@ def run_extraction(
                 "extraction failed for one image",
                 extra={"extra_fields": fields},
             )
+            attempted = call_accounting.attempts_from(getattr(exc, "detail", None))
+            fields["network_attempts"] = call_accounting.describe_attempts(attempted)
             if billable:
                 _record_extraction_usage(
                     session,
@@ -355,6 +369,7 @@ def run_extraction(
                     succeeded=False,
                     duration_ms=int((time.monotonic() - call_started) * 1000),
                     error_code=type(exc).__name__,
+                    reported_attempts=attempted,
                 )
             continue
 
@@ -370,6 +385,9 @@ def run_extraction(
                 duration_ms=result.duration_ms
                 or int((time.monotonic() - call_started) * 1000),
                 error_code=None,
+                reported_attempts=call_accounting.attempts_from(
+                    getattr(result, "meta", None)
+                ),
             )
         row.model_name = row.model_name or result.model_name
         row.prompt_version = row.prompt_version or result.prompt_version
@@ -622,8 +640,28 @@ def _record_extraction_usage(
     succeeded: bool,
     duration_ms: int | None,
     error_code: str | None,
+    reported_attempts: int | None = None,
 ) -> None:
     """一次付费识别调用 = 一条流水。**成功与失败一视同仁。**
+
+    ## 计费单位是"发出去了几个请求",不是"记了几条流水"(A45-batch18 / P1-2)
+
+    原来这里固定写 `billable_units=1`,而传输层
+    (`llm/transport.MultimodalClient.send`)对超时、429、5xx 自动重试:
+    `EXTRACTOR_MODEL_MAX_RETRIES=2` 意味着**一次业务调用最多发出 3 个请求**。
+    两个方向同时错:
+
+        供应商已受理、客户端超时后重发    可能计费 2～3 次,台账记 1
+        Schema 构造 / 图片准备阶段失败    一个请求都没发,台账仍记 1
+
+    前者少记已经花掉的钱,后者记了一笔从来没花过的钱。叠在一起,
+    `/spend` 与供应商账单再也无法逐条核对 —— 而 §10.2 第 5 条准入要的
+    正是"用量记录与 Provider 后台账单条数一致"。
+
+    判定在 `extractors/call_accounting.py`(纯模块,边界能穷举),
+    这里只负责把它的两个返回值原样写进流水。次数同时写进
+    `provider_attempts` 列 —— 对账的人要回答的第一个问题是"这一行代表
+    几次真实请求",而 `billable_units` 在别的操作类型上不是这个语义。
 
     没有这一条,真实抽取器上线那天起,`/spend` 页就缺了识别这一整块开销 ——
     和 a25 之前评分调用完全不进流水表是同一个洞,这次在接后端的同一批堵上,
@@ -640,6 +678,9 @@ def _record_extraction_usage(
     """
     from app.services.generation_service import record_usage
 
+    units, units_source = call_accounting.settle_extraction_units(
+        reported_attempts=reported_attempts
+    )
     record_usage(
         session,
         provider=str(
@@ -653,7 +694,9 @@ def _record_extraction_usage(
         candidate_count=0,
         duration_ms=duration_ms,
         error_code=(error_code[:48] if error_code else None),
-        billable_units=1,
+        billable_units=units,
+        units_source=units_source,
+        provider_attempts=reported_attempts,
     )
 
 

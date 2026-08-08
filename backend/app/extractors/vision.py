@@ -42,6 +42,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.core.logging import get_logger
+from app.extractors import call_accounting
 from app.extractors.base import ImageExtractionResult
 from app.extractors.schema import (
     EXTRACTION_SCHEMA_VERSION,
@@ -96,6 +97,21 @@ EXTRACTION_PROMPT_VERSION = f"vision-{EXTRACTION_SCHEMA_VERSION}"
 #: 不该出现比基尼专属的款式取值,摆在可选列表里,模型迟早会挑一个用。
 AUDIENCE_KEY = "_audience"
 
+#: 这一张图这一次识别的**供应商幂等键**(A45-batch18 / P1-2)。
+#:
+#: 传输层对超时与 5xx 自动重试,而"客户端超时"不等于"供应商没收到" ——
+#: 重试因此可能让同一张图被受理两次、计费两次。请求级幂等键是唯一能让
+#: 供应商自己把第二次认成同一笔的手段。
+#:
+#: 键由服务层给(它才知道这次识别的业务身份),不在这里现编:
+#: 抽取器每次调用都会算出一个新值的话,那不叫幂等键。
+IDEMPOTENCY_KEY = "_idempotency_key"
+
+#: 幂等键发出去时用的头名。用 `Idempotency-Key` 而不是自造一个:
+#: 这是 OpenAI 与多数兼容网关采纳的写法,自造的头会被原样忽略,
+#: 而"被忽略"和"生效了"在我们这一侧看起来一模一样。
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+
 
 @dataclass(frozen=True)
 class ExtractorModelConfig:
@@ -118,6 +134,10 @@ class ExtractorModelConfig:
     send_public_urls: bool = False
     allow_anonymous: bool = False
     allowed_hosts: str = ""
+    #: 发不发 `Idempotency-Key` 头。**默认关**,理由不是保守而是准确:
+    #: 一个不认识这个头的严格网关会直接 400,而那时表现是"识别整条不通",
+    #: 排查方向和幂等毫无关系。确认过端点支持之后再打开。
+    send_idempotency_key: bool = False
 
     @classmethod
     def from_settings(cls) -> ExtractorModelConfig:
@@ -145,6 +165,9 @@ class ExtractorModelConfig:
                 provider_setting("EXTRACTOR_MODEL_REASONING_EFFORT", "low") or "low"
             ).strip().lower(),
             send_public_urls=provider_flag("EXTRACTOR_MODEL_SEND_PUBLIC_URLS", False),
+            send_idempotency_key=provider_flag(
+                "EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY", False
+            ),
             allow_anonymous=provider_flag("EXTRACTOR_MODEL_ALLOW_ANONYMOUS", False),
             allowed_hosts=provider_setting("DOWNLOAD_ALLOWED_HOSTS"),
         )
@@ -195,16 +218,27 @@ class _Adapter:
         prompt: str,
         image: PreparedImage,
         schema: dict[str, Any],
+        idempotency_key: str | None = None,
     ) -> LLMRequest:
         raise NotImplementedError
 
     def extract_text(self, payload: dict[str, Any]) -> str:
         raise NotImplementedError
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, idempotency_key: str | None = None) -> dict[str, str]:
+        """请求头。**幂等键是可选的第三个头**(A45-batch18 / P1-2)。
+
+        两个条件都满足才发:配置打开(`EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY`)
+        且调用方给了键。缺一个就不发 —— 发一个空的 `Idempotency-Key`
+        比不发更糟:严格网关会把空值当成一个合法的键,于是**所有**请求
+        共享同一把键,第二张图会拿到第一张图的缓存响应。
+        """
         headers = {"Content-Type": "application/json"}
         if self.config.api_key.strip():
             headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
+        key = (idempotency_key or "").strip()
+        if self.config.send_idempotency_key and key:
+            headers[IDEMPOTENCY_HEADER] = key
         return headers
 
 
@@ -217,7 +251,12 @@ class ResponsesAdapter(_Adapter):
         return normalize_endpoint(self.config.base_url, "responses")
 
     def build(
-        self, *, prompt: str, image: PreparedImage, schema: dict[str, Any]
+        self,
+        *,
+        prompt: str,
+        image: PreparedImage,
+        schema: dict[str, Any],
+        idempotency_key: str | None = None,
     ) -> LLMRequest:
         content: list[dict[str, Any]] = [
             {"type": "input_text", "text": prompt},
@@ -258,7 +297,10 @@ class ResponsesAdapter(_Adapter):
             body["temperature"] = 0
 
         return LLMRequest(
-            url=self.endpoint(), headers=self.headers(), body=body, images=[image]
+            url=self.endpoint(),
+            headers=self.headers(idempotency_key),
+            body=body,
+            images=[image],
         )
 
     def extract_text(self, payload: dict[str, Any]) -> str:
@@ -274,7 +316,12 @@ class ChatCompletionsAdapter(_Adapter):
         return normalize_endpoint(self.config.base_url, "chat/completions")
 
     def build(
-        self, *, prompt: str, image: PreparedImage, schema: dict[str, Any]
+        self,
+        *,
+        prompt: str,
+        image: PreparedImage,
+        schema: dict[str, Any],
+        idempotency_key: str | None = None,
     ) -> LLMRequest:
         content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt},
@@ -307,7 +354,10 @@ class ChatCompletionsAdapter(_Adapter):
             body["response_format"] = {"type": "json_object"}
 
         return LLMRequest(
-            url=self.endpoint(), headers=self.headers(), body=body, images=[image]
+            url=self.endpoint(),
+            headers=self.headers(idempotency_key),
+            body=body,
+            images=[image],
         )
 
     def extract_text(self, payload: dict[str, Any]) -> str:
@@ -433,6 +483,37 @@ class VisionAttributeExtractor:
         enum_defs: Mapping[str, tuple[str, ...]],
         options: dict[str, Any],
     ) -> ImageExtractionResult:
+        """一次识别调用。**离开这个方法的每一条路都带着"发出去了几次"。**
+
+        A45-batch18 / P1-2。成功路径把它放进 `meta`,失败路径把它挂在
+        异常 detail 上 —— 两条路的消费者是同一个(`attributes/service`
+        的费用流水),所以键名也只有一个(`call_accounting.ATTEMPTS_KEY`)。
+
+        失败路径上这件事**必须在这里做**,不能留给服务层数:服务层看到的
+        是一个异常,而"这个异常发生在第几次往返之后"只有传输层知道。
+        它连 0 都要如实报 —— preflight 失败(未配置、目标为空、Schema 拒绝、
+        图片准备失败)一个请求都没发出去,那一笔记 0 个计费单位,
+        而不是沿用"失败也按 1 记"的旧默认。
+        """
+        attempts = _AttemptCounter()
+        try:
+            return await self._extract_once(
+                image=image,
+                target_fields=target_fields,
+                options=options,
+                attempts=attempts,
+            )
+        except ProviderError as exc:
+            raise _with_attempts(exc, attempts.count) from None
+
+    async def _extract_once(
+        self,
+        *,
+        image: Any,
+        target_fields: tuple[str, ...],
+        options: dict[str, Any],
+        attempts: _AttemptCounter,
+    ) -> ImageExtractionResult:
         if not self.is_configured():
             raise NotConfiguredError(
                 "视觉抽取器未配置,缺少:" + ", ".join(self.config.missing_fields()),
@@ -450,11 +531,20 @@ class VisionAttributeExtractor:
         prompt = build_extraction_prompt(tuple(target_fields), audience=audience)
 
         prepared = await self._prepare_image(image)
-        request = self._adapter.build(prompt=prompt, image=prepared, schema=schema)
+        request = self._adapter.build(
+            prompt=prompt,
+            image=prepared,
+            schema=schema,
+            idempotency_key=_idempotency_from(options),
+        )
 
+        # 走到这里之前的每一步失败都是 preflight —— 一个字节都没出去,
+        # 计数器仍是 0,记账因此是 0(A45-batch18 / P1-2)。
+        # 计数由传输层在**每次往返之前**推进,所以"发出去了几次"这个数
+        # 在成功路径和失败路径上是同一个来源,不会两边各算一遍
         started = time.monotonic()
         response_payload, status = await self._transport.send(
-            request, send_once=self._send_once
+            request, send_once=self._send_once, on_attempt=attempts.record
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
@@ -464,6 +554,9 @@ class VisionAttributeExtractor:
         meta = self._build_metadata(
             response=response_payload, status=status, elapsed_ms=elapsed_ms
         )
+        # 成功路径也要报次数:一次"成功"可能是第 3 次往返才成功的,
+        # 前两次很可能已经被受理并计费。台账按次数记,不按结果记
+        meta[call_accounting.ATTEMPTS_KEY] = attempts.count
         parsed = self._parse_or_explain(text)
 
         actual_model = str(meta.get("model") or self.config.model or "")
@@ -475,6 +568,7 @@ class VisionAttributeExtractor:
                     "api_style": self.config.api_style,
                     "http_status": status,
                     "duration_ms": elapsed_ms,
+                    call_accounting.ATTEMPTS_KEY: attempts.count,
                     "fields_returned": len(parsed.fields),
                     "missing_returned": len(parsed.missing)
                     + len(parsed.unreadable_fields),
@@ -605,6 +699,64 @@ class VisionAttributeExtractor:
             "usage": usage if isinstance(usage, dict) else None,
             "duration_ms": elapsed_ms,
         }
+
+
+# --------------------------------------------------------------------------
+# 网络尝试计数(A45-batch18 / P1-2)
+# --------------------------------------------------------------------------
+
+
+class _AttemptCounter:
+    """这次业务调用一共向供应商发出了几个请求。
+
+    一个可变对象而不是一个 int:传输层要在自己的循环里往上加,
+    而 Python 的 int 是不可变的,传进去加不回来。用 list/dict 当计数器
+    也能做到,但那样调用点读起来是 `box[0]`,而这个数字要进费用台账 ——
+    读它的人应该一眼看出它是什么。
+    """
+
+    __slots__ = ("count",)
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def record(self, attempt_number: int) -> None:
+        """传输层在**每次往返之前**调它。参数是第几次(从 1 开始)。
+
+        取 `max` 而不是 `+= 1`:两者今天等价,但如果哪天传输层改成并发
+        发多个请求,`+= 1` 数出来的仍然对,而"第几次"这个语义会先坏掉。
+        取 max 让这个字段在两种实现下都读得通。
+        """
+        self.count = max(self.count, int(attempt_number))
+
+
+def _with_attempts(exc: ProviderError, attempts: int) -> ProviderError:
+    """把网络尝试次数挂到异常上,**保持异常类型与重试策略不变**。
+
+    重建一个同类异常而不是原地改 `detail`,理由与
+    `providers/fashn._with_partial_ids` 逐字相同:`AppError` 的 detail 是
+    构造时定下来的,原地改会绕过它自己的组装逻辑;类型必须保住 ——
+    重试与降级策略挂在类上(`RetryPolicy`),换成基类会让"未配置"这种
+    绝不该重试的错误变成可重试的。
+
+    **0 也要挂上去。** 缺这个键在判定里意味着"这个抽取器没上报",
+    而那会退回按 1 记账(见 `call_accounting.settle_extraction_units`)——
+    正好把一次没花钱的 preflight 失败记成一笔消费。
+    """
+    detail = {k: v for k, v in (exc.detail or {}).items() if k != "provider"}
+    detail[call_accounting.ATTEMPTS_KEY] = int(attempts)
+    return type(exc)(exc.message, provider=exc.provider, detail=detail)
+
+
+def _idempotency_from(options: Mapping[str, Any] | None) -> str | None:
+    """本次调用的供应商幂等键。没有就是 None(不发那个头)。
+
+    不在这里现编一个:抽取器每次调用都算出新值的话,那不叫幂等键。
+    键的业务身份只有服务层知道(哪次识别、哪张图),所以由它给。
+    """
+    raw = (options or {}).get(IDEMPOTENCY_KEY)
+    text = str(raw).strip() if raw else ""
+    return text or None
 
 
 def _audience_from(options: Mapping[str, Any] | None):

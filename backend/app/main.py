@@ -145,6 +145,23 @@ async def lifespan(app: FastAPI):
             extra={"extra_fields": {"reason": reason}},
         )
 
+    # 批次租约与识别预算的一致性(A45-batch18 / P2-1)。
+    #
+    # `workbench/batch.py` 里那条模块级 `if` 用的是三项配置的**默认值**;
+    # 这一条用的是**这台机器实际生效的配置**(含设置页在数据库里的覆盖)。
+    # 两者缺一不可:前者挡"改了常量忘了改租约",后者挡"运维把单张超时
+    # 从 60 调到 120"。后者不报错、不影响任何测试,而后果是一件正在正常
+    # 跑的条目被回收器抢走,那次已经付过费的调用结果被丢弃。
+    from app.workbench.batch_service import lease_budget_shortfall
+
+    shortfall = lease_budget_shortfall()
+    if shortfall:
+        logger.error(
+            "item lease is shorter than the configured extraction budget; "
+            "a healthy worker can lose items it is still running",
+            extra={"extra_fields": {"reason": shortfall}},
+        )
+
     logger.info(
         "application started",
         extra={"extra_fields": {"env": settings.APP_ENV, "storage": str(settings.storage_dir)}},
