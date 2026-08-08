@@ -62,17 +62,17 @@ export interface ImageSet {
  * 全是通用图,把它改成阻断等于让每一个多色 SPU 立刻无法批准。
  */
 export interface VariantCoverage {
-  /** 这个 SPU 有哪几个变体(稳定 key,不是显示名) */
+  /** 这个 SPU 有哪几个变体(UUID 身份,不是显示名) */
   required: string[]
   /**
-   * key → **当前**颜色名(A44)。
+   * UUID → **当前**颜色名(A44)。
    *
-   * 界面一律显示这个,不要显示 key:key 是变体身份,取值是分配那一刻的
-   * 颜色名,改过名之后它是历史值 —— 直接显示会让运营看到自己刚改掉的旧名字。
+   * 界面一律显示这个,不要显示 UUID。
    */
   labels: Record<string, string>
   /**
-   * 五类现状,只有 `label_collisions` 与 `identity_shadowed` 是真问题。
+   * 五类兼容字段。0046 后 `renamed` 与 `identity_shadowed` 恒为空;
+   * 当前需要处理的是 `label_collisions` 与 `key_label_conflicts`。
    *
    * **这个联合必须和后端 `variant_key.drift()` 的返回键一一对应**,
    * 由 `tests/pure/test_a45_batch13_2_fixes.py` 里那条守卫钉着:后端加一个键

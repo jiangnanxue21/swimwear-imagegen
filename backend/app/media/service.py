@@ -31,12 +31,12 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.attributes import scope_fingerprint
 from app.core.clock import utc_now
 from app.core.enums import MediaRole, MediaSource, MediaStatus, RoleSource
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.sorting import normalize_sort
-from app.attributes import scope_fingerprint
 from app.media import evidence_rules, provenance_conflict
 from app.media.mapping import (
     LEGACY_CANDIDATE,
@@ -595,8 +595,9 @@ _COARSE_FILTER_COLUMNS = frozenset(
 
 def evidence_assets_for(
     session: Session,
-    product_id: UUID,
+    product_id: UUID | None,
     *,
+    spu_id: UUID | None = None,
     scope: UUID | str | None = SHARED_SCOPE,
     scope_is_explicit: bool = False,
     imported_url_trusted: bool = False,
@@ -638,8 +639,15 @@ def evidence_assets_for(
     必须有这样一个伴随标记**,否则调用方无法表达后者,而它恰恰是
     §6.5 混排规则将来要用的那一个。
     """
+    if product_id is None and spu_id is None:
+        raise ValueError("product_id 与 spu_id 至少要传一个")
+    owner_filter = (
+        MediaAsset.spu_id == spu_id
+        if spu_id is not None
+        else MediaAsset.product_id == product_id
+    )
     stmt = select(MediaAsset).where(
-        MediaAsset.product_id == product_id,
+        owner_filter,
         MediaAsset.status == MediaStatus.READY.value,
         # 溯源列非空 = 这张图来自我们自己的生成流水线。`shadow_from_candidate`
         # 每跑完一个生成任务就写一条,而 AI 图对属性证据的贡献必然是零

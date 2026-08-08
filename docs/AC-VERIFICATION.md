@@ -489,8 +489,8 @@ npm run build       # exit 0
 Windows 本机另有两项**执行环境兼容处理**,均不是业务修复:
 
 1. Alembic 当前按系统 locale(CP936)读取 `alembic.ini`,其中的 UTF-8 中文注释会让
-   迁移在读配置时抛 `UnicodeDecodeError`。复验时临时换成等义 ASCII 注释,
-   结束后已恢复,工作树没有留下这项临时改动。
+   迁移在读配置时抛 `UnicodeDecodeError`。本轮将该注释永久改成等义 ASCII 文本,
+   作为跨 locale 的配置兼容修复保留；配置值与凭据内容均未改变。
 2. 受限执行环境不允许 pytest 在默认临时目录创建 `tmp_path`;最终在沙箱外以独立
    `--basetemp` 运行。此前的 `PermissionError` 没有进入业务断言,不计为用例失败。
 
@@ -536,3 +536,48 @@ tests/test_batch_lease_concurrency_db.py
 本结论只覆盖上面列出的 50 条历史快照,不等于 `make check`、全部后端集成测试、
 前端门禁或 AC-01~AC-22 全部通过。要取得当前计数,仍应重新运行对应命令,
 不要从本节抄数字。
+
+---
+
+## 9. 2026-08-08 BATCH14-28 补丁审核与合入复验
+
+本节记录 `patch/swimwear-imagegen-batch14-28.patch` 合入当前树后的实际结果。
+测试使用本机 PostgreSQL 专用库 `imagegen_test`，夹具获准清空 `public` schema；
+文档不记录密码或完整连接串。未操作生产库与远程数据库。
+
+### 9.1 审核后修正
+
+- 0046 的图片标签 upgrade/downgrade 增加 SPU 作用域，防止跨 SPU 同名颜色串档。
+- 商品颜色回填遇到多个 `variant_code` / `working_name` 候选时明确失败。
+- `variant_key` 退出运行时身份选择；保留列和值只用于 downgrade。
+- SPU 共享事实指纹与颜色完整度改查整个 SPU，而不是当前 SKU。
+- 显式空颜色重试范围不再扩大为全量调用。
+- 迁移测试清理改为专用测试库 schema 重建，避免 ORM/Alembic 外键名差异导致
+  teardown 半清理。
+
+### 9.2 自动验证结果
+
+| 范围 | 结果 |
+|---|---:|
+| 后端纯逻辑 | 2492/2492 passed |
+| 0046 PostgreSQL 迁移 | 6/6 passed |
+| 相关 PostgreSQL 回归 | 60/60 passed |
+| Ruff | `app + tests` passed |
+| 后端架构契约 | 3 kept / 0 broken |
+| 前端 TypeScript | passed |
+| 前端语法解析 | 88/88 passed |
+| 前端 Vitest | 74/74 passed |
+| 前端生产构建 | passed |
+| 前端 ESLint | 0 errors / 4 warnings |
+| 交付自检 | 16/16 passed |
+| 样例数据 | 10/10 passed |
+| import / 锚点 / 源码守卫 / 活文档引用 | 全部通过 |
+
+前端 Vitest 输出中有一段 `useBlocker must be used within a data router` 的 stderr；
+它来自专门验证错误边界的用例，最终退出码为 0，7 个测试文件、74 条用例均通过。
+生产构建仍提示主 chunk 超过 500 kB，这是既有性能提醒，不是构建失败。
+
+### 9.3 未覆盖边界
+
+本次没有执行真实模型调用、Docker build、Playwright E2E 或完整 Redis/Celery 集成
+套件，因此不能据此宣称阶段 P0 或 AC-01~AC-22 全部关闭。

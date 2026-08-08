@@ -15,18 +15,32 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import Session
 
-from app.models import Base
+from app.models import (
+    Base,
+    ColorVariant,
+    ListingImageItem,
+    ListingImageSet,
+    MediaAsset,
+    Product,
+    Spu,
+)
 from tests.conftest import TEST_CONNECT_ARGS, TEST_DB_URL, requires_db
 
 pytestmark = requires_db
 
 
 def _reset(engine) -> None:
-    """回到"什么都没有"的状态:业务表 + alembic 版本表全部清掉。"""
-    Base.metadata.drop_all(engine)
+    """回到空 schema；本模块已由破坏性测试库守卫限制。
+
+    不能用 ``Base.metadata.drop_all``：迁移显式命名的外键不一定等于 ORM
+    元数据推导的名称。按 ORM 名称删除一个由 Alembic 建出的库会在 teardown
+    中途失败，并把半清理状态留给后续用例。
+    """
     with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
 
 
 @pytest.fixture
@@ -98,3 +112,153 @@ def test_upgrade_is_idempotent_from_scratch(alembic_config, clean_engine):
     command.upgrade(alembic_config, "head")
     tables = set(inspect(clean_engine).get_table_names())
     assert {"products", "generation_tasks", "generation_candidates"} <= tables
+
+
+def _two_spus_with_the_same_variant_key(engine) -> tuple[dict[str, str], dict[str, str]]:
+    """在 0045 形状里造两个都有 ``BLK`` 的 SPU 与图片项。"""
+    expected: dict[str, str] = {}
+    image_sets: dict[str, str] = {}
+    with Session(engine) as session:
+        for suffix in ("A", "B"):
+            code = f"MIG-0046-{suffix}"
+            spu = Spu(
+                spu_code=code,
+                internal_name=f"0046 migration {suffix}",
+                audience="WOMEN",
+                base_category="swimwear",
+                created_by="migration-test",
+            )
+            session.add(spu)
+            session.flush()
+            variant = ColorVariant(
+                spu_id=spu.id,
+                variant_code="BLK",
+                working_name="Black",
+                display_name="Black",
+            )
+            session.add(variant)
+            session.flush()
+            product = Product(
+                spu_id=spu.id,
+                color_variant_id=None,
+                spu=code,
+                sku=f"{code}-BLK-S",
+                name=f"0046 product {suffix}",
+                category="swimwear",
+                audience="WOMEN",
+                variant_key="BLK",
+                size="S",
+            )
+            session.add(product)
+            session.flush()
+            media = MediaAsset(
+                product_id=product.id,
+                spu_id=spu.id,
+                spu=code,
+                source="MANUAL_UPLOAD",
+                role="PRODUCT_FRONT",
+                storage_path=f"migration/{suffix}.jpg",
+                mime_type="image/jpeg",
+                sha256=(suffix.lower() * 64),
+                status="READY",
+                evidence_class="PRODUCT_EVIDENCE",
+            )
+            image_set = ListingImageSet(spu=code, version=1, status="DRAFT")
+            session.add_all((media, image_set))
+            session.flush()
+            session.add(
+                ListingImageItem(
+                    image_set_id=image_set.id,
+                    media_asset_id=media.id,
+                    role="PRODUCT_FRONT",
+                    sort_order=0,
+                    variant_id="BLK",
+                )
+            )
+            expected[code] = str(variant.id)
+            image_sets[code] = str(image_set.id)
+        session.commit()
+    return expected, image_sets
+
+
+def test_0046_rewrites_same_named_image_variants_inside_their_own_spu(
+    alembic_config, clean_engine
+):
+    """两个 SPU 都有 ``BLK`` 时,图片项不得被改成同一个颜色 UUID。"""
+    command.upgrade(alembic_config, "0045")
+    expected, _image_sets = _two_spus_with_the_same_variant_key(clean_engine)
+
+    command.upgrade(alembic_config, "0046")
+    with clean_engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT s.spu, i.variant_id
+                  FROM listing_image_items i
+                  JOIN listing_image_sets s ON s.id = i.image_set_id
+                 WHERE s.spu LIKE 'MIG-0046-%'
+                 ORDER BY s.spu
+                """
+            )
+        ).all()
+    assert dict(rows) == expected
+
+    command.downgrade(alembic_config, "0045")
+    with clean_engine.connect() as conn:
+        restored = conn.execute(
+            text(
+                """
+                SELECT s.spu, i.variant_id
+                  FROM listing_image_items i
+                  JOIN listing_image_sets s ON s.id = i.image_set_id
+                 WHERE s.spu LIKE 'MIG-0046-%'
+                """
+            )
+        ).all()
+    assert {value for _spu, value in restored} == {"BLK"}
+
+
+def test_0046_refuses_ambiguous_working_names(alembic_config, clean_engine):
+    """同一 SPU 两个颜色的临时名称相同时,迁移必须失败而不是任选一个。"""
+    command.upgrade(alembic_config, "0045")
+    with Session(clean_engine) as session:
+        spu = Spu(
+            spu_code="MIG-0046-AMB",
+            internal_name="0046 ambiguous",
+            audience="WOMEN",
+            base_category="swimwear",
+            created_by="migration-test",
+        )
+        session.add(spu)
+        session.flush()
+        session.add_all(
+            (
+                ColorVariant(
+                    spu_id=spu.id,
+                    variant_code="A",
+                    working_name="Supplier Blue",
+                    display_name="A",
+                ),
+                ColorVariant(
+                    spu_id=spu.id,
+                    variant_code="B",
+                    working_name="Supplier Blue",
+                    display_name="B",
+                ),
+                Product(
+                    spu_id=spu.id,
+                    color_variant_id=None,
+                    spu=spu.spu_code,
+                    sku="MIG-0046-AMB-S",
+                    name="0046 ambiguous product",
+                    category="swimwear",
+                    audience="WOMEN",
+                    variant_key="Supplier Blue",
+                    size="S",
+                ),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(RuntimeError, match="迁移不能替你任选一个"):
+        command.upgrade(alembic_config, "0046")

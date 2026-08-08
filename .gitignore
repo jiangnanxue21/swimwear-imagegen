@@ -12,6 +12,8 @@ storage/
 
 # 依赖与构建产物
 node_modules/
+.venv/
+venv/
 dist/
 # Vite/Vitest 缓存。默认在 node_modules/.vite 之下(被上面那行连带忽略),
 # vitest.config.ts 把它搬了出来(理由在那边:root 装的依赖会让默认位置

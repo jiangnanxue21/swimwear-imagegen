@@ -36,13 +36,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.attributes import confidence as conf
-from app.attributes import queue_policy
-from app.attributes import run_state
-from app.attributes import scope_fingerprint
-from app.attributes import validation
+from app.attributes import queue_policy, run_state, scope_fingerprint, validation
 from app.attributes.decision import decide_status
 from app.attributes.registry import REGISTRY, extractable_fields
 from app.attributes.validation import (
+    AttributeOwnerError,
     AttributeValueError,
     owner_for,
     validate_attribute_value,
@@ -98,11 +96,19 @@ def run_extraction(
     extractor,
     fields: tuple[str, ...] | None = None,
     only_media_ids: list[UUID] | None = None,
+    only_variant_ids: list[UUID] | None = None,
 ) -> ProductAttributeExtraction:
     """逐图识别,落证据。**不写任何属性值。**
 
     `only_media_ids` 用于增量:新增一张素材时只识别新图。不传则识别
     该商品全部可用素材。
+
+    `only_variant_ids` 用于**按颜色重试**(§11 第一行):上一次 run 的
+    `RunOutcome.retry_scope` 已经算出了该重跑哪几个颜色,这个入参是它
+    回来的那一跳。不传则不按颜色筛。
+
+    两者同传时取**交集**。取并集的话「只重跑这几张图」会被一个颜色作用域
+    悄悄扩大成整个颜色,而那是一次更贵的调用。
     """
     # 受众过滤在这里发生(PRD v2 §18.3):男装商品的识别目标里没有领型,
     # 女装的里没有腰头。受众未确认时退回全集 —— 该商品会先被工作台排去
@@ -131,6 +137,29 @@ def run_extraction(
     if only_media_ids:
         wanted = set(only_media_ids)
         evidence = [a for a in evidence if a.id in wanted]
+    # An explicitly empty scope must stay empty. Treating [] like None would turn a
+    # narrowly requested retry into a full-SPU extraction (and potentially a paid
+    # provider call).
+    if only_variant_ids is not None:
+        # 作用域的划法**借 `run_state.scope_of`,不在这里重写一遍**。
+        #
+        # 就地写 `a.color_variant_id in wanted` 今天给出同样的结果,坏处在
+        # 将来:那个函数明写着「不读 `variant_hint`」,而重试范围决定下一次
+        # 付多少钱。在这里另写一份的话,下一个人顺手加上 hint 兜底
+        # (「归属为空就看看模型猜的」)不会有任何地方报错 —— 而那正是
+        # 14-9 / 14-10 / `scope_of` 三次拒绝过的同一件事。
+        scopes = {str(v) for v in only_variant_ids}
+        evidence = [a for a in evidence if run_state.scope_of(a) in scopes]
+        if not evidence:
+            # **和「一张证据都没有」分开报。** 合成一句的话,运营看到
+            # 「没有可用素材」会去传更多图,而真正的原因是他勾的那几个颜色
+            # 今天一张归属图都没有 —— 下一步是去按颜色传图,或者干脆
+            # 重跑整件商品,两者都不是"再传几张通用图"
+            raise ValidationError(
+                "所选颜色下没有可用于识别的素材 —— "
+                "按颜色重试只跑归属到该颜色的图,通用图不进任何颜色作用域",
+                code=ErrorCode.INPUT_INVALID,
+            )
     if not evidence:
         # **两条错误分开报。** 素材库里明明摆着十几张图,却告诉运营
         # 「没有素材」,会让人去传更多图 —— 而传进来的如果还是 AI 图,
@@ -718,8 +747,13 @@ def scope_fingerprints_for(
     None,算出来的是**一个所有素材都长得一样的指纹** —— 不报错、不抛异常,
     只是换了图也不 stale。那是本模块最安静的坏法。
     """
+    # SPU 事实必须看整个 SPU 的样品集合；只按当前 SKU 查会让同款另一颜色
+    # 刚确认的共享事实立即显示过期。没有 spu_id 的历史行仍按商品隔离。
     assets = media_service.evidence_assets_for(
-        session, product.id, imported_url_trusted=EVIDENCE_IMPORTED_URL_TRUSTED
+        session,
+        product.id if product.spu_id is None else None,
+        spu_id=product.spu_id,
+        imported_url_trusted=EVIDENCE_IMPORTED_URL_TRUSTED,
     )
     return scope_fingerprint.fingerprints(
         scope_fingerprint.views(assets),
@@ -1083,6 +1117,19 @@ def apply_evidence(
         try:
             owner_type, owner_id = owner_for(field_name, **owner_coordinates(product))
             validate_attribute_value(field_name, result.value)
+        except AttributeOwnerError:
+            # **坐标算不出来不许被吞。**
+            #
+            # 下面那条 `logger.warning + continue` 对「值不合契约」是对的,
+            # 对这一档是灾难性的:owner 算不出来意味着这件商品的整个
+            # VARIANT 层静默消失,而界面显示「识别完成」加一个空的主色 ——
+            # 运营没有任何理由怀疑它。§3.22 与 `identity_of()` 里那颗雷
+            # 警告的「识别侧静默丢颜色字段」,那个"静默"就在这个 except 上。
+            #
+            # 抛出去而不是 continue:整次识别当场失败并说出原因。代价是
+            # 一批没回填的存量商品跑不了识别 —— **那是对的**,它们本来就
+            # 写不出读得回来的颜色属性,跑完只会留下一批查不到的行。
+            raise
         except AttributeValueError as exc:
             # **一个字段不合契约,不该让整次识别失败。**
             #
@@ -1268,15 +1315,18 @@ def effective_map(
             [
                 (OwnerType.SKU.value, coords["sku"]),
                 (OwnerType.SPU.value, coords["spu"]),
-                # VARIANT 的 owner_id 带 SPU 命名空间(A44)。
-                # 读写必须用同一个组装函数 —— 分开写两遍的表现是
-                # \"确认成功了,刷新之后值没了\",两边都不报错
-                (
-                    OwnerType.VARIANT.value,
-                    validation.variant_owner_id(
-                        spu=coords["spu"], variant_id=coords["variant_id"]
-                    ),
-                ),
+                # VARIANT 的 owner_id 就是 `color_variants.id`(阶段 1)。
+                #
+                # 这里原来套的是 `<len>:<spu>/<variant_id>` 命名空间。那个
+                # hack 的存在理由是"变体 id 取值是颜色名、唯一索引里没有 SPU"
+                # —— 换成 UUID 之后理由消失了,跨 SPU 同名在结构上撞不上。
+                #
+                # **读写必须同源**:写在 `owner_for()`,读在这里。分开写两遍的
+                # 表现是"确认成功了,刷新之后值没了",而两边都不报错。
+                # 迁移 0046 把存量行从命名空间形式改写成了 UUID,所以这里
+                # 不做兼容读 —— 兼容读会让一个没跑迁移的库看起来一切正常,
+                # 然后在第一次确认时静静地分裂成两份数据
+                (OwnerType.VARIANT.value, coords["variant_id"]),
             ]
         )
 
@@ -1328,9 +1378,11 @@ def variant_attr_map(
     wanted = [v for v in dict.fromkeys(variant_ids) if v]
     if not wanted or not (spu or "").strip():
         return {}
-    namespaced = {
-        validation.variant_owner_id(spu=spu, variant_id=v): v for v in wanted
-    }
+    # owner_id 就是变体 UUID 本身(阶段 1,命名空间 hack 已退役)。
+    # 这个 dict 从"带命名空间 -> 裸 id"退化成恒等映射,保留它是因为
+    # 下面按 `namespaced[row.owner_id]` 回折 —— 改成直接用 owner_id
+    # 会让"查不到的变体不出现在结果里"这条性质失去一个显式的落点
+    namespaced = {v: v for v in wanted}
     rows = session.scalars(
         select(ProductAttributeValue).where(
             ProductAttributeValue.owner_type == OwnerType.VARIANT.value,
@@ -1376,11 +1428,9 @@ def orphaned_variant_owners(
     """
     from app.listings import variants as variant_service
 
-    live = {
-        validation.variant_owner_id(spu=spu, variant_id=vid)
-        for vid in variant_service.required_variant_ids(session, spu)
-    }
-    prefix = validation.variant_owner_id(spu=spu, variant_id="")
+    # 活变体的 owner_id 现在就是它们的 UUID(阶段 1)
+    live = set(variant_service.required_variant_ids(session, spu))
+    prefix = validation.legacy_variant_owner_prefix(spu)
     rows = session.scalars(
         select(ProductAttributeValue.owner_id).where(
             ProductAttributeValue.owner_type == OwnerType.VARIANT.value,

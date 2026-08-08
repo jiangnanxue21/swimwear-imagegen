@@ -135,23 +135,29 @@ def test_owner_type_comes_from_the_registry_not_from_the_caller():
     SKU 行的主键、不是 SPU 的标识。合起来的实际语义是"每个 Product UUID
     一桶属性",分层只存在于契约里。
 
-    ## A44:VARIANT 的 owner_id 不再是裸变体 id
+    ## A44 -> 阶段 1:VARIANT 的 owner_id 变过两次,而不变式只有一条
 
-    这一条原来断言 `(VARIANT, "RED")`。改成命名空间形式不是口味问题 ——
+    这一条最早断言 `(VARIANT, "RED")`。A44 改成命名空间形式不是口味问题 ——
     那张表的唯一索引是 `(owner_type, owner_id, field_name)`,**没有 SPU**,
     于是"RED"这个 owner 是全库共用的:两个 SPU 都有红色时,给一个确认
-    等于给另一个也确认了。见 `test_variant_key.py` 里那一组。
+    等于给另一个也确认了。
+
+    阶段 1 又改了一次:owner_id 就是 `color_variants.id`。**不变式还是那一条**
+    (同色跨 SPU 不许共用一行),换掉的是关掉它的机制 —— 从"人工套前缀"
+    换成"UUID 本身全局唯一"。命名空间因此退役:它的存在理由是变体 id
+    取值为颜色名。
 
     SPU 层保持裸值:spu 本身就是全局唯一的,套一层只会让读写多一个
     对不齐的机会。
     """
-    coords = {"spu": "SW-001", "variant_id": "RED", "sku": "SW-001-RED-M"}
-    variant_owner = v.variant_owner_id(spu="SW-001", variant_id="RED")
-    assert v.owner_for("primary_color", **coords) == (OwnerType.VARIANT, variant_owner)
-    assert v.owner_for("secondary_colors", **coords) == (OwnerType.VARIANT, variant_owner)
+    cv = "0f9f1c2e-1111-4a00-8000-000000000001"
+    coords = {"spu": "SW-001", "variant_id": cv, "sku": "SW-001-RED-M"}
+    assert v.owner_for("primary_color", **coords) == (OwnerType.VARIANT, cv)
+    assert v.owner_for("secondary_colors", **coords) == (OwnerType.VARIANT, cv)
     assert v.owner_for("garment_type", **coords) == (OwnerType.SPU, "SW-001")
     assert v.owner_for("material", **coords) == (OwnerType.SPU, "SW-001")
-    assert v.split_variant_owner_id(variant_owner) == ("SW-001", "RED")
+    # 不再套命名空间 —— 套着的话读取侧按 UUID 找会全部落空
+    assert v.split_variant_owner_id(cv) is None
 
 
 def test_owner_for_refuses_an_empty_coordinate():

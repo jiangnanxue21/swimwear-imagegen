@@ -3,6 +3,7 @@ import {
   ApiOutlined, AuditOutlined, DashboardOutlined, FileTextOutlined, HeartOutlined,
   FolderOpenOutlined, PictureOutlined, ProfileOutlined, SettingOutlined, SkinOutlined,
   TeamOutlined, ThunderboltOutlined, WarningOutlined, ImportOutlined, ClusterOutlined,
+  PlusSquareOutlined,
   HistoryOutlined, CheckSquareOutlined, HomeOutlined, WalletOutlined,
   CloudUploadOutlined,
 } from '@ant-design/icons'
@@ -10,6 +11,7 @@ import AppLayout, { type NavGroup } from './components/AppLayout'
 import NotFoundPage from './pages/NotFoundPage'
 import SystemStatusPage from './pages/SystemStatusPage'
 import TodayPage from './pages/TodayPage'
+import SpuCreatePage from './pages/SpuCreatePage'
 import WorkbenchListPage from './pages/WorkbenchListPage'
 import WorkbenchProductPage from './pages/WorkbenchProductPage'
 import WorkbenchBatchPage from './pages/WorkbenchBatchPage'
@@ -80,6 +82,7 @@ export const NAV: NavGroup[] = [
       { key: '/workbench-import', label: '商品导入', icon: <ImportOutlined /> },
       { key: '/media', label: '素材管理', icon: <FolderOpenOutlined /> },
       { key: '/tasks', label: '生成任务', icon: <PictureOutlined /> },
+      { key: '/spus/new', label: '三步建档', icon: <PlusSquareOutlined /> },
       { key: '/workbench-spus', label: 'SPU 聚合', icon: <ClusterOutlined /> },
     ],
   },
@@ -148,6 +151,9 @@ export const router = createBrowserRouter(
         <Route path="/workbench-review" element={<WorkbenchReviewPage />} />
         <Route path="/workbench-batches" element={<WorkbenchBatchPage />} />
         <Route path="/workbench-exceptions" element={<WorkbenchExceptionsPage />} />
+        {/* 三步建档(阶段 1)。放在 /spus/new 而不是 /workbench-spus/new:
+            后者的前缀属于只读聚合视图,而这是一条写动线 */}
+        <Route path="/spus/new" element={<SpuCreatePage />} />
         <Route path="/workbench-spus" element={<WorkbenchSpuPage />} />
         <Route path="/workbench-import" element={<WorkbenchImportPage />} />
         {/* B-02:发布链路的前端入口。`?product_id=` 会直接打开提交弹窗 */}

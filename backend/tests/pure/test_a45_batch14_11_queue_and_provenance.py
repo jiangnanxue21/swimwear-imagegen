@@ -31,8 +31,6 @@ from __future__ import annotations
 import ast
 import itertools
 
-from tests.pure._helpers import BACKEND_ROOT  # noqa: F401
-
 from app.attributes import queue_policy as qp
 from app.core.enums import AttributeStatus, MediaSource, MediaStatus, RoleSource
 from app.media import provenance_conflict as pc
@@ -52,6 +50,7 @@ from app.workbench.flow import (
     ProductFlow,
     StepState,
 )
+from tests.pure._helpers import BACKEND_ROOT  # noqa: F401
 
 APP = BACKEND_ROOT / "app"
 
@@ -645,7 +644,11 @@ def test_the_provenance_lookup_is_scoped_by_spu_not_by_the_dedup_key():
     # 第一版写的是 `"IfExp" in dumped`,而变异把条件换成 `if True` 之后
     # 它照样是一个 IfExp —— 守卫全绿。同 batch14 的 M10:
     # 「出现了某个语法结构」和「那个结构问的是对的问题」是两回事。
-    branches = [n for n in ast.walk(ast.Module(body=body, type_ignores=[])) if isinstance(n, ast.IfExp)]
+    branches = [
+        n
+        for n in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if isinstance(n, ast.IfExp)
+    ]
     assert branches, "SPU 为空时的退路没了"
     assert any(
         isinstance(n.test, ast.Attribute)

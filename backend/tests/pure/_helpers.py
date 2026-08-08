@@ -236,3 +236,26 @@ def window(text: str, start: str, end: str | None = None, *, what: str = "") -> 
             "这样的窗口让任何 `not in` 断言平凡为真"
         )
     return chunk
+
+
+#: 0046 之前 VARIANT 层 owner_id 的形状:`<len>:<spu>/<variant_id>`。
+#:
+#: **这是一份冻结的历史格式,不是一个还在用的构造器。** 铸造它的那个函数
+#: (`validation.variant_owner_id`)在阶段 1 退役了 —— 命名空间 hack 的存在
+#: 理由是变体 id 取值为颜色名,而 owner_id 切成 `color_variants.id` 之后
+#: UUID 全局唯一,跨 SPU 同名撞不上。
+#:
+#: 解析侧(`split_variant_owner_id`)必须留着:库里 0046 之前写下的行还是
+#: 这个形状,巡检与降级都要读它。
+#:
+#: 用例为什么改用它而不是继续调铸造函数:**拿铸造结果当期望值,本来就是
+#: 一个弱断言** —— 铸造和解析一起漂的话,round-trip 照样成立而库里的存量
+#: 行谁都读不了。铸造退役之后这个弱点必须补上,所以下面几处一律钉**字面量**,
+#: 也就是真正躺在数据库里的那串字节。这个 helper 只用来算那些字面量对不对。
+LEGACY_VARIANT_NS = "/"
+
+
+def legacy_variant_owner_id(*, spu: str, variant_id: str) -> str:
+    """冻结格式的构造。**只给用例用**,生产代码不许调 —— 见上面那段。"""
+    spu = (spu or "").strip()
+    return f"{len(spu)}:{spu}{LEGACY_VARIANT_NS}{variant_id}"

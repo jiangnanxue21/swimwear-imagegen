@@ -372,7 +372,9 @@ def test_every_no_key_path_says_why():
     for rendered in (ast.unparse(n) for n in returns):
         # 每一条 return 要么带键、要么带原因,不许两个都空
         has_key = "key" in rendered or rendered.rstrip(")").rsplit(",", 2)[-2].strip() != "None"
-        assert has_key or "None, None)" not in rendered, f"有一条 return 既没有键也没有原因:{rendered}"
+        assert has_key or "None, None)" not in rendered, (
+            f"有一条 return 既没有键也没有原因:{rendered}"
+        )
     assert len(no_key) >= 4, "建不出键的分支少了 —— 有一条在静静地返回空键"
 
 

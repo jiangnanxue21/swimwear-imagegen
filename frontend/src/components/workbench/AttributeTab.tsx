@@ -28,6 +28,7 @@ import {
   RUN_STATUS_LABEL,
   RUN_STATUS_NOTICE,
   attributesApi,
+  factsStale,
   type AttributeFieldSpec,
   type AttributeValue,
   type Evidence,
@@ -296,8 +297,33 @@ export default function AttributeTab({
     onError: onWriteError,
   })
 
-  const rows = values.data ?? []
+  /*
+   * `?? []` **必须自己也是一个 memo**。
+   *
+   * 裸写的话每次 render 都是一个新数组,于是下面每一个吃 `[rows]` 的
+   * `useMemo` 都恒定失效 —— 它们看起来在缓存,实际每帧全量重算。
+   * 属性页最多 30 行,今天不疼;但 lint 会因此每加一个消费点就多报一条,
+   * 而"忍受几条固定警告"的下一步一定是不再看警告。
+   *
+   * 本批加了第三个消费点(`stale`),把这条一起收掉。
+   */
+  const rows = useMemo(() => values.data ?? [], [values.data])
   const conflicts = useMemo(() => rows.filter((r) => r.status === 'CONFLICT'), [rows])
+  /**
+   * 样品已变的事实(§5.3 / AC-21)。**判定整个在后端**(硬规则 4)——
+   * 这里只挑出后端已经算好的那几行,不在前端比指纹。
+   *
+   * 只数**已确认**的:接口那一侧算的是 `settled_only=False`(它回答的是
+   * "库里这一行的指纹对不对得上"),而这一屏要回答的是"该不该催人"。
+   * 把 CANDIDATE 也算进来的话,界面会对同一个字段同时说两句话——
+   * 「有建议值待确认」和「已确认的事实过期了」,而后者是假的:
+   * 那条事实从来没有立起来过,谈不上过不过期。口径与后端
+   * `stale_fields(settled_only=True)` 同向。
+   */
+  const stale = useMemo(
+    () => rows.filter((r) => r.status === 'CONFIRMED' && factsStale(r)),
+    [rows],
+  )
   const pending = useMemo(() => rows.filter((r) => r.status === 'CANDIDATE'), [rows])
 
   /**
@@ -415,11 +441,25 @@ export default function AttributeTab({
     },
     {
       title: '状态',
-      dataIndex: 'status',
-      width: 100,
-      render: (v: string) => {
-        const meta = ATTRIBUTE_STATUS_LABEL[v]
-        return <Tag color={meta?.color}>{meta?.text ?? v}</Tag>
+      key: 'status',
+      width: 150,
+      render: (_, row) => {
+        const meta = ATTRIBUTE_STATUS_LABEL[row.status]
+        // 「样品已变」和状态是**两件正交的事**,所以是第二个 Tag 而不是
+        // 第五档状态:一条 CONFIRMED 的事实过期之后,它仍然是 CONFIRMED
+        // (仍然不被自动流程覆盖、仍然会进刊登报文),变的只是"还证不证得明"。
+        // 塞进 `ATTRIBUTE_STATUS_LABEL` 会让它和后端的 `AttributeStatus`
+        // 分叉,而那张表是逐值比对钉着的。
+        return (
+          <Space size={4} wrap>
+            <Tag color={meta?.color}>{meta?.text ?? row.status}</Tag>
+            {row.status === 'CONFIRMED' && factsStale(row) && (
+              <Tooltip title="确认之后样品图变过,系统证明不了这个值仍然成立。重新识别一次再复核。">
+                <Tag color="warning">样品已变</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        )
       },
     },
     {
@@ -542,6 +582,48 @@ export default function AttributeTab({
           showIcon
           message={`${conflicts.length} 项属性有冲突结论,必须人工裁决`}
           description="不同图片对同一属性给出了不同结论。系统不会自动选一个 —— 请在下面逐项填入采信值再点「裁决」,选择会连同操作人一起留痕。"
+        />
+      )}
+
+      {/*
+        * 「这批事实所依据的样品已经变了」(§5.3 / AC-21)。
+        *
+        * ## 为什么它必须上屏
+        *
+        * 后端从 batch14-21 起就在逐行回 `facts_stale`,而前端对它**零引用** ——
+        * 于是"样品换了、这条已确认的事实可能不再成立"这件事,运营在界面上
+        * 完全看不见。它不是一个提示的缺失:已确认的属性**从此不被自动流程
+        * 覆盖**,所以没有任何后续动作会自己把它纠回来,这条事实会一路带到
+        * 刊登报文里去。
+        *
+        * ## 语气是 warning 不是 error
+        *
+        * 过期**不等于错**。指纹对不上只说明"证明不了它仍然成立",
+        * 多数情况下重跑一次识别得到的是同一个值。写成 error 会让运营
+        * 把一屏黄字读成一屏故障,而真正的故障(冲突)就在它上面一格。
+        *
+        * ## 下一步只给一个,而且是那个花钱的
+        *
+        * §9.5:错误必须包含行动。这里的行动是"重新识别",它在右上角。
+        * 不给「忽略」按钮 —— 那个按钮的语义是把指纹改成当前值,
+        * 也就是**在没有看过新样品的情况下宣布事实仍然成立**。
+        */}
+      {stale.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={`${stale.length} 项已确认的属性,依据的样品已经变了`}
+          description={
+            <>
+              这些字段确认之后,它们所依据的那批样品图发生了变化(补图、换图或删图),
+              系统<b>证明不了</b>它们仍然成立。已确认的属性不会被自动流程覆盖,
+              所以不重新识别的话,这个值会一直带到刊登报文里。
+              <br />
+              下一步:点右上角「重新识别」,再逐项复核带
+              <Tag color="warning" style={{ marginInline: 4 }}>样品已变</Tag>
+              标记的行。
+            </>
+          }
         />
       )}
 

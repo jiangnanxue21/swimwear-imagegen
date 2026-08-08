@@ -45,8 +45,36 @@ export interface AttributeValue {
   /** 因子分解:回答「0.71 是因为只有一张图,还是因为图太糊」 */
   confidence_breakdown: Record<string, unknown> | null
   evidence_ids: string[]
+  /**
+   * 这条事实依据的那批样品变了没有(§5.3 / AC-21)。
+   *
+   * **不要直接读它,走 `factsStale(row)`。** 后端没升级时它缺席,而
+   * `undefined` 是假值 —— 直接读的表现是**全库事实显示正常**,
+   * 也就是这一整条机制要防的那件事。退路只有 `factsStale` 一处。
+   */
+  facts_stale?: boolean
   confirmed_by: string | null
   confirmed_at: string | null
+}
+
+/**
+ * 「这条事实的样品变了没有」的唯一读取点。
+ *
+ * ## 缺席一律判过期
+ *
+ * 方向和后端 `AttributeValueOut.facts_stale: bool = True` 一致,而且是同一条
+ * 理由:缺席意味着**没有人算过它**,而"没算过"必须显示成"证明不了它仍然
+ * 成立"。反过来默认 `false` 的话,一次接口降级的表现是全库事实集体显示正常
+ * —— 运营照着一批可能已经不成立的事实去上架,而界面从头到尾没说过一句话。
+ *
+ * ## 为什么是一个函数而不是 `row.facts_stale ?? true` 散在各处
+ *
+ * 这个默认值是一个**决定**,不是一个写法。散开写的话,下一个消费点
+ * (导出、批量、看板)照着 `row.facts_stale` 抄一行就把方向反过来了,
+ * 而两个方向在界面上都"能用"。
+ */
+export function factsStale(row: Pick<AttributeValue, 'facts_stale'>): boolean {
+  return row.facts_stale ?? true
 }
 
 export const ATTRIBUTE_STATUS_LABEL: Record<string, { text: string; color: string }> = {
@@ -182,11 +210,22 @@ export const attributesApi = {
     (await apiClient.get<AttributeValue[]>(`/products/${productId}/attributes`)).data,
 
   /** 触发识别。M3 是同步的,几毫秒返回;接真实模型后这里会变成轮询 */
-  extract: async (productId: string, fields?: string[]) =>
+  /**
+   * 触发识别。`colorVariantIds` 用于**按颜色重试**(§11 第一行)。
+   *
+   * 上一次 run 的 `retry_scope` 已经算出该重跑哪几个颜色,在此之前
+   * 那个答案回到界面上没有任何入口能用,运营只能人工挑图 id ——
+   * 而挑漏一张的表现是该颜色重试完仍然缺证据,于是再付一次钱。
+   *
+   * 识别是**付费链路**,所以这里不给默认值:不传 = 整件商品重跑,
+   * 那是一个更贵的选择,必须由调用点显式做出来。
+   */
+  extract: async (productId: string, fields?: string[], colorVariantIds?: string[]) =>
     (
       await apiClient.post<Extraction>(`/products/${productId}/extract-attributes`, {
         fields: fields ?? null,
         media_asset_ids: null,
+        color_variant_ids: colorVariantIds ?? null,
       })
     ).data,
 

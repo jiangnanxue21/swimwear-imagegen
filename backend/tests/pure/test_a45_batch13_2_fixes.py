@@ -106,8 +106,8 @@ def test_nine_skus_in_three_colours_are_three_variants_to_every_reader():
     assert len(ids) == 3, f"九行 SKU 在读取方眼里是 {len(ids)} 个变体,应当是 3 个:{ids}"
 
 
-def test_the_identity_order_is_the_foreign_key_then_the_key_then_the_seed():
-    """三级顺序。**外键在最前,种子在最后。**
+def test_the_identity_order_is_the_foreign_key_then_the_seed():
+    """0046 后只剩两级:**外键在最前,种子在最后。**
 
     **退化成什么样:** 谁把 `variant_key` 挪到外键前面,新路径的行会全部
     掉到种子(它们没有 key),F1 原样回来;挪到种子后面则是存量行掉回
@@ -115,7 +115,7 @@ def test_the_identity_order_is_the_foreign_key_then_the_key_then_the_seed():
     """
     row = vk.VariantRow(sku="SW-1", key="Red", color="正红", uid="uuid-1")
     assert vk.identity_of(row) == "uuid-1"
-    assert vk.identity_of(vk.VariantRow(sku="SW-1", key="Red", color="正红")) == "Red"
+    assert vk.identity_of(vk.VariantRow(sku="SW-1", key="Red", color="正红")) == "正红"
     assert vk.identity_of(vk.VariantRow(sku="SW-1", color="正红")) == "正红"
     assert vk.identity_of(vk.VariantRow(sku="SW-1")) == "SW-1"
 
@@ -128,7 +128,7 @@ def test_the_source_label_agrees_with_the_identity_it_describes():
     """
     cases = [
         (vk.VariantRow(sku="SW-1", key="Red", color="红", uid="u"), vk.SOURCE_VARIANT_UID, "u"),
-        (vk.VariantRow(sku="SW-1", key="Red", color="红"), vk.SOURCE_VARIANT_KEY, "Red"),
+        (vk.VariantRow(sku="SW-1", key="Red", color="红"), vk.SOURCE_SEED, "红"),
         (vk.VariantRow(sku="SW-1", color="红"), vk.SOURCE_SEED, "红"),
         (vk.VariantRow(sku="SW-1"), vk.SOURCE_SEED, "SW-1"),
     ]
@@ -148,8 +148,8 @@ def test_whitespace_only_identities_do_not_count_as_assigned():
     assert vk.identity_source(row) == vk.SOURCE_SEED
 
 
-def test_rows_that_carry_both_identities_are_reported_as_shadowed():
-    """外键赢过 key 的那一刻必须有人喊一声。
+def test_the_retired_key_is_not_reported_as_shadowing_the_uuid():
+    """0046 为降级保留 key;外键和值同时存在是正常形状。
 
     这是三级身份**自己打开的**缺口:同时有外键和 key 的行,身份从 key 翻成
     外键,而属性 owner_id 与图片标签当初写的是 key。今天不存在这种行
@@ -159,7 +159,7 @@ def test_rows_that_carry_both_identities_are_reported_as_shadowed():
     图片绑定同时指向不存在的变体 —— 而回填本身跑得很干净,没有任何报错。
     """
     both = vk.VariantRow(sku="SW-9", key="Red", color="红", uid="uuid-9")
-    assert vk.drift([both])["identity_shadowed"] == ["SW-9"]
+    assert vk.drift([both])["identity_shadowed"] == []
     only_key = vk.VariantRow(sku="SW-8", key="Red", color="红")
     only_uid = vk.VariantRow(sku="SW-7", uid="uuid-7", variant_name="RED")
     assert vk.drift([only_key, only_uid])["identity_shadowed"] == [], (
@@ -209,14 +209,11 @@ def test_rows_with_no_identity_at_all_are_still_reported():
     assert vk.drift(seeded)["unassigned"] == ["OLD-1", "OLD-2"]
 
 
-def test_a_renamed_row_is_still_reported_when_its_identity_is_the_key():
-    """A-27 那条判据在 key 这一级上原样有效。
-
-    **退化成什么样:** `renamed` 被收窄成恒空,改过名的存量行不再列出来,
-    而"key 看着像颜色名"的人仍然会去解析它。
-    """
+def test_the_retired_key_does_not_drive_rename_diagnostics():
+    """0046 后 key 只为 downgrade 保留,不能重新成为运行时身份。"""
     renamed = vk.VariantRow(sku="SW-1", key="Red", color="Crimson")
-    assert vk.drift([renamed])["renamed"] == ["Red"]
+    assert vk.identity_of(renamed) == "Crimson"
+    assert vk.drift([renamed])["renamed"] == []
 
 
 def test_the_label_prefers_the_variant_name_over_a_hex_identity():

@@ -49,7 +49,16 @@ class Failure(Exception):
 #: 共用,写成两份字面量的下场是加了 `playwright-report` 却只加在一处,
 #: 于是另一条检查在有报告产物的机器上莫名其妙变红。
 _SKIPPED_DIRS: frozenset[str] = frozenset(
-    {"node_modules", ".git", "dist", "__pycache__", "test-results", "playwright-report"}
+    {
+        "node_modules",
+        ".venv",
+        "venv",
+        ".git",
+        "dist",
+        "__pycache__",
+        "test-results",
+        "playwright-report",
+    }
 )
 
 
@@ -116,6 +125,7 @@ def check_gitignore_covers_every_class_of_secret() -> None:
         "*.key": "任何私钥",
         "storage/": "真实素材与产出，会被挂成 /files 对外托管",
         "node_modules/": "前端依赖",
+        ".venv/": "仓库内 Python 虚拟环境",
         "*.tsbuildinfo": "TS 增量构建产物",
     }
     missing = [f"{pat}（{why}）" for pat, why in required.items() if pat not in body]

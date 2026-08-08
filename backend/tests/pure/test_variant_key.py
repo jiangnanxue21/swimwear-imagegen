@@ -14,13 +14,19 @@ import ast
 from pathlib import Path
 
 from app.attributes.validation import (
+    AttributeOwnerError,
     AttributeValueError,
     owner_for,
     split_variant_owner_id,
-    variant_owner_id,
 )
 from app.listings import variant_key as vk
 from tests.pure._helpers import BACKEND_ROOT, expect_raises
+
+#: 两个 `color_variants.id`。阶段 1 之后 VARIANT 层的 owner 就是它们。
+#: 写成常量而不是每处 `uuid4()`:用例要断言"同一个 id 算出同一个 owner",
+#: 随机值会让那条断言变成一句空话
+_CV_A = "0f9f1c2e-1111-4a00-8000-000000000001"
+_CV_B = "0f9f1c2e-2222-4a00-8000-000000000002"
 
 # --------------------------------------------------------------- 归一
 
@@ -90,13 +96,14 @@ def test_the_label_follows_the_rename_and_the_key_does_not():
 
 
 def test_refs_expose_both_names_for_one_variant():
+    uid = "11111111-1111-1111-1111-111111111111"
     rows = [
-        vk.VariantRow(sku="SW-1-S", key="black", color="曜石黑"),
-        vk.VariantRow(sku="SW-1-M", key="black", color="曜石黑"),
+        vk.VariantRow(sku="SW-1-S", uid=uid, key="black", color="曜石黑"),
+        vk.VariantRow(sku="SW-1-M", uid=uid, key="black", color="曜石黑"),
     ]
     refs = vk.refs_of(rows)
     assert len(refs) == 1
-    assert refs[0].key == "black" and refs[0].label == "曜石黑"
+    assert refs[0].key == uid and refs[0].label == "曜石黑"
 
 
 # --------------------------------------------------------------- 翻译
@@ -126,17 +133,17 @@ def test_an_unknown_tag_resolves_to_none():
 
 def test_drift_separates_a_harmless_rename_from_a_real_collision():
     rows = [
-        # 改过名 —— 正常,只是让人知道 key 不是当前颜色
-        vk.VariantRow(sku="SW-1-S", key="black", color="曜石黑"),
-        # 两个变体被改成同名 —— 真问题:界面上分不出该给哪个绑图
-        vk.VariantRow(sku="SW-2-S", key="red1", color="红色"),
-        vk.VariantRow(sku="SW-2-M", key="red2", color="红色"),
-        # 还没分到 key —— 仍然会被改名带偏,不许隐身
+        # 0046 后 key 只是降级资料,不能再驱动身份或改名诊断。
+        vk.VariantRow(sku="SW-1-S", uid="uid-black", key="black", color="曜石黑"),
+        # 两个 UUID 变体被改成同名 —— 真问题:界面上分不出该给哪个绑图。
+        vk.VariantRow(sku="SW-2-S", uid="uid-red1", key="red1", color="红色"),
+        vk.VariantRow(sku="SW-2-M", uid="uid-red2", key="red2", color="红色"),
+        # 还没有 UUID —— 仍然不许隐身。
         vk.VariantRow(sku="SW-3-S", key="", color="蓝"),
     ]
     report = vk.drift(rows)
-    assert "black" in report["renamed"]
-    assert report["label_collisions"] == ["red1", "red2"]
+    assert report["renamed"] == []
+    assert report["label_collisions"] == ["uid-red1", "uid-red2"]
     assert report["unassigned"] == ["SW-3-S"]
 
 
@@ -144,40 +151,62 @@ def test_ids_are_ordered_and_deduplicated():
     """进审计与错误消息时顺序要可复现,否则同一份数据两次批准
     给出的违规文案顺序不同,像是数据变了。"""
     rows = [
-        vk.VariantRow(sku="SW-1-M", key="black", color="黑"),
-        vk.VariantRow(sku="SW-1-S", key="black", color="黑"),
-        vk.VariantRow(sku="SW-1-R", key="red", color="红"),
+        vk.VariantRow(sku="SW-1-M", uid="uid-black", key="black", color="黑"),
+        vk.VariantRow(sku="SW-1-S", uid="uid-black", key="black", color="黑"),
+        vk.VariantRow(sku="SW-1-R", uid="uid-red", key="red", color="红"),
     ]
-    assert vk.ids_of(rows) == ["black", "red"]
+    assert vk.ids_of(rows) == ["uid-black", "uid-red"]
 
 
 # --------------------------------------------------------------- 跨 SPU 串档
 
 def test_two_spus_with_the_same_colour_do_not_share_an_attribute_row():
-    """本轮发现的那个洞。
+    """本轮发现的那个洞,**以及它今天是怎么被关掉的**。
 
     `product_attribute_values` 的唯一索引是 (owner_type, owner_id, field_name),
     **没有 SPU**。A43 把 VARIANT 的 owner_id 直接写成颜色名,于是给
     SPU-A 的黑色确认一次,SPU-B 的黑色跟着变,没有任何提示。
+
+    ## A45-batch14-28:守的还是这条不变式,机制换了
+
+    A44 用命名空间前缀关掉它;阶段 1 把 owner_id 切成 `color_variants.id`
+    之后,关掉它的是**UUID 本身全局唯一**。所以这一条不退役 —— 它守的
+    「同色跨 SPU 不许共用一行」从头到尾没变,退役的只是当时的实现。
+
+    断言因此改成对着 `owner_for()` 的出口问,而不是对着某一个铸造函数问:
+    换实现时它跟着换,换掉不变式时它变红。
     """
-    a = variant_owner_id(spu="SPU-SW-001", variant_id="black")
-    b = variant_owner_id(spu="SPU-SW-002", variant_id="black")
+    a = owner_for("primary_color", spu="SPU-SW-001", variant_id=_CV_A, sku="x")[1]
+    b = owner_for("primary_color", spu="SPU-SW-002", variant_id=_CV_B, sku="y")[1]
     assert a != b
 
+    # 反向:同一个颜色变体在两个 SPU 下**不可能出现** —— `color_variants`
+    # 的行本身就带 spu_id。真出现了那是数据损坏,不是这一层能救的
+    same = owner_for("primary_color", spu="SPU-SW-002", variant_id=_CV_A, sku="z")[1]
+    assert same == a, "同一个 color_variants.id 算出了两个 owner —— 身份不再稳定"
 
-def test_the_namespace_cannot_be_made_ambiguous_by_a_slash_in_the_spu():
-    """SPU 是自由文本(schemas 只校验长度),含斜杠不违法。
 
-    直接拼 `spu + "/" + variant` 的话:
+def test_the_legacy_namespace_still_parses_unambiguously():
+    """**存量行的解析口径。** 铸造退役了,解析没有。
+
+    库里 0046 之前写下的 VARIANT owner_id 还是 `<len>:<spu>/<variant_id>`,
+    而 SPU 是自由文本、含斜杠不违法:
+
         spu="A"   variant="B/C"  ->  "A/B/C"
         spu="A/B" variant="C"    ->  "A/B/C"
-    两个不同的变体拼出同一个 owner_id,后果与上一条一模一样。
+
+    长度前缀让这个歧义在结构上不存在。`orphaned_variant_owners()` 与
+    0046 的降级都靠它切,切错的表现是一批属性被认成属于另一个 SPU。
+
+    ## 期望值钉的是**字面量**,不是铸造函数的返回值
+
+    原来这里拿 `variant_owner_id()` 的输出当期望值。那本来就是一个弱断言:
+    铸造和解析一起漂的话 round-trip 照样成立,而库里真正躺着的那串字节
+    谁都读不了。铸造退役之后这个弱点必须补上 —— 字面量是唯一诚实的期望值。
     """
-    one = variant_owner_id(spu="A", variant_id="B/C")
-    two = variant_owner_id(spu="A/B", variant_id="C")
-    assert one != two
-    assert split_variant_owner_id(one) == ("A", "B/C")
-    assert split_variant_owner_id(two) == ("A/B", "C")
+    assert split_variant_owner_id("1:A/B/C") == ("A", "B/C")
+    assert split_variant_owner_id("3:A/B/C") == ("A/B", "C")
+    assert "1:A/B/C" != "3:A/B/C"
 
 
 def test_a_pre_a44_bare_owner_id_is_recognisably_not_namespaced():
@@ -187,16 +216,42 @@ def test_a_pre_a44_bare_owner_id_is_recognisably_not_namespaced():
     assert split_variant_owner_id("3:AB/x") is None  # 长度前缀对不上
 
 
-def test_owner_for_namespaces_variant_fields_and_leaves_the_others_alone():
+def test_owner_for_puts_the_variant_uuid_on_variant_fields_and_leaves_the_others_alone():
+    """VARIANT 层的 owner_id **就是** `color_variants.id`(阶段 1)。
+
+    命名空间随之退役:它的存在理由是变体 id 取值为颜色名,而 UUID 撞不上。
+    """
     kind, owner = owner_for(
-        "primary_color", spu="SPU-1", variant_id="black", sku="SW-1-BLK-S"
+        "primary_color", spu="SPU-1", variant_id=_CV_A, sku="SW-1-BLK-S"
     )
     assert kind.value == "VARIANT"
-    assert split_variant_owner_id(owner) == ("SPU-1", "black")
+    assert owner == _CV_A, "VARIANT 的 owner_id 不是裸 UUID —— 读写会对不齐"
+    assert split_variant_owner_id(owner) is None, "还在套命名空间"
 
-    # SPU 层不套命名空间:spu 本身就是全局唯一的
-    _, spu_owner = owner_for("pattern_type", spu="SPU-1", variant_id="black", sku="SW-1")
+    # SPU 层保持裸值:spu 本身就是全局唯一的
+    _, spu_owner = owner_for("pattern_type", spu="SPU-1", variant_id=_CV_A, sku="SW-1")
     assert spu_owner == "SPU-1"
+
+
+def test_owner_for_refuses_a_variant_id_that_is_not_a_uuid():
+    """**这一条是顺序装错时唯一会响的东西。**
+
+    `products.color_variant_id` 没回填的行,身份会掉到种子表达式
+    (`primary_color or sku`)。回落着写进去的话,值落在一个种子形式的
+    owner_id 上,而读取侧按 UUID 找 —— 值还在库里,界面上永远读不到,
+    **两侧都不报错**。§3.22 说的"识别侧静默丢颜色字段"就是这个形状。
+
+    所以不许回落,当场抛。而且抛的是 `AttributeOwnerError` 而不是
+    `AttributeValueError`:后者会被 `apply_evidence` 吞掉(见那个类的文档)。
+    """
+    expect_raises(
+        AttributeOwnerError,
+        owner_for,
+        "primary_color",
+        spu="SPU-1",
+        variant_id="black",
+        sku="SW-1",
+    )
 
 
 def test_a_variant_field_without_a_spu_is_refused():

@@ -215,16 +215,17 @@ def label_of(*, key: str, color: str | None) -> str:
 #: `identity_source()` 的三个取值。**不要写字面量** —— 诊断分级按它分桶,
 #: 各处各拼一份字符串的下场和 §3.4 一样。
 SOURCE_VARIANT_UID = "color_variant_id"
+# Kept for response/test compatibility while older clients still know the name.
+# Runtime identity selection no longer emits this source after migration 0046.
 SOURCE_VARIANT_KEY = "variant_key"
 SOURCE_SEED = "seed"
 
 
 def identity_of(row: VariantRow) -> str:
-    """一行商品属于哪个变体。**全仓唯一一份定义,三级顺序不许各写各的。**
+    """一行商品属于哪个变体。**全仓唯一一份定义,两级顺序不许各写各的。**
 
         1. `color_variant_id`   外键。batch13 起新建档路径写的就是它
-        2. `variant_key`        0027 分配的稳定 key,退役中
-        3. 种子表达式           `primary_color or sku`,会被改名带偏
+        2. 种子表达式           `primary_color or sku`,仅供未迁移行的诊断
 
     ## 为什么必须收成一处
 
@@ -233,27 +234,31 @@ def identity_of(row: VariantRow) -> str:
     没发现;加进外键这一级就会分叉,而分叉的表现正是本模块顶部警告的那个
     「导出铺三行、属性写一个变体」—— 两边都不报错,只有平台会。
 
-    ## 外键排在 key 前面,以及它埋着的那一颗雷
+    ## 为什么不再回落到 key
 
-    退役方向是外键当权威,所以顺序只能这样。但**同时有 uid 和 key 的行,
-    身份会从 key 翻成 uid**:今天不存在这种行(新路径写 uid 不写 key,
-    老路径写 key 不写 uid,两个集合不相交),而老建档路径切过来、或者给
-    存量行回填 `color_variant_id` 的那一刻,库里每一行都会同时有两个。
-
-    那一刻**不是一次数据迁移,是一次身份变更** —— 已确认的颜色属性挂在
-    `<len>:<spu>/<key>` 上,图片标签写的也是 key,身份一翻,两者同时指向
-    不存在的变体。回填必须和属性 owner_id、图片标签的改写在同一个动作里做
-    (阶段 1 第二批,`docs/DECISIONS.md` §3.23)。
-
-    在那之前,`drift()` 的 `identity_shadowed` 负责让这种行不隐身 ——
-    这一级打开的缺口由这一条测量,而不是靠"应该不会有人这么干"。
+    0046 已把属性 owner_id 与图片标签和 `color_variant_id` 一起迁移。
+    `variant_key` 的列和值只为 downgrade 保留;继续读取它会重新打开一条
+    非 UUID 身份路径,并把正常的迁移后形状误报成 `identity_shadowed`。
     """
     uid = (row.uid or "").strip()
     if uid:
         return uid
-    key = (row.key or "").strip()
-    if key:
-        return key
+    # ---- `variant_key` 这一级**退役了**(阶段 1,A45-batch14-28)----
+    #
+    # 它曾经在这里,而迁移 0046 已经把库里的两处消费点(属性 owner_id、
+    # 图片项变体标签)从 key 改写成了 `color_variants.id`,并且把
+    # `products.color_variant_id` 回填齐了 —— 那一次改写和回填是**同一个
+    # 动作**,理由见 §3.23 与 0046 的文件头。
+    #
+    # ## 为什么是删掉而不是留着当第二级
+    #
+    # 留着它就还有一条路径能产出非 UUID 的身份,而 `owner_for()` 现在对
+    # 非 UUID 的变体身份是**当场失败**的。两者并存的表现是:一批行在识别时
+    # 报错,而错误信息指向"没回填",实际原因是它回落到了一个已经退役的级别。
+    #
+    # 更要紧的是留着它会让"退役"变成一句没有落点的话。0046 为了可降级
+    # 刻意保留列和值,所以「同时有 uid 和 key」从此是正常迁移结果,
+    # **不能**再由 drift 报成异常;代码侧唯一正确动作是完全不读这一列。
     return seed_for(color=row.color, sku=row.sku)
 
 
@@ -265,8 +270,6 @@ def identity_source(row: VariantRow) -> str:
     """
     if (row.uid or "").strip():
         return SOURCE_VARIANT_UID
-    if (row.key or "").strip():
-        return SOURCE_VARIANT_KEY
     return SOURCE_SEED
 
 
@@ -365,28 +368,26 @@ def resolve_ref(ref: str | None, refs: list[VariantRef]) -> str | None:
 
 
 def drift(rows: list[VariantRow]) -> dict[str, list[str]]:
-    """稳定 key 换来的那两种新异常。**诊断,不阻断。**
+    """报告 UUID 身份目录里的异常。**诊断,不阻断。**
 
     key 不再跟着颜色走,于是出现了两种 A43 不可能有的状态:
 
-        renamed             key 与当前颜色已经对不上 —— 正常,说明改过名。
-                            列出来只为让\"key 看着像颜色名\"的人知道它不是。
-        label_collisions    两个 key 的当前颜色一样了。这是**真问题**:
+        renamed             兼容返回键。0046 后恒为空。
+        label_collisions    两个身份的当前颜色一样了。这是**真问题**:
                             界面上两个变体同名,运营分不出该给哪个绑图,
                             而 `resolve_ref()` 遇到它会拒绝翻译。
                             成因通常是把\"正红\"和\"大红\"都改成了\"红色\" ——
                             那是一次合并,应当显式做,不该由改名顺手完成。
-        unassigned          **身份只剩种子**的行 —— 既没有外键也没有 key,
-                            仍然走 `primary_color or sku`,也就是仍然会被
-                            改名带偏。
+        unassigned          **身份只剩种子**的行 —— 没有颜色外键,不能安全
+                            写入 UUID owner。
         key_label_conflicts 同一个身份下出现了两个不同的颜色(A-28)。
                             `refs_of()` 遇到它会**悄悄挑第一个**当目录名,
                             于是界面上这个变体叫什么取决于行的顺序。
                             成因是两行本该是两个变体却共用了身份,
                             或者其中一行的颜色被单独改过。
-        identity_shadowed   这一行同时有外键和 `variant_key`,而外键赢了 ——
-                            它的身份**已经不是**属性 owner_id 与图片标签
-                            当初写下的那个值。见 `identity_of()` 里那颗雷。
+        identity_shadowed   0046 后保留的兼容键。为保持接口形状继续返回,
+                            但必须恒为空:`variant_key` 只供 downgrade 使用,
+                            同时有外键和值是迁移后的正常形状,不是异常。
 
     五个列表都按 sku / 身份排序,输出可复现。
 
@@ -416,16 +417,10 @@ def drift(rows: list[VariantRow]) -> dict[str, list[str]]:
             unassigned.append(row.sku)
             continue
         identity = identity_of(row)
-        if source == SOURCE_VARIANT_UID and (row.key or "").strip():
-            shadowed.append(row.sku)
         # 颜色为空是"还不知道",不是"改过名" —— 与 mint_key 里
         # "空颜色不复用任何 key"是同一个立场
-        if (
-            source == SOURCE_VARIANT_KEY
-            and normalize(row.color)
-            and not key_matches_color(key=row.key, color=row.color, sku=row.sku)
-        ):
-            renamed.append(identity)
+        # `variant_key` 已退役,不再参与身份与改名诊断。保留 renamed 返回键
+        # 仅为接口兼容;新口径下它恒为空。
         by_label.setdefault(normalize(label_for_row(row)), set()).add(identity)
         if normalize(row.color):
             colors_by_key.setdefault(identity, set()).add(normalize(row.color))

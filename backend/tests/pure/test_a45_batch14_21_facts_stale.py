@@ -119,20 +119,43 @@ def test_channel_facts_do_not_participate_at_all():
     assert shared.scope is fp.SHARED, "共享作用域的键必须和指纹模块同一个约定"
 
 
-def test_the_variant_scope_comes_out_of_the_namespaced_owner_id():
-    """VARIANT 取的是 owner_id 里的变体段,不是整个 owner_id。
+def test_the_variant_scope_is_the_colour_uuid_itself():
+    """VARIANT 作用域取的必须是**能在 `fingerprints()` 里查到的那个键**。
 
-    owner_id 的格式是 `<len>:<spu>/<variant_id>`(A44 命名空间)。整个递给
-    `fingerprints()` 去查的话永远查不到 —— 那张表的键是
-    `media_assets.color_variant_id`,不带 SPU 前缀。
+    那张表的键是 `media_assets.color_variant_id`。阶段 1 之后属性
+    `owner_id` 就是同一个 UUID,所以这里原样取。
 
-    查不到的后果**不是报错**:`facts_stale` 判过期,于是每一条颜色事实
-    恒定显示"样品已变",运营点多少次都消不掉。一个不报错的死循环。
+    ## 这一条是切 UUID 那一刀下面最深的一处连带伤
+
+    这个函数原来只会 `split_variant_owner_id()`。owner_id 切成裸 UUID 之后
+    那个函数对每一行都返回 None,于是**每一条颜色事实都落回共享作用域** ——
+    给 A 色补一张图会 stale 掉 B 色的事实,也就是 D1 从后门原样回来,
+    而 AC-21 正是为它写的。
+
+    **它不会报错**:返回值合法、类型正确、`facts_stale` 照常算。
+    唯一的症状是一批本不该过期的事实开始过期,而那看起来像是"补图了,
+    该复核一下"——完全说得通。
     """
-    owner_id = va.variant_owner_id(spu="SPU-SW-001", variant_id="cv-black")
-    scope = va.fingerprint_scope(OwnerType.VARIANT, owner_id)
+    cv = "0f9f1c2e-1111-4a00-8000-000000000001"
+    scope = va.fingerprint_scope(OwnerType.VARIANT, cv)
     assert scope.participates is True
-    assert scope.scope == "cv-black", "取出来的不是变体段 —— 它永远查不到指纹"
+    assert scope.scope == cv, "取出来的不是颜色 UUID —— 它永远查不到指纹"
+
+
+def test_a_legacy_namespaced_owner_id_still_yields_its_variant_segment():
+    """0046 之前写下的行**仍然要能取出变体段**。
+
+    库里那批行是 `<len>:<spu>/<variant_id>`,而它们的变体段是 `variant_key`,
+    不是 UUID —— 于是取出来之后在 `fingerprints()` 里同样查不到,
+    `facts_stale` 判过期。**那是对的**:身份没迁完的行,系统证明不了
+    它仍然成立(`fingerprint_scope` 的文档最后一节)。
+
+    这里钉的是"取得出来",不是"查得到"。取不出来就落共享,而落共享会让
+    这批行跟着共享指纹走 —— 那是一个**更宽**的作用域,D1 的形状。
+    """
+    scope = va.fingerprint_scope(OwnerType.VARIANT, "10:SPU-SW-001/black")
+    assert scope.participates is True
+    assert scope.scope == "black", "存量行取不出变体段 —— 它会落回共享作用域"
 
 
 def test_a_variant_owner_id_that_cannot_be_split_falls_back_to_shared_not_to_skipping():

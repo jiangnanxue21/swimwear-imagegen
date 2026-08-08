@@ -45,8 +45,10 @@ from app.attributes import validation
 from app.core.enums import (
     AttributeSource,
     AttributeStatus,
+    MediaRole,
     MediaStatus,
     OwnerType,
+    RoleSource,
 )
 from app.media import service as media_service
 from app.models.media_asset import MediaAsset
@@ -58,7 +60,13 @@ pytestmark = pytest.mark.requires_db
 
 @pytest.fixture
 def spu(session):
-    row = Spu(spu_code=f"SPU-FS-{uuid.uuid4().hex[:6]}", internal_name="指纹用例款")
+    row = Spu(
+        spu_code=f"SPU-FS-{uuid.uuid4().hex[:6]}",
+        internal_name="指纹用例款",
+        audience="WOMEN",
+        base_category="swimwear",
+        created_by="test",
+    )
     session.add(row)
     session.flush()
     return row
@@ -105,6 +113,8 @@ def products(session, spu, colours):
 def _asset(session, product, *, colour=None, status=MediaStatus.READY):
     row = MediaAsset(
         product_id=product.id,
+        spu_id=product.spu_id,
+        spu=product.spu,
         source="MANUAL_UPLOAD",
         storage_path=f"products/{product.id}/{uuid.uuid4().hex[:8]}.jpg",
         mime_type="image/jpeg",
@@ -113,6 +123,8 @@ def _asset(session, product, *, colour=None, status=MediaStatus.READY):
         bytes=1024,
         sha256=uuid.uuid4().hex + uuid.uuid4().hex,
         status=status.value,
+        role=MediaRole.PRODUCT_FRONT.value,
+        role_source=RoleSource.HUMAN.value,
         color_variant_id=colour.id if colour is not None else None,
     )
     session.add(row)
@@ -297,6 +309,8 @@ def test_a_stale_required_fact_stops_the_product_from_looking_finished(
 
     product = products[0]
     _asset(session, product, colour=colours[0])
+    # 属性阶段只有在所有声明颜色都具备必需素材角色时才展示字段级问题。
+    _asset(session, products[1], colour=colours[1])
     _confirm(session, product, "material", "POLYESTER")
 
     before = wb.collect(session, product, dry_run=True)
@@ -307,7 +321,10 @@ def test_a_stale_required_fact_stops_the_product_from_looking_finished(
     assert "material" in after.flow.attribute.stale_confirmed
     codes = {i.code for i in after.result.issues}
     assert "ATTR_FACT_STALE" in codes
-    assert "ATTR_NOT_CONFIRMED" not in codes, (
+    assert not any(
+        issue.code == "ATTR_NOT_CONFIRMED" and issue.ref == "material"
+        for issue in after.result.issues
+    ), (
         "过期字段被报成「尚无可用值」—— 那句话会把运营送去跑一次付费识别,"
         "而识别产出 CANDIDATE,盖不掉人工值"
     )

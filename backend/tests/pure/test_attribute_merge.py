@@ -276,7 +276,7 @@ def test_nobody_writes_the_projection_columns_directly():
                "services/product_import.py"}
     offenders: list[str] = []
     for path in APP_DIR.rglob("*.py"):
-        rel = str(path.relative_to(APP_DIR))
+        rel = path.relative_to(APP_DIR).as_posix()
         if rel in allowed or rel.startswith("models/"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))

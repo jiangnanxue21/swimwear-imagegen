@@ -322,5 +322,5 @@ def test_only_one_writer_for_attribute_values():
         text = path.read_text(encoding="utf-8")
         # 排除类定义本身(`class ProductAttributeValue(Base, ...)`)
         if "ProductAttributeValue(" in text and "class ProductAttributeValue(" not in text:
-            writers.append(str(path.relative_to(APP_DIR)))
+            writers.append(path.relative_to(APP_DIR).as_posix())
     assert writers == ["attributes/service.py"], f"多处直接构造属性值:{writers}"

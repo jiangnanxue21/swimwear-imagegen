@@ -176,8 +176,24 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "R8",
         "拆不出来的裸变体 id 判成不参与(身份可疑的事实被宣布永远成立)",
         VAL,
-        "        if split is None:\n            return SHARED_FINGERPRINT_SCOPE",
-        "        if split is None:\n            return NOT_FINGERPRINTED",
+        # 缩进跟着 A45-batch14-28 变了一级:这一段现在住在 UUID 分支的
+        # `except` 里(owner_id 切 UUID 之后先按 UUID 认,认不出才回落解析)。
+        # 锚点更新而不是退役 —— 它验的那件事一个字都没变
+        "            if split is None:\n                return SHARED_FINGERPRINT_SCOPE",
+        "            if split is None:\n                return NOT_FINGERPRINTED",
+    ),
+    (
+        "R8b",
+        "VARIANT 作用域退回只解析命名空间(owner_id 切 UUID 之后 D1 从后门回来)",
+        VAL,
+        # **本批最贵的一条变异。** 删掉 UUID 那一支之后:
+        # `split_variant_owner_id()` 对每一行裸 UUID 都返回 None ->
+        # 每一条颜色事实落回共享作用域 -> 给 A 色补图 stale 掉 B 色事实。
+        # 返回值合法、类型正确、`facts_stale` 照常算,**一个断言都不会因为
+        # 类型或异常而红** —— 只有真的问"取出来的是不是那个 UUID"才咬得住。
+        "        try:\n            variant_id = str(UUID(owner_id.strip()))\n"
+        "        except (ValueError, AttributeError, TypeError):",
+        "        if True:",
     ),
     (
         "R9",

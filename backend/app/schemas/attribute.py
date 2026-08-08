@@ -12,6 +12,7 @@ from app.core.field_limits import (
     MAX_EXTRACT_FIELDS,
     MAX_EXTRACT_MEDIA_IDS,
 )
+from app.listings.sku_matrix import MAX_VARIANTS_PER_SPU
 
 
 class ExtractionOut(BaseModel):
@@ -135,6 +136,31 @@ class ExtractRequest(BaseModel):
         default=None, max_length=MAX_EXTRACT_MEDIA_IDS
     )
     fields: list[str] | None = Field(default=None, max_length=MAX_EXTRACT_FIELDS)
+    #: 只重跑这几个颜色作用域(§11 第一行的另一半)。
+    #:
+    #: ## 这个入参在此之前**不存在**,而重试范围已经算出来了
+    #:
+    #: `run_state.outcome_by_scope()` 从 14-13 起就在算 `RunOutcome.retry_scope`
+    #: ——「这次 run 里哪几个颜色一条证据都没拿到」—— service 也把它回给了
+    #: 调用方。缺的一直是**回来的那一跳**:调用方拿到「重试藏青和米白」这个
+    #: 答案,却没有任何入参能表达它,只能人工去挑图 id。
+    #:
+    #: 挑图 id 不是"麻烦一点"而已:重试范围决定下一次付多少钱,而人工挑漏
+    #: 一张的表现是那个颜色重试完仍然缺证据,于是再重试一次 —— 每一轮都是
+    #: 真金白银。
+    #:
+    #: ## 与 `media_asset_ids` 是**交集**,不是二选一
+    #:
+    #: 两个都传时取交集(该颜色的、且在这个清单里的)。取并集的话
+    #: 「只重跑这几张图」会被一个颜色作用域悄悄扩大成整个颜色,
+    #: 而那是一次更贵的调用 —— 放宽范围这件事必须是有人明确要求的。
+    #:
+    #: ## 上限借 `MAX_VARIANTS_PER_SPU`,不另立一个数
+    #:
+    #: 一个 SPU 的颜色数上限就是这个量的天花板,再定义一个只会分叉。
+    color_variant_ids: list[UUID] | None = Field(
+        default=None, max_length=MAX_VARIANTS_PER_SPU
+    )
 
 
 class ConfirmItem(BaseModel):

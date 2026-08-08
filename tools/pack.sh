@@ -82,6 +82,8 @@ FORBIDDEN_DIRS=(
   __pycache__         # 构建产物
   .pytest_cache
   .ruff_cache
+  .venv
+  venv
   node_modules
   dist
   coverage
@@ -100,7 +102,6 @@ CONTENT_ONLY_DIRS=(
 # 单个文件。不含 / 的按 basename 匹配(任意层级),含 / 的按仓库根锚定。
 FORBIDDEN_FILES=(
   '.env'                  # 上一版复验只有 `(^|/)\.env$`,$ 锚点管不到
-  '.env.*'                # .env.local;而 *.env 覆盖 staging.env /
   '*.env'                 # production.env 这类 —— 实测这条真的漏出去过
   '*.key'
   '*.pem'
@@ -109,6 +110,15 @@ FORBIDDEN_FILES=(
   '*.pyo'
   '*.tsbuildinfo'
   '.DS_Store'
+)
+
+# `.env.example` 是零凭据模板,解包后的配置契约与 `make init` 都依赖它。
+# 不能把 `.env.*` 当普通 basename glob:Info-ZIP 没有可靠的“排除但反选一个”语义。
+# 所以先排除整类,再只把这一个明确允许的文件补回；复验侧同样只豁免精确路径。
+ENV_DOTFILE_GLOB='.env.*'
+ENV_EXAMPLES=(
+  '.env.example'
+  'frontend/.env.example'
 )
 
 # ---------------------------------------------------------------- 清单生成
@@ -154,12 +164,16 @@ for f in "${FORBIDDEN_FILES[@]}"; do
   fi
 done
 
+EXCLUDES+=( "$ENV_DOTFILE_GLOB" "*/$ENV_DOTFILE_GLOB" )
+FORBIDDEN+=( '(^|/)\.env\.[^/]+$' )
+
 # ---------------------------------------------------------------- 打包
 #
 # -X 去掉 UID/GID 等本机 extra field。默认 zip 会把打包者的数字 uid/gid
 # 写进每一个条目 —— 对外交付时这是白送的可识别元数据。
 echo "==> 打包 $OUT"
 zip -q -r -X "$OUT" . -x "${EXCLUDES[@]}"
+zip -q -X "$OUT" "${ENV_EXAMPLES[@]}"
 
 # ---------------------------------------------------------------- 打完再验一遍
 #
@@ -171,10 +185,16 @@ zip -q -r -X "$OUT" . -x "${EXCLUDES[@]}"
 # `./` 时,四条必备文件会被全判为缺失,而报错信息("缺少必备文件")
 # 会把人引向完全错误的方向。这里统一归一化,两侧共用同一份 LISTING。
 LISTING="$(unzip -Z1 "$OUT" | sed 's|^\./||')"
+# 只放行仓库声明的两个模板路径。不能按 basename 豁免,否则任意子目录放一份
+# `.env.example` 都能绕过凭据复验。
+LISTING_WITHOUT_ENV_EXAMPLES="$(
+  printf '%s\n' "$LISTING" |
+    grep -vxF -e "${ENV_EXAMPLES[0]}" -e "${ENV_EXAMPLES[1]}" || true
+)"
 FAILED=0
 
 for pattern in "${FORBIDDEN[@]}"; do
-  HITS="$(printf '%s\n' "$LISTING" | grep -E "$pattern" || true)"
+  HITS="$(printf '%s\n' "$LISTING_WITHOUT_ENV_EXAMPLES" | grep -E "$pattern" || true)"
   if [ -n "$HITS" ]; then
     echo "!! 交付包里出现禁止的内容(模式 $pattern):"
     # 走 while read 而不是 printf '%s\n' $HITS —— 后者未加引号,
@@ -193,6 +213,8 @@ done
 # 纯测试当场 FileNotFoundError,而打包这一步没有任何征兆。
 # 清单与 `verify_delivery.py` 的硬失败项对齐:少了它们,解包侧的门禁必红。
 REQUIRED=(
+  '.env.example'
+  'frontend/.env.example'
   '.gitignore'
   '.github/workflows/ci.yml'
   'backend/tools/verify_delivery.py'

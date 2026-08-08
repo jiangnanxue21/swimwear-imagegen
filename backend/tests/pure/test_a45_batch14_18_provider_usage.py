@@ -351,6 +351,7 @@ def test_record_usage_defaults_to_inferred_so_a_forgotten_wire_up_stays_honest()
         zip(
             [a.arg for a in fn.args.kwonlyargs],
             [None if d is None else ast.unparse(d) for d in fn.args.kw_defaults],
+            strict=False,
         )
     )
     assert COLUMN in defaults, f"record_usage 没有 {COLUMN} 这个关键字参数"

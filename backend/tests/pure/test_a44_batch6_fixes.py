@@ -202,26 +202,37 @@ def test_the_display_name_helper_prefers_the_current_colour():
     )
 
 
-def test_the_namespaced_owner_id_round_trips():
-    """C-14 的另一半:命名空间形式必须**可逆**。
+def test_the_legacy_namespaced_owner_id_still_parses():
+    """C-14 的另一半。**铸造在阶段 1 退役了,解析没有。**
 
-    拼得出、拆不回来的话,`orphaned_variant_owners()` 报出来的东西没人看得懂,
-    而 `0027` 的 downgrade 会切错(那正是 C-13)。
+    库里 0046 之前写下的行还是 `<len>:<spu>/<variant_id>`,而
+    `orphaned_variant_owners()` 与 0046 的降级都要切它。切错的表现是
+    一批属性被认成属于另一个 SPU(那正是 C-13)。
+
+    ## 期望值从"铸造函数的返回值"换成了**字面量**
+
+    原来这条是 round-trip:拼一个再拆回来。那是一个弱断言 —— 铸造和解析
+    一起漂的话它照样绿,而库里真正躺着的那串字节谁都读不了。铸造退役之后
+    这个弱点必须补上,所以下面钉的是真实字节。
     """
     from app.attributes import validation
 
-    for spu, variant in [
-        ("SW-001", "black"),
-        ("AB/CD", "Red"),
-        ("A:B", "Red~2"),
-        ("SW-1", "Red/Blue"),
+    for raw, expected in [
+        ("6:SW-001/black", ("SW-001", "black")),
+        ("5:AB/CD/Red", ("AB/CD", "Red")),
+        ("3:A:B/Red~2", ("A:B", "Red~2")),
+        ("4:SW-1/Red/Blue", ("SW-1", "Red/Blue")),
     ]:
-        owner = validation.variant_owner_id(spu=spu, variant_id=variant)
-        assert validation.split_variant_owner_id(owner) == (spu, variant), (
-            f"{owner!r} 拆不回 ({spu!r}, {variant!r})"
+        assert validation.split_variant_owner_id(raw) == expected, (
+            f"{raw!r} 拆不回 {expected!r} —— 存量行会被认成属于另一个 SPU"
         )
     # 裸 id(A44 之前写下的)必须**明确**拆不出来 —— 那个 None 是巡检的信号
     assert validation.split_variant_owner_id("black") is None
+    # 阶段 1 之后写下的是裸 UUID,同样拆不出来,而那是**对的**:
+    # 它不需要被拆,`fingerprint_scope` 先按 UUID 认它
+    assert validation.split_variant_owner_id(
+        "0f9f1c2e-1111-4a00-8000-000000000001"
+    ) is None
 
 
 # ==========================================================

@@ -57,10 +57,10 @@ def _calls(node: ast.AST) -> set[str]:
 # ==========================================================
 
 
-def _row(sku: str, color: str | None, key: str | None):
+def _row(sku: str, color: str | None, key: str | None, uid: str | None = None):
     from app.listings.variant_key import VariantRow
 
-    return VariantRow(sku=sku, color=color, key=key)
+    return VariantRow(sku=sku, color=color, key=key, uid=uid)
 
 
 def test_a_disambiguated_key_is_not_reported_as_renamed():
@@ -90,12 +90,12 @@ def test_a_truncated_key_is_not_reported_as_renamed():
     assert variant_key.drift([_row("SW-2", long_color, key)])["renamed"] == []
 
 
-def test_a_real_rename_is_still_reported():
-    """放宽之后不能把真改名一起放过去 —— 否则这条修复是把诊断关掉。"""
+def test_the_retired_key_no_longer_drives_rename_diagnostics():
+    """0046 后 key 只供降级；运行时不能再从它推断改名。"""
     from app.listings import variant_key
 
     out = variant_key.drift([_row("SW-3", "Crimson", "Red~2")])
-    assert out["renamed"] == ["Red~2"], f"真改名没报出来:{out}"
+    assert out["renamed"] == [], f"退役 key 仍在驱动诊断:{out}"
 
 
 def test_an_empty_colour_is_not_a_rename():
@@ -114,8 +114,11 @@ def test_the_same_key_with_two_colours_is_reported():
     """
     from app.listings import variant_key
 
-    out = variant_key.drift([_row("SW-5", "Red", "Red"), _row("SW-6", "Blue", "Red")])
-    assert out["key_label_conflicts"] == ["Red"], (
+    uid = "11111111-1111-1111-1111-111111111111"
+    out = variant_key.drift(
+        [_row("SW-5", "Red", "Red", uid), _row("SW-6", "Blue", "Red", uid)]
+    )
+    assert out["key_label_conflicts"] == [uid], (
         f"同 key 两个颜色没有报出来:{out}"
     )
 

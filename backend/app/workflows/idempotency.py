@@ -20,7 +20,6 @@ import hashlib
 import json
 from typing import Any
 
-
 #: 幂等键的长度上限。**与 `generation_tasks.idempotency_key` 的列宽同源。**
 #:
 #: 迁移 0041 把列从 128 扩到 256。这个常量原来是写死在 `[:128]` 里的字面量,

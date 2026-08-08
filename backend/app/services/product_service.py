@@ -83,6 +83,39 @@ def assert_colour_belongs_to(
         )
 
 
+def colours_for(session: Session, product: Product) -> list[ColorVariant]:
+    """这件商品**可以选**的颜色(§4.3)。按 `sort_order` 排。
+
+    ## 为什么是一个函数,而不是让前端自己走 product -> spu -> colours
+
+    这份清单是 `assert_colour_belongs_to` 那道校验的**补集的补集**:
+    界面能选到的,必须恰好是服务端会接受的。让前端自己拼这条链路的话,
+    两份口径立刻分叉,而分叉的表现不对称 ——
+
+        界面多列了一个颜色    运营选中、上传、拿到一个 422,他不知道为什么
+        界面少列了一个颜色    那个颜色**永远传不了图**,于是它永远缺正面图,
+                              而完整度门禁会一直说缺图,没有任何提示指向原因
+
+    后一种没有任何人会报成 bug。所以两边共用同一个取数,而不是共用一句约定。
+
+    ## 没有 SPU 时返回空表,不抛错
+
+    与 `assert_colour_belongs_to` 的 409 方向一致但语气不同:那里是
+    「你**做**了一件做不了的事」,这里是「你能选的有哪些」——
+    答案是"一个也没有",那是一句完整的话。抛错的话,一件老路径商品的
+    素材页会整页报错,而它本来只是不能按颜色上传而已。
+    """
+    if product.spu_id is None:
+        return []
+    return list(
+        session.scalars(
+            select(ColorVariant)
+            .where(ColorVariant.spu_id == product.spu_id)
+            .order_by(ColorVariant.sort_order, ColorVariant.variant_code)
+        )
+    )
+
+
 def get_product(session: Session, product_id: UUID) -> Product:
     product = session.get(Product, product_id)
     if product is None:

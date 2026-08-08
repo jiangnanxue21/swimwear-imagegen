@@ -19,6 +19,15 @@ export interface MediaAsset {
   role_source: 'HUMAN' | 'RULE' | 'MODEL' | 'UNSET'
   role_confidence: number | null
   variant_hint: string | null
+  /**
+   * 这张图归属到哪个颜色(§4.8 的归属外键)。空 = 通用图。
+   *
+   * **不许和 `variant_hint` 合并。** 那一列是模型猜的「识别建议位」,
+   * 这一列是人在上传时指定的归属,而 §6.2 颜色完整度门禁、§5.3 颜色指纹
+   * 读的都是这一列。拿 hint 顶上的表现是:界面按 A 色显示的一张图,
+   * 在门禁和指纹眼里属于共享作用域 —— 同一张图有两个答案,而两边都不报错。
+   */
+  color_variant_id: string | null
   storage_path: string
   mime_type: string
   width: number

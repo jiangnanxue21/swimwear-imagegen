@@ -58,7 +58,7 @@ from app.models.listing_copy import ContentPlan, ListingCopy, ListingDraft
 from app.models.listing_image import ListingImageItem, ListingImageSet
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
-from app.services import audit
+from app.services import audit, product_service
 from app.workbench import audience_rules as audience_gate
 from app.workbench import flow as flow_rules
 from app.workbench import platform as pf
@@ -133,16 +133,27 @@ def _audience_facts(product: Product) -> AudienceFacts:
 
 
 def _material_facts(session: Session, product: Product) -> MaterialFacts:
+    # 颜色完整度是 SPU 门禁：同款各颜色通常落在不同 SKU 行。只按当前
+    # product_id 查会把其余已上传颜色误报成缺图。历史无 spu_id 行仍按商品。
+    owner_filter = (
+        MediaAsset.spu_id == product.spu_id
+        if product.spu_id is not None
+        else MediaAsset.product_id == product.id
+    )
     rows = list(
         session.scalars(
             select(MediaAsset).where(
-                MediaAsset.product_id == product.id,
+                owner_filter,
                 MediaAsset.status != MediaStatus.DELETED.value,
             )
         )
     )
     usable = [r for r in rows if r.status == MediaStatus.READY.value]
     usable_roles = frozenset(r.role for r in usable if r.role)
+    # 声明过的颜色。**取数与上传接口的白名单同源**(`product_service.colours_for`)
+    # —— 门禁判「这个颜色缺图」和界面让人「给这个颜色传图」必须是同一组颜色,
+    # 否则会出现一个判得出缺图、却选不到的颜色,而那条阻断永远解不开
+    colours = product_service.colours_for(session, product)
     return MaterialFacts(
         total=len(rows),
         usable=len(usable),
@@ -159,18 +170,32 @@ def _material_facts(session: Session, product: Product) -> MaterialFacts:
         # 素材满足完整度门禁** —— 一个不报错、只是让隔离形同虚设的洞。
         gate_roles=sample_completeness.gate_roles(usable),
         # A45-batch14-15:归属外键落库之后,颜色作用域这一半才有真数据可递。
-        # 颜色维**由素材自己带出来**,不传一份颜色清单 —— 与
-        # `scope_fingerprint.fingerprints()` 同一条理由:清单漏了一个颜色时,
-        # 那个颜色永远不会被判「缺图」,而漏了不会有任何征兆
+        #
+        # **A45-batch14-27 改了颜色维的来源。** 原来是
+        # `{str(a.color_variant_id) for a in usable if ...}` —— 从素材里数。
+        # 那条理由(与 `scope_fingerprint.fingerprints()` 同源)对指纹成立,
+        # 对**门禁**是反的:一个一张图都没传的颜色在素材里留不下痕迹,
+        # 于是它永远不进这张表、永远不被判缺图,而那正是门禁最该拦的一种。
+        # 完整说明在 `MaterialFacts.variant_labels` 上。
+        #
+        # 取**并集**而不是只取声明清单:一张挂在已下架颜色上的存量图
+        # 不该凭空消失 —— 那种行需要有人处理,让它隐身等于把问题藏起来。
         variant_gate_roles={
             variant: sample_completeness.variant_gate_roles(usable, variant)
             for variant in sorted(
-                {
+                {str(v.id) for v in colours}
+                | {
                     str(a.color_variant_id)
                     for a in usable
                     if getattr(a, "color_variant_id", None)
                 }
             )
+        },
+        # 名字而不是 UUID。一件三色商品缺两色正面图时,三条一模一样的
+        # 「缺少正面图」让运营无从知道该给哪个颜色补图
+        variant_labels={
+            str(v.id): (v.working_name or v.display_name or v.variant_code)
+            for v in colours
         },
         confirmable_roles=sample_completeness.confirmable_roles(usable),
     )

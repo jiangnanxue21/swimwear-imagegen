@@ -377,6 +377,30 @@ class MaterialFacts:
     #: 每个颜色都拿到全 SPU 的角色集合,于是「B 色一张正面图都没有」
     #: 会被判成合格 —— 与 `gate_roles` 那条默认值同一个理由。
     variant_gate_roles: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: 颜色 id -> 给运营看的名字。**同时它的键就是「这个 SPU 声明了哪些颜色」。**
+    #:
+    #: ## 为什么颜色维不能从素材反推(D1,A45-batch14-27)
+    #:
+    #: `variant_gate_roles` 的键原来是从素材行上的 `color_variant_id` 数出来的
+    #: (「颜色维由素材自己带出来」)。那个理由对**指纹**成立 —— 一个没有素材的
+    #: 颜色算不出指纹,也没有事实需要过期。
+    #:
+    #: 对**完整度门禁**它是反的:门禁要回答的正是「哪个颜色还缺图」,而一个
+    #: 一张图都没有的颜色在素材里留不下任何痕迹,于是它永远不进这张表、
+    #: 永远不被判缺图。**门禁最该拦的那一种,恰好是它唯一看不见的那一种。**
+    #:
+    #:     备选:继续从素材反推   零改动,但「B 色一张图都没传」静默放行,
+    #:                           而界面上 B 色连一个分组都不会出现
+    #:     选错的后果             一件只传了 A 色图的商品一路走到刊登,
+    #:                           B 色的图片集拿不到样品 —— 而没有任何一步报错
+    #:
+    #: 所以键取**声明过的颜色**(`color_variants` 表),素材只决定值。
+    #: 两者的并集仍然进表:一张挂在已下架颜色上的存量图不该凭空消失。
+    #:
+    #: 守卫:`test_the_colour_dimension_comes_from_the_declared_list_not_the_assets`
+    #: —— 它构造一个「声明了三色、只传了一色图」的 facts,断言另外两色进了
+    #: 缺图清单。退回素材反推的话它当场红。
+    variant_labels: dict[str, str] = field(default_factory=dict)
     #: 「确认一下角色就能解开门禁」的角色,已排序。非空即意味着门禁没过
     #: (`sample_completeness.confirmable_roles` 的性质),所以它同时是
     #: 「补图」与「确认角色」两条动线的分岔依据
@@ -619,6 +643,48 @@ def _evaluate_material(facts: MaterialFacts) -> StepResult:
                 ref=group[0],
             )
         )
+
+    # ---- §6.2 颜色作用域:每个颜色各自要有一张够格的样品 ----
+    #
+    # 这一段以前**不存在**。`variant_gate_roles` 从 14-15 起就算好并递到了
+    # `MaterialFacts` 上,而全仓没有任何一处读它 —— 判定穷举验过、接线也在,
+    # 中间断的是最后一跳,所以两侧的测试都绿着。§3.32 说的「算出来没有地方
+    # 显示的清单」在这里是「算出来没有人判的清单」,后者更贵:它看起来像
+    # 一道已经生效的门禁。
+    #
+    # ## 顺序:排在 SPU 那一段之后
+    #
+    # SPU 作用域一张够格的图都没有时,逐颜色再报一遍等于把同一句话说 N+1 遍。
+    # 但**不 early-return** —— 「共享有正面图、B 色没有」是真实且常见的一档,
+    # 而它恰恰是 D1 那个缺陷要暴露的形状。
+    #
+    # ## 级别与 SPU 那一档一致(BLOCKING)
+    #
+    # 降成 REMINDER 的话,`summarize()` 不计数、列表页不显示徽标,于是
+    # 「B 色缺正面图」这件事只在详情页第三屏可见,而运营是在列表页决定
+    # 今天做哪几件商品的。§6.2 把颜色完整度写成门禁,不是提醒。
+    for variant_id in sorted(facts.variant_gate_roles):
+        label = facts.variant_labels.get(variant_id, variant_id)
+        for group in gate.missing_role_groups(facts.variant_gate_roles[variant_id]):
+            issues.append(
+                Issue(
+                    level=IssueLevel.BLOCKING,
+                    code="MATERIAL_VARIANT_MISSING_REQUIRED_ROLE",
+                    # 带颜色名。只说「缺少正面图」的话,一件三色商品会得到
+                    # 三条一模一样的阻断,运营无从知道该给哪个颜色补图 ——
+                    # 而"补错颜色"在界面上没有任何反馈:那张图会进另一个
+                    # 颜色的作用域,原来那条阻断纹丝不动
+                    message=f"{label} 缺少{gate.group_label(group)}",
+                    target_step=FlowStep.MATERIAL,
+                    hint=(
+                        "按颜色上传:在素材页选中这个颜色再传图。"
+                        "通用图(不选颜色)只进 SPU 作用域,证明不了某个颜色有正面照"
+                    ),
+                    # `ref` 是跳转依据,给**颜色 id** 而不是角色 —— 前端要跳的是
+                    # 「那个颜色的分组」,而角色在 SPU 那一档已经带过了
+                    ref=variant_id,
+                )
+            )
 
     if facts.usable == 0 and facts.total == 0:
         issues.append(

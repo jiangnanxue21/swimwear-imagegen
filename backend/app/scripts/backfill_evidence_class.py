@@ -44,10 +44,10 @@ from collections import Counter
 
 from sqlalchemy import func, select
 
+from app.attributes.service import EVIDENCE_IMPORTED_URL_TRUSTED
 from app.core.logging import get_logger, setup_logging
 from app.db.session import SessionLocal
 from app.media.evidence_rules import derive_evidence_class, violates_ai_check
-from app.attributes.service import EVIDENCE_IMPORTED_URL_TRUSTED
 from app.models.media_asset import MediaAsset
 
 logger = get_logger(__name__)

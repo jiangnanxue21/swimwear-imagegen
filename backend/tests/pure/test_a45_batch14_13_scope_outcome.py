@@ -60,7 +60,7 @@ def _wired_entry(module: str) -> tuple[str, ...]:
             continue
         if node.target.id != "WIRED_MODULES" or node.value is None:
             continue
-        for key, value in zip(node.value.keys, node.value.values):
+        for key, value in zip(node.value.keys, node.value.values, strict=False):
             if isinstance(key, ast.Constant) and key.value == module:
                 return tuple(
                     e.value for e in value.elts if isinstance(e, ast.Constant)
@@ -114,7 +114,10 @@ def test_the_whole_four_image_space_is_enumerated():
     checked = 0
     for scopes in itertools.product(placements, repeat=4):
         for oks in itertools.product((True, False), repeat=4):
-            rows = [R(scope=s, succeeded=ok) for s, ok in zip(scopes, oks)]
+            rows = [
+                R(scope=s, succeeded=ok)
+                for s, ok in zip(scopes, oks, strict=False)
+            ]
             got = rs.outcome_by_scope(rows)
             assert got.failed_scopes == _expected_failed(rows), (
                 f"{scopes} / {oks}:算出 {got.failed_scopes},"
@@ -135,7 +138,10 @@ def test_the_enumeration_is_not_vacuous():
     placements = (None, "A", "B")
     for scopes in itertools.product(placements, repeat=4):
         for oks in itertools.product((True, False), repeat=4):
-            rows = [R(scope=s, succeeded=ok) for s, ok in zip(scopes, oks)]
+            rows = [
+                R(scope=s, succeeded=ok)
+                for s, ok in zip(scopes, oks, strict=False)
+            ]
             seen.add(len(rs.outcome_by_scope(rows).failed_scopes))
     assert seen == {0, 1, 2}, f"失败清单的规模只出现过 {sorted(seen)}"
 
@@ -407,7 +413,10 @@ def test_the_run_status_is_the_shared_scope_and_not_a_second_algorithm():
     placements = (None, "A", "B")
     for scopes in itertools.product(placements, repeat=3):
         for oks in itertools.product((True, False), repeat=3):
-            rows = [R(scope=s, succeeded=ok) for s, ok in zip(scopes, oks)]
+            rows = [
+                R(scope=s, succeeded=ok)
+                for s, ok in zip(scopes, oks, strict=False)
+            ]
             out = rs.outcome_by_scope(rows)
             assert out.status is out.scopes[0].status
             # 与按计数的那条路逐组一致

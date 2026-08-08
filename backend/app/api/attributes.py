@@ -89,6 +89,11 @@ def extract_attributes(
         extractor=get_extractor(),
         fields=tuple(payload.fields) if payload.fields else None,
         only_media_ids=payload.media_asset_ids,
+        # §11 第一行的另一半:上一次 run 的 `retry_scope` 算出了该重跑哪几个
+        # 颜色,这里是它回来的那一跳。在此之前那个答案回给了调用方,
+        # 而调用方没有任何入参能表达它 —— 只能人工挑图 id,而挑漏一张的
+        # 表现是那个颜色重试完仍然缺证据,于是再付一次钱重试一次
+        only_variant_ids=payload.color_variant_ids,
     )
     # A2:一张都没成功时不合并证据 —— 没有证据可合并,跑一遍只会在审计里
     # 留下一次"什么都没改"的属性写入,还让界面误以为识别过了。

@@ -55,6 +55,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from app.attributes.registry import REGISTRY, AttributeField, ValueType
 from app.core.enums import OwnerType
@@ -84,6 +85,30 @@ class AttributeValueError(ValueError):
         self.field_name = field_name
         self.reason = reason
         super().__init__(f"{field_name}: {reason}")
+
+
+class AttributeOwnerError(AttributeValueError):
+    """**这个值算不出它该挂在谁身上。** 与"值不合契约"分开的那一半。
+
+    ## 为什么必须是一个单独的类型
+
+    `apply_evidence` 对 `AttributeValueError` 的处理是 `logger.warning + continue`,
+    而那条处理**对它的本意是对的**:模型偶尔吐一个不在枚举里的值是常态,
+    让它炸掉整次识别意味着另外 7 个正常字段也写不进去。
+
+    但同一个 `except` 也接住了"owner 坐标算不出来"。两者的性质完全相反:
+
+        值不合契约    一个字段没被采信,证据还在,人在详情页看得到
+        坐标算不出来  **这件商品的整个 VARIANT 层静默消失** —— 界面显示
+                      "识别完成"加一个空的主色,而运营没有任何理由怀疑它
+
+    §3.22 与 `identity_of()` 那颗雷警告过的正是后者:owner_id 切 UUID 而
+    `products.color_variant_id` 还没回填的话,识别侧会静默跳过颜色字段。
+    **那个"静默"就在这个 except 上。** 分成两个类型之后,顺序装错的表现
+    从"少了一批字段没人知道"变成"这次识别当场失败并说出原因"。
+
+    装错顺序仍然是错的 —— 这个类型不让它变对,只让它不再无声。
+    """
 
 
 def validate_attribute_value(field_name: str, value: Any) -> Any:
@@ -116,8 +141,25 @@ def validate_attribute_value(field_name: str, value: Any) -> Any:
 _VARIANT_NS = "/"
 
 
-def variant_owner_id(*, spu: str, variant_id: str) -> str:
-    """VARIANT 层的 owner_id。**必须带 SPU 命名空间**(A44)。
+def legacy_variant_owner_prefix(spu: str) -> str:
+    """存量 owner_id 的 SPU 命名空间前缀。**只给巡检与迁移用。**
+
+    命名空间 hack 本身在阶段 1 退役了(见 `owner_for`),但**库里 0046
+    之前写下的行还是那个形状**,而 `orphaned_variant_owners()` 要按 SPU
+    把它们挑出来。留一个只算前缀的函数,而不是留下整个 `variant_owner_id`:
+
+        留整个铸造函数   下一个人会拿它去写新数据,而写进去的值读取侧
+                         按 UUID 找,永远读不到 —— 两边都不报错
+        只留前缀         它拼不出一个完整的 owner_id,想误用都用不了
+
+    名字里带 `legacy_` 是同一个用意:它在调用点就说明自己是历史口径。
+    """
+    spu = (spu or "").strip()
+    return f"{len(spu)}:{spu}{_VARIANT_NS}"
+
+
+def _retired_variant_owner_id(*, spu: str, variant_id: str) -> str:
+    """**已退役。** VARIANT 层的 owner_id 曾经必须带 SPU 命名空间(A44)。
 
     ## 不带命名空间时发生了什么
 
@@ -147,10 +189,22 @@ def variant_owner_id(*, spu: str, variant_id: str) -> str:
     多花 2~4 个字符换掉一整类静默串档,值。
 
         11:SPU-SW-001/black
+
+    ## 它为什么可以退役
+
+    上面那整段案发经过的前提是 `variant_id` 的取值是**颜色名**。阶段 1 把
+    它换成了 `color_variants.id` —— UUID 全局唯一,「两个 SPU 都有黑色」
+    在结构上撞不上。hack 不是被删掉,是**被它的存在理由抛弃了**。
+
+    这个区别很重要:前者随时会有人加回来,后者不会 —— 加回来要先把
+    UUID 换回颜色名。函数体保留成一个 `raise`,是为了让照着旧文档
+    调用它的人拿到一句话,而不是一个 `AttributeError`。
     """
-    spu = (spu or "").strip()
-    variant_id = (variant_id or "").strip()
-    return f"{len(spu)}:{spu}{_VARIANT_NS}{variant_id}"
+    raise NotImplementedError(
+        "VARIANT 层的 owner_id 现在就是 color_variants.id(阶段 1)。"
+        "命名空间 hack 已随之退役 —— 它的存在理由是变体 id 取值为颜色名,"
+        "而 UUID 跨 SPU 不会撞。要读存量行用 split_variant_owner_id"
+    )
 
 
 def split_variant_owner_id(owner_id: str) -> tuple[str, str] | None:
@@ -245,10 +299,24 @@ def fingerprint_scope(owner_type: OwnerType, owner_id: str) -> FingerprintScope:
     if owner_type is OwnerType.CHANNEL:
         return NOT_FINGERPRINTED
     if owner_type is OwnerType.VARIANT:
-        split = split_variant_owner_id(owner_id)
-        if split is None:
-            return SHARED_FINGERPRINT_SCOPE
-        _spu, variant_id = split
+        # ---- 阶段 1 之后 owner_id **就是**变体 UUID(A45-batch14-28)----
+        #
+        # 这一段原来只会 `split_variant_owner_id()`。切 UUID 之后那个函数
+        # 对每一行都返回 None,于是**每一条颜色事实都落回共享作用域** ——
+        # 给 A 色补一张图会 stale 掉 B 色的事实,也就是 D1 从后门原样回来,
+        # 而 AC-21 正是为它写的。
+        #
+        # **它不会报错**:返回值合法、类型正确、`facts_stale` 照常算。
+        # 这条分支是切 UUID 那一刀下面最深的一处连带伤,先取 UUID 再回落。
+        try:
+            variant_id = str(UUID(owner_id.strip()))
+        except (ValueError, AttributeError, TypeError):
+            # 存量:0046 之前写下的命名空间形式,以及 A44 之前的裸 id。
+            # 前者拆得出变体段,后者拆不出 —— 拆不出的落共享,理由见上面
+            split = split_variant_owner_id(owner_id)
+            if split is None:
+                return SHARED_FINGERPRINT_SCOPE
+            _spu, variant_id = split
         return FingerprintScope(participates=True, scope=variant_id or None)
     return SHARED_FINGERPRINT_SCOPE
 
@@ -281,16 +349,42 @@ def owner_for(
     }
     owner_id = (mapping.get(spec.owner_type) or "").strip()
     if not owner_id:
-        raise AttributeValueError(
+        raise AttributeOwnerError(
             field_name,
             f"{spec.owner_type.value} 层的 owner id 为空,无法确定这个值属于谁",
         )
-    # 命名空间在**校验非空之后**套 —— 反过来的话空变体 id 会被
-    # `"3:SPU/"` 这种\"看起来非空\"的字符串蒙混过去
+    # ---- VARIANT 层:必须是 `color_variants.id`(阶段 1,A45-batch14-28)----
+    #
+    # ## 命名空间 hack 退役了,而它退役的**前提**就在下面这三行
+    #
+    # `<len>:<spu>/<variant_id>` 存在的唯一理由是:那张表的唯一索引里没有
+    # SPU,而当时的 variant_id 取值是**颜色名** —— 两个 SPU 都有"黑色"就会
+    # 共用同一行属性(A44 那条注释里的完整案发经过)。
+    #
+    # 换成 `color_variants.id` 之后这个前提消失了:UUID 全局唯一,
+    # 「同名颜色跨 SPU」在结构上不可能撞。**hack 不是被删掉,是被它的
+    # 存在理由抛弃了。** 这个区别重要:前者随时可能有人加回来。
+    #
+    # ## 不是 UUID 就当场失败,**不回落**
+    #
+    # 回落到旧形式看起来更"稳",实际是把 §3.22 那颗雷重新埋一遍:
+    # 一件没回填 `color_variant_id` 的商品会静静地写进一个种子形式的
+    # owner_id,而读取侧按 UUID 找 —— 值还在库里,界面上永远读不到,
+    # 且两侧都不报错。**这正是"识别侧静默丢颜色字段"的完整形状。**
+    #
+    # 抛 `AttributeOwnerError`(不被 `apply_evidence` 吞掉),于是回填没做完
+    # 的那批商品会在第一次识别时当场说出原因,而不是少一批字段没人知道。
     if spec.owner_type is OwnerType.VARIANT:
-        if not (spu or "").strip():
-            raise AttributeValueError(field_name, "变体属性缺少 SPU,无法确定它属于谁")
-        owner_id = variant_owner_id(spu=spu, variant_id=owner_id)
+        try:
+            owner_id = str(UUID(owner_id))
+        except (ValueError, AttributeError, TypeError):
+            raise AttributeOwnerError(
+                field_name,
+                "变体属性的 owner 必须是 color_variants.id;"
+                f"这件商品算出来的变体身份是 {owner_id!r} —— "
+                "它还没有回填 products.color_variant_id(阶段 1 建档路径之外的存量行)。"
+                "回填之前不写颜色属性:写进去的值读取侧按 UUID 找,永远读不到",
+            ) from None
     return spec.owner_type, owner_id
 
 

@@ -79,10 +79,11 @@ def test_the_downgrade_arithmetic_survives_a_slash_inside_the_spu():
     错值会直接写进 `owner_id`,降级完成后再 upgrade 也回不来 ——
     原值已经没了。这是 0027 里唯一一处会损坏数据的地方。
     """
-    from app.attributes import validation
-
-    owner_id = validation.variant_owner_id(spu="AB/CD", variant_id="Red")
-    assert owner_id == "5:AB/CD/Red", f"命名空间形式变了:{owner_id}"
+    # 字面量而不是铸造函数:铸造在阶段 1 退役了(命名空间的存在理由是
+    # 变体 id 取值为颜色名,而 owner_id 切 UUID 之后跨 SPU 撞不上)。
+    # 这条守的是**存量行**能不能被 0027 的降级正确切开,所以期望值该是
+    # 库里真正躺着的那串字节,不是某个函数当下的输出
+    owner_id = "5:AB/CD/Red"
 
     # 改之前那条:SUBSTRING(owner_id FROM POSITION('/' IN owner_id) + 1)
     by_first_slash = owner_id[owner_id.index("/") + 1 :]
@@ -95,9 +96,7 @@ def test_the_downgrade_arithmetic_survives_a_slash_inside_the_spu():
 
 def test_the_downgrade_arithmetic_survives_a_colon_inside_the_spu():
     """SPU 含冒号同样不影响:取的是**第一个**冒号,正则已保证它是长度前缀。"""
-    from app.attributes import validation
-
-    owner_id = validation.variant_owner_id(spu="A:B", variant_id="Red")
+    owner_id = "3:A:B/Red"
     assert _sql_downgrade_bare(owner_id) == "Red", f"切错了:{owner_id}"
 
 
@@ -109,15 +108,18 @@ def test_the_downgrade_agrees_with_the_python_parser_on_every_shape():
     """
     from app.attributes import validation
 
-    for spu, variant in [
-        ("SW-001", "black"),
-        ("AB/CD", "Red"),
-        ("A:B", "Red"),
-        ("SW-1", "Red/Blue"),
-        ("SW-1", "Red~2"),
+    # 冻结字节。见上一条为什么不再从铸造函数取
+    for owner_id, variant in [
+        ("6:SW-001/black", "black"),
+        ("5:AB/CD/Red", "Red"),
+        ("3:A:B/Red", "Red"),
+        ("4:SW-1/Red/Blue", "Red/Blue"),
+        ("4:SW-1/Red~2", "Red~2"),
     ]:
-        owner_id = validation.variant_owner_id(spu=spu, variant_id=variant)
         parsed = validation.split_variant_owner_id(owner_id)
+        assert parsed is not None and parsed[1] == variant, (
+            f"Python 侧对 {owner_id!r} 拆出来的不是 {variant!r}"
+        )
         assert parsed is not None, f"Python 侧拆不出来:{owner_id}"
         assert _sql_downgrade_bare(owner_id) == parsed[1], (
             f"SQL 与 Python 对 {owner_id!r} 的结果不一致:"

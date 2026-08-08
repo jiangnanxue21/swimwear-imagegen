@@ -145,17 +145,16 @@ def test_the_legacy_path_can_still_clear_its_audience(session):
     那道闸只该拦 SPU 管理的行 —— 拦宽了,导入的存量商品从此改不回
     "待确认",而 §3.4 规则 3 靠的就是这个状态。
     """
-    product = product_service.create_product(
-        session,
-        {
-            "spu": "LEGACY-SW-001",
-            "sku": "LEGACY-SW-001-BLK-S",
-            "name": "老路径行",
-            "category": "swimwear",
-            "audience": Audience.WOMEN.value,
-        },
-        actor="tester",
+    # 新的公开建档入口已经要求先有 SPU；这里直接摆一条历史遗留行，
+    # 验证的仍是 update 对真实存量 ``spu_id IS NULL`` 的兼容。
+    product = Product(
+        spu="LEGACY-SW-001",
+        sku="LEGACY-SW-001-BLK-S",
+        name="老路径行",
+        category="swimwear",
+        audience=Audience.WOMEN.value,
     )
+    session.add(product)
     session.commit()
 
     product_service.update_product(session, product.id, {"audience": None}, actor="t")

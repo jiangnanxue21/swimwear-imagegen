@@ -36,6 +36,8 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
+from sqlalchemy import select
+
 from app.core.config import PROJECT_ROOT, settings
 from app.core.enums import AssetType
 from app.core.logging import setup_logging
@@ -45,7 +47,6 @@ from app.models.spu import ColorVariant, Spu
 from app.services import asset_service, product_service, spu_service
 from app.services.product_import import parse_csv
 from app.services.storage import build_storage
-from sqlalchemy import select
 
 SAMPLE_DIR = Path("/sample-data") if Path("/sample-data").exists() else PROJECT_ROOT / "sample-data"
 

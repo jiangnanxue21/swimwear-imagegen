@@ -295,6 +295,18 @@ def test_the_delivery_required_files_exist_and_pack_verifies_them():
     assert "REQUIRED=(" in pack and ".github/workflows/ci.yml" in pack, (
         "pack.sh 只查禁品不查必备品 —— 漏打隐藏文件的包会再次'验证通过'发出去"
     )
+    assert "'.env.example'" in pack.split("REQUIRED=(", 1)[1].split(")", 1)[0], (
+        ".env.example 是 make init 与配置契约的输入,交付包必须复验它存在"
+    )
+    assert 'zip -q -X "$OUT" "${ENV_EXAMPLES[@]}"' in pack, (
+        ".env.* 黑名单会吃掉模板,必须在排除整类后明确补回已知安全模板"
+    )
+    assert 'frontend/.env.example' in pack.split("REQUIRED=(", 1)[1].split(")", 1)[0], (
+        "前端配置模板也会被 .env.* 吃掉,交付包必须复验它存在"
+    )
+    assert 'grep -vxF -e "${ENV_EXAMPLES[0]}" -e "${ENV_EXAMPLES[1]}"' in pack, (
+        "复验必须只豁免两个精确模板路径,不能放过其他 .env.*"
+    )
 
 
 def test_smoke_exercises_the_license_gate_instead_of_the_bypass():

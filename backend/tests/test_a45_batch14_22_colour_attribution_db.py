@@ -52,7 +52,13 @@ pytestmark = pytest.mark.requires_db
 
 @pytest.fixture
 def spu(session):
-    row = Spu(spu_code=f"SPU-CA-{uuid.uuid4().hex[:6]}", internal_name="归属用例款")
+    row = Spu(
+        spu_code=f"SPU-CA-{uuid.uuid4().hex[:6]}",
+        internal_name="归属用例款",
+        audience="WOMEN",
+        base_category="swimwear",
+        created_by="test",
+    )
     session.add(row)
     session.flush()
     return row
@@ -171,7 +177,13 @@ def test_a_colour_from_another_spu_cannot_be_written(session, products):
     §4.3:颜色名在 SPU 内唯一,**跨 SPU 同名是常态**。传错的后果不是报错 ——
     图挂到另一个款的颜色上,于是一个没人动过的款突然一批事实过期。
     """
-    other = Spu(spu_code=f"SPU-OTHER-{uuid.uuid4().hex[:6]}", internal_name="别的款")
+    other = Spu(
+        spu_code=f"SPU-OTHER-{uuid.uuid4().hex[:6]}",
+        internal_name="别的款",
+        audience="WOMEN",
+        base_category="swimwear",
+        created_by="test",
+    )
     session.add(other)
     session.flush()
     stranger = ColorVariant(
@@ -304,4 +316,5 @@ def test_deleting_a_colour_does_not_take_the_photos_with_it(
 
     survivor = session.get(MediaAsset, asset_id)
     assert survivor is not None, "删颜色把素材一起删了 —— 原始样品照找不回来"
+    session.expire(survivor, ["color_variant_id"])
     assert survivor.color_variant_id is None

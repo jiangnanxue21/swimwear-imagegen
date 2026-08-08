@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.attributes import scope_fingerprint
 from app.core import audience as audience_rules
 from app.core.clock import utc_now
 from app.core.enums import (
@@ -35,6 +36,7 @@ from app.core.errors import (
 )
 from app.core.logging import get_logger
 from app.core.sorting import normalize_sort
+from app.media import service as media_service
 from app.models.generation import (
     GenerationAttempt,
     GenerationCandidate,
@@ -49,8 +51,6 @@ from app.providers.base import GenerationMode
 from app.providers.registry import resolve
 from app.services import audit, generation_plan_service, model_template_service, spend
 from app.services.sorting import apply_order
-from app.attributes import scope_fingerprint
-from app.media import service as media_service
 from app.workflows import generation_plan as gp
 from app.workflows import state_machine as sm
 from app.workflows.idempotency import build_idempotency_key

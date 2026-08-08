@@ -19,6 +19,7 @@ from app.core.errors import ErrorCode, ValidationError
 from app.schemas.asset import AssetOut, AssetUploadResult
 from app.schemas.common import Page
 from app.schemas.product import ImportResultOut, ProductCreate, ProductOut, ProductUpdate
+from app.schemas.spu import ColorVariantOut
 from app.services import asset_service, product_service
 from app.services.product_import import parse_csv, parse_json_rows
 from app.services.storage import asset_url, build_storage
@@ -232,6 +233,29 @@ async def upload_asset(
     # 而反过来(库里有行、文件不在)会让详情页 404 且无从补救
     session.commit()
     return AssetUploadResult(asset=_asset_out(asset, storage), deduplicated=deduplicated)
+
+
+@router.get("/{product_id}/color-variants", response_model=list[ColorVariantOut])
+def list_color_variants(
+    product_id: UUID,
+    session: Session = Depends(db_session),
+) -> list[ColorVariantOut]:
+    """按颜色上传时能选的颜色(§4.3 / §4.8)。
+
+    **取数与 `assert_colour_belongs_to` 同源**(`product_service.colours_for`)。
+    界面能选到的必须恰好是上传接口会接受的 —— 两边各自拼一遍
+    product -> spu -> colours 的话,少列一个颜色的表现是那个颜色永远传不了图、
+    因此永远缺正面图,而完整度门禁只会一直说「缺图」,不指向原因。
+
+    老建档路径的商品(`spu_id` 为空)拿到空表,不是 409。
+    "你能选的有哪些"的答案是"一个也没有",那是一句完整的话;
+    整页报错会让一件本来只是不能按颜色上传的商品变成打不开。
+    """
+    product = product_service.get_product(session, product_id)
+    return [
+        ColorVariantOut.model_validate(v)
+        for v in product_service.colours_for(session, product)
+    ]
 
 
 @router.get("/{product_id}/assets", response_model=list[AssetOut])

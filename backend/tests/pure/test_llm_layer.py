@@ -78,7 +78,7 @@ def test_image_preparation_has_exactly_one_implementation():
             if isinstance(n, ast.Call)
         }
         if "pinned_transport" in calls and "verify_image" in text:
-            owners.append(str(path.relative_to(APP_DIR)))
+            owners.append(path.relative_to(APP_DIR).as_posix())
     assert owners == ["llm/images.py"], f"图片准备逻辑出现在多处:{owners}"
 
 
@@ -93,7 +93,7 @@ def test_retry_loop_has_exactly_one_implementation():
     for path in APP_DIR.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "MAX_RETRY_AFTER_SECONDS" in text and "random.uniform" in text:
-            owners.append(str(path.relative_to(APP_DIR)))
+            owners.append(path.relative_to(APP_DIR).as_posix())
     assert owners == ["llm/transport.py"], f"退避逻辑出现在多处:{owners}"
 
 

@@ -33,10 +33,77 @@ from sqlalchemy import select
 from app.core.enums import MediaRole, MediaSource, MediaStatus
 from app.media import evidence_rules
 from app.media import service as media_service
+from app.models.generation import (
+    GenerationAttempt,
+    GenerationCandidate,
+    GenerationTask,
+)
 from app.models.media_asset import MediaAsset
+from app.models.product import Product
+from app.models.spu import ColorVariant, Spu
 from tests.conftest import requires_db
 
 pytestmark = requires_db
+
+
+@pytest.fixture
+def colours(session):
+    spu = Spu(
+        spu_code=f"EVIDENCE-{uuid.uuid4().hex[:8]}",
+        internal_name="evidence query fixture",
+        audience="WOMEN",
+        base_category="swimwear",
+        created_by="test",
+    )
+    session.add(spu)
+    session.flush()
+    rows = [
+        ColorVariant(
+            spu_id=spu.id,
+            variant_code=code,
+            working_name=name,
+            display_name=name,
+        )
+        for code, name in (("A", "Black"), ("B", "Blue"))
+    ]
+    session.add_all(rows)
+    session.flush()
+    return spu, rows
+
+
+@pytest.fixture
+def product(session, colours):
+    spu, variants = colours
+    row = Product(
+        spu=spu.spu_code,
+        sku=f"EVIDENCE-{uuid.uuid4().hex[:12]}",
+        name="evidence query fixture",
+        category="swimwear",
+        audience="WOMEN",
+        spu_id=spu.id,
+        color_variant_id=variants[0].id,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _provenance(session, product):
+    task = GenerationTask(
+        product_id=product.id,
+        mode="virtual_try_on",
+        provider="mock",
+        idempotency_key=f"evidence-{uuid.uuid4().hex}",
+    )
+    session.add(task)
+    session.flush()
+    attempt = GenerationAttempt(task_id=task.id, provider="mock")
+    session.add(attempt)
+    session.flush()
+    candidate = GenerationCandidate(task_id=task.id, attempt_id=attempt.id)
+    session.add(candidate)
+    session.flush()
+    return task.id, candidate.id
 
 
 def _asset(
@@ -93,17 +160,18 @@ def _matrix(session, product) -> None:
             session, product, source=source.value, status=MediaStatus.QUARANTINED.value
         )
     # 溯源列非空的两种(被人重新上传成 MANUAL_UPLOAD 的那一份正是靠这两列拦的)
+    task_id, candidate_id = _provenance(session, product)
     _asset(
         session,
         product,
         source=MediaSource.MANUAL_UPLOAD.value,
-        generation_task_id=uuid.uuid4(),
+        generation_task_id=task_id,
     )
     _asset(
         session,
         product,
         source=MediaSource.MANUAL_UPLOAD.value,
-        generation_candidate_id=uuid.uuid4(),
+        generation_candidate_id=candidate_id,
     )
     for role in MediaRole:
         _asset(session, product, source=MediaSource.MANUAL_UPLOAD.value, role=role.value)
@@ -154,12 +222,13 @@ def test_an_ai_image_shadowed_onto_the_product_never_reaches_extraction(
     `shadow_from_candidate` 写的是 `source=AI_GENERATED` + `status=READY`
     + 两条溯源列。这一行在旧的 `usable_assets()` 眼里是完全合格的素材。
     """
+    task_id, candidate_id = _provenance(session, product)
     ai = _asset(
         session,
         product,
         source=MediaSource.AI_GENERATED.value,
-        generation_task_id=uuid.uuid4(),
-        generation_candidate_id=uuid.uuid4(),
+        generation_task_id=task_id,
+        generation_candidate_id=candidate_id,
     )
     ok = _asset(session, product, source=MediaSource.MANUAL_UPLOAD.value)
     session.flush()
@@ -169,14 +238,17 @@ def test_an_ai_image_shadowed_onto_the_product_never_reaches_extraction(
     assert ok.id in got, "人工上传的图被一起挡掉了"
 
 
-def test_the_scope_filter_keeps_shared_assets_for_every_colour(session, product):
+def test_the_scope_filter_keeps_shared_assets_for_every_colour(
+    session, product, colours
+):
     """按颜色取证据时,共享素材对每一个颜色都算数。
 
     漏掉共享的那一半,表现是"这个颜色的图明明传了正面照,门禁还说缺" ——
     而共享素材(`color_variant_id IS NULL`)恰恰是绝大多数存量行的样子。
     """
-    variant = uuid.uuid4()
-    other = uuid.uuid4()
+    _spu, variants = colours
+    variant = variants[0].id
+    other = variants[1].id
     shared = _asset(session, product, source=MediaSource.MANUAL_UPLOAD.value)
     mine = _asset(
         session,

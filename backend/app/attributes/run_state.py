@@ -69,8 +69,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.enums import ExtractionRunStatus
 from app.attributes.scope_fingerprint import SHARED, length_prefixed
+from app.core.enums import ExtractionRunStatus
 
 S = ExtractionRunStatus
 

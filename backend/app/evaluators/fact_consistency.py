@@ -247,7 +247,10 @@ def problem_dicts(findings: Iterable[FactFinding]) -> list[dict[str, Any]]:
         {
             "code": f.code.value,
             "severity": ProblemSeverity.CRITICAL.value,
-            "message": f"{f.label}与已确认事实不一致:确认为「{f.expected}」,图中呈现「{f.observed or '无法描述'}」",
+            "message": (
+                f"{f.label}与已确认事实不一致:确认为「{f.expected}」,"
+                f"图中呈现「{f.observed or '无法描述'}」"
+            ),
             "dimension": "fact_consistency",
             "hard_fail": True,
         }

@@ -212,14 +212,7 @@ export default function ImageSetTab({
   const labelCollisions = coverage?.drift.label_collisions ?? []
   /** A-28:同一个 key 下两个颜色。目录名会变成"看哪一行排在前面" */
   const keyLabelConflicts = coverage?.drift.key_label_conflicts ?? []
-  /**
-   * A45-batch13-3 / R4:同时带外键与旧 variant_key 的行 —— 身份已经翻面。
-   *
-   * STATUS 与 DECISIONS §3.23 把这一类指定为"回填那颗雷"的看门狗
-   * (「在那之前由 drift().identity_shadowed 盯着」),而在此之前它只存在于
-   * 类型联合里,没有任何界面渲染它 —— 看不见的看门狗和没有是一回事,
-   * 与"恒报等于不报"是同一条(内容是 SKU 编号,不是变体 key,直接列)。
-   */
+  /** 兼容旧后端:0046 后该字段恒为空,但混合版本响应仍可展示。 */
   const identityShadowed = coverage?.drift.identity_shadowed ?? []
 
   const assetById = useMemo(() => {

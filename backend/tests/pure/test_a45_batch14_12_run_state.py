@@ -82,7 +82,7 @@ def _wired_entry(module: str) -> tuple[str, ...]:
             continue
         if node.target.id != "WIRED_MODULES" or node.value is None:
             continue
-        for key, value in zip(node.value.keys, node.value.values):
+        for key, value in zip(node.value.keys, node.value.values, strict=False):
             if isinstance(key, ast.Constant) and key.value == module:
                 return tuple(
                     e.value for e in value.elts if isinstance(e, ast.Constant)
@@ -991,7 +991,8 @@ def test_the_terminal_verdict_can_only_land_on_edges_the_transition_table_allows
                         )
                     )
     assert reachable <= rs.TRANSITIONS[S.RUNNING], (
-        f"判定能落到 RUNNING 出边之外的档:{sorted(s.value for s in reachable - rs.TRANSITIONS[S.RUNNING])}"
+        "判定能落到 RUNNING 出边之外的档:"
+        f"{sorted(s.value for s in reachable - rs.TRANSITIONS[S.RUNNING])}"
     )
     # 反向:别让这条守卫在判定塌成恒返回一个值时还是绿的(batch14-8 的 X1)
     assert len(reachable) >= 3, f"整个输入空间只落出 {len(reachable)} 档,判定塌了"
