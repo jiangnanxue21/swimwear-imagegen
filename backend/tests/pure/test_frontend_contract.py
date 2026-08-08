@@ -65,6 +65,76 @@ def _frontend_src() -> Path:
     return PROJECT_ROOT / "frontend" / "src"
 
 
+def _strip_ts_comments(source: str) -> str:
+    """去掉 TS/TSX 注释，避免说明文字替实现喂真守卫。"""
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", source, flags=re.M)
+
+
+_FRONTEND_PAGES = PROJECT_ROOT / "frontend" / "src" / "pages"
+
+#: 失败时清空表格、但空态尚未按失败/真空集分岔的存量台账。
+#: 只许减、不许增；补好一处时，下面的反向检查会要求同步删账。
+_UNBRANCHED_EMPTY_STATES = {
+    "AuditLogPage.tsx": {"query"},
+    "WorkbenchBatchPage.tsx": {"list"},
+    "WorkbenchSpuPage.tsx": {"query"},
+}
+
+_BLANKS_ON_ERROR = re.compile(r"dataSource=\{\s*(\w+)\.isError\s*\?\s*\[\]\s*:")
+_BRANCHES_EMPTY_TEXT = re.compile(r"emptyText:\s*(\w+)\.isError\s*\?")
+
+
+def test_a_failed_query_does_not_render_a_business_conclusion():
+    """失败时清空数据的表格，空态必须区分“拉不到”与“确实没有”。
+
+    `dataSource={q.isError ? [] : ...}` 会让 antd 必然渲染 `emptyText`。
+    如果那里只有“还没有商品/批次/记录”之类业务结论，一次网络失败会把运营
+    引向新建或重复操作。存量三处进入棘轮，新页面不再允许增加同类欠账。
+    """
+    grew: list[str] = []
+    stale: list[str] = []
+    scanned = 0
+    for page in sorted(_FRONTEND_PAGES.glob("*.tsx")):
+        source = _strip_ts_comments(page.read_text(encoding="utf-8"))
+        blanks = set(_BLANKS_ON_ERROR.findall(source))
+        if not blanks:
+            continue
+        scanned += 1
+        branched = set(_BRANCHES_EMPTY_TEXT.findall(source))
+        unguarded = blanks - branched
+        budget = _UNBRANCHED_EMPTY_STATES.get(page.name, set())
+        if unguarded - budget:
+            grew.append(f"{page.name}: {sorted(unguarded - budget)}")
+        if budget - unguarded:
+            stale.append(
+                f"{page.name}: 台账仍列着 {sorted(budget - unguarded)}，实测已不存在"
+            )
+
+    # 当前基线有四个页面采用“失败时清空表格”的形状；防止正则空转后假绿。
+    assert scanned >= 4, f"只扫到 {scanned} 个目标页面，取数规则可能失效"
+    assert not grew, (
+        "这些表格把失败包装成了业务空集:\n  "
+        + "\n  ".join(grew)
+        + "\n按 WorkbenchListPage 的 emptyText 分岔，或显式登记并说明还款边界。"
+    )
+    assert not stale, (
+        "空态台账过期，请同步收紧 _UNBRANCHED_EMPTY_STATES:\n  "
+        + "\n  ".join(stale)
+    )
+
+
+def test_the_empty_state_ledger_does_not_rot():
+    """台账条目必须仍指向存在且确实在失败时清空表格的页面。"""
+    for name in sorted(_UNBRANCHED_EMPTY_STATES):
+        path = _FRONTEND_PAGES / name
+        assert path.exists(), f"台账里的 {name} 已不存在，请删掉条目"
+        source = _strip_ts_comments(path.read_text(encoding="utf-8"))
+        assert _BLANKS_ON_ERROR.search(source), (
+            f"{name} 已不再使用失败清空表格的形状，请删掉台账条目"
+        )
+
+
 def _object_keys(source: str, const_name: str) -> set[str]:
     """取出 `export const X ... = { a: ..., b: ... }` 的顶层键。"""
     match = re.search(rf"export const {const_name}\b[^=]*=\s*\{{", source)

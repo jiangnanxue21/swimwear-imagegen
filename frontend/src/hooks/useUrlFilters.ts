@@ -61,6 +61,17 @@ export interface Codec<T> {
 }
 
 /**
+ * `oneOfParam` 给控件回调使用的运行期收窄。
+ *
+ * antd 的分页回调只给裸 `number`。若调用点用 `as` 强行通过类型检查，
+ * 白名单外的值仍会写进 URL，刷新后又被 `read()` 弹回默认值，导致控件与
+ * 实际查询各说各话。收窄必须由同时持有白名单与默认值的 codec 自己完成。
+ */
+export interface OneOfNarrowing<T extends number> {
+  narrow: (raw: number) => T
+}
+
+/**
  * 固定取值的字符串参数(流程步骤、下一步动作、受众、快审分段器……)。
  *
  * 不给 `fallback` 时默认「不筛」(`undefined`);给了就以它为默认值 ——
@@ -131,40 +142,21 @@ export function intParam(
  * 筛过的列表配一个空白下拉框 —— 界面说了一件和数据不一致的话,
  * 正是硬规则 4 在禁的那种事。
  */
-export function oneOfParam<T extends number>(fallback: T, values: readonly T[]): Codec<T> {
+export function oneOfParam<T extends number>(
+  fallback: T,
+  values: readonly T[],
+): Codec<T> & OneOfNarrowing<T> {
   const set = new Set<number>(values)
+  // URL 与控件回调共用同一条判定，避免两条入口的退回方向漂移。
+  const narrow = (raw: number): T => (set.has(raw) ? (raw as T) : fallback)
   return {
     read: (raw) => {
       if (raw === null || !/^\d+$/.test(raw)) return fallback
-      const value = Number(raw)
-      return set.has(value) ? (value as T) : fallback
+      return narrow(Number(raw))
     },
     write: (value) => (value === fallback ? null : String(value)),
+    narrow,
   }
-}
-
-/**
- * 把一个来路不明的 `number` 收窄回 `oneOfParam` 认的那几档。
- *
- * ## 为什么需要它
- *
- * `oneOfParam(20, PAGE_SIZES)` 解出来的类型是字面量联合(`10 | 20 | 50 | 100`),
- * 这是刻意的 —— `patch({ page_size: 37 })` 应该在编译期就写不出来。
- * 但 antd 的 `pagination.onChange(page, pageSize)` 给的是 `number`,
- * 于是调用点必然有一次收窄,而收窄有两种写法:
- *
- *     as 断言        编译过,运行期照样能把 37 写进 URL,codec 再静默退回默认档
- *     这个函数       档位不认识就落到 fallback,和 codec 自己的行为**是同一条**
- *
- * 第一种正是 `pageSizeOptions: PAGE_SIZES.map(String)` 那行注释在防的事
- * ——「让 antd 自己列一份的话,选了它不认的档会被静默退回」。既然已经写明
- * 不许有第二份档位表,收窄这一步也不该另开一个口子。
- *
- * `fallback` 必须和同一处 `oneOfParam` 的 fallback 是同一个值;页面侧用一个
- * `DEFAULT_PAGE_SIZE` 常量承接,两处引用同一个名字,改一处不会忘另一处。
- */
-export function narrowOneOf<T extends number>(value: number, values: readonly T[], fallback: T): T {
-  return (values as readonly number[]).includes(value) ? (value as T) : fallback
 }
 
 /**

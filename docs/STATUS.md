@@ -120,9 +120,30 @@
 > `.env.example` 打包缺失已修复：打包先排除 `.env.*`,再只补回根目录与前端的
 > 两个精确模板路径；复验也只豁免这两个路径。审核时还发现仓库内 `.venv` 会被
 > 当作普通目录打进交付包,现 `.gitignore`、打包排除与交付扫描三处一起收口。
+> Windows 入口现为 `tools/pack.ps1 [-Version aNN]`,不依赖 `zip` / `unzip`,使用
+> .NET ZIP API 执行同样的“排除 → 重新打开成包复验 → 失败删包”。本机实跑生成
+> 690 文件、3.8 MiB 的验证包；`verify_delivery` 会逐项比较 Bash 与 PowerShell
+> 的五组清单,防止两套入口后续分叉。
 >
 > 未在本次范围内执行：真实模型调用、Docker build、Playwright E2E、完整 Redis/Celery
 > 集成套件。前端 lint 的 4 条 warning 是既有 Hook 依赖提示,本次无新增 error。
+>
+> ## 2026-08-08 · A45-batch17-1 补丁审核
+>
+> 来包是基于 A45-batch17 的增量，而当前树没有该前置批次；直接应用会在
+> `GenerationPlansPage`、宿主页组件用例、`mutate_batch17.py` 等处失败，并让
+> 来包的 `DECISIONS.md` §3.44 与当前已有 §3.44 撞号。因此本次按语义移植，
+> 没有把整包“应用成功”写进状态。
+>
+> 已移植：分页白名单由 codec 自带 `narrow()` 统一收窄；失败空态新增棘轮台账。
+> 已延期：依赖方案宿主页的空态修复与 QueryClient 包装器修复。宿主页当前仍未
+> 落地，阶段 4 的该项状态不变。审核依据与边界见 `DECISIONS.md` §3.46。
+>
+> 复验快照：纯测试 2495/2495；URL 变异 14/14 RED；前端 typecheck、Vitest
+> 74/74、build 通过，lint 0 错/4 条既有 warning；delivery 16/16、样例 10/10、
+> imports 424、锚点 456/456、源码守卫 542、文档引用、Ruff、架构契约 3/3、
+> 前端语法 88/88 均通过。`make check-offline` 的 Windows 入口因 `python3.exe`
+> 为 Microsoft Store 占位符未启动，以上为按 Makefile 字面顺序的等价逐项执行。
 >
 > ## A45-batch14-26:三笔决定类欠账 + 老建档路径切 SPU(基线 14-25,2026/08/07)
 >

@@ -1,3 +1,30 @@
+# A45-batch17-1 补丁审核:只移植与当前基线独立成立的两项
+
+> 来包 `patch/A45-batch17-1-offline-blind-spots.patch` 明确要求先有
+> A45-batch17；当前树是 A45-batch15 / batch14-28 并线，缺少方案宿主页、
+> 宿主页组件用例、batch17 变异脚本及其交接文档。完整结论见
+> `docs/DECISIONS.md` §3.46，当前状态见 `docs/STATUS.md` 顶部。
+
+本次没有把补丁整包硬套到错误基线上。已移植两项独立成立的改进：
+
+- `oneOfParam` 自带 `narrow()`，分页回调与 URL 读取共用白名单和 fallback；
+  守卫与 U14 变异钉住“用 `as` 让 tsc 闭嘴、运行期却写入非法档位”的退化。
+- 失败时清空表格的页面加入空态棘轮；存量三处只许减少，新页面不能再把
+  “拉不到”包装成“确实没有”。
+
+没有合入的部分：`GenerationPlansPage` 的空态修复、其 QueryClient 测试包装器、
+`mutate_batch17.py`、batch17 两份交接文档及补丁里的 §3.44。前四项依赖不存在的
+前置功能；最后一项会与当前 `DECISIONS.md` 已有 §3.44 直接撞号。等宿主页真正
+落地时，应重新审核原补丁对应两项，不能把本次结论写成“阶段 4 宿主页已合入”。
+
+本机复验（2026-08-08）：纯测试 2495/2495；URL 变异 14/14 RED；前端
+typecheck、Vitest 74/74、build 通过，lint 0 错/4 条既有 warning；交付 16/16、
+样例 10/10、imports 424、锚点 456/456、源码守卫 542、架构契约 3/3、前端语法
+88/88。`make check-offline` 在 Windows 被 Microsoft Store 的 `python3.exe`
+占位符挡住，以上结果是按 Makefile 的字面顺序用仓库 `.venv` 等价逐项执行。
+
+---
+
 # A45-batch15-merged 交接:说缺口已关的话,以及 docs 的一次清账
 
 > 上一份交接(14-25)的正文原样保留在下面。本批新增的四节在最前面。

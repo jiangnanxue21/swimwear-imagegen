@@ -59,6 +59,27 @@ def _code_only(src: str) -> str:
     return re.sub(r"^\s*//.*$", "", src, flags=re.M)
 
 
+def _balanced_after(source: str, at: int) -> str:
+    """从 `at` 处的左括号切到它自己的收尾，避免正则在嵌套对象处切窄。"""
+    depth = 0
+    for index in range(at, len(source)):
+        if source[index] in "{[(":
+            depth += 1
+        elif source[index] in "}])":
+            depth -= 1
+            if depth == 0:
+                return source[at : index + 1]
+    raise AssertionError("找不到配平的收尾")
+
+
+def _patch_blocks(source: str) -> list[str]:
+    """所有 `filters.patch({ ... })` 的入参对象。"""
+    return [
+        _balanced_after(source, match.end() - 1)
+        for match in re.finditer(r"filters\.patch\(\s*\{", source)
+    ]
+
+
 def _spec_body(src: str) -> str:
     """`useUrlFilters({ ... })` 那张声明表的表体。
 
@@ -385,6 +406,35 @@ def _page_size_ceiling(api_src: str, marker: str, *, what: str) -> int:
     found = re.search(r"le=(\d+)", line)
     assert found, f"{what}:page_size 的 Query 里没有 le="
     return int(found.group(1))
+
+
+def test_page_size_callbacks_use_the_codec_runtime_narrowing():
+    """分页回调的裸 `number` 必须由 codec 收窄，不许用 `as` 绕过运行期白名单。
+
+    tsc 会拦直接传裸值，却不会拦 `as`。后者会把白名单外的值写进 URL，
+    下一次读取再退回默认档，造成下拉框与查询条数不一致。判据因此检查
+    收窄发生在持有白名单与 fallback 的 codec，而不是检查“能否编译”。
+    """
+    offenders: list[str] = []
+    scanned = 0
+    for page in sorted((FRONTEND / "pages").glob("*.tsx")):
+        source = _code_only(_read(page))
+        for block in _patch_blocks(source):
+            match = re.search(r"page_size:\s*([^,}]+)", block)
+            if not match:
+                continue
+            scanned += 1
+            value = " ".join(match.group(1).split())
+            if ".narrow(" not in value:
+                offenders.append(f"{page.name}: page_size: {value}")
+
+    # 当前基线只有工作台与审计页两处分页回调；反空集防止解析规则失效后假绿。
+    assert scanned >= 2, f"只扫到 {scanned} 处 page_size 写入，取数规则可能失效"
+    assert not offenders, (
+        "这些分页回调没有走 codec.narrow():\n  "
+        + "\n  ".join(offenders)
+        + "\n裸值会被 tsc 拦；补 `as` 虽能编译，却会让 URL 与实际查询各说各话。"
+    )
 
 
 def test_frontend_page_size_options_stay_within_the_backend_limit():

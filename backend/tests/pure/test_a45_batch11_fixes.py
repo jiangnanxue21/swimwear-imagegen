@@ -308,6 +308,16 @@ def test_the_delivery_required_files_exist_and_pack_verifies_them():
         "复验必须只豁免两个精确模板路径,不能放过其他 .env.*"
     )
 
+    windows_pack = _read(PROJECT_ROOT / "tools" / "pack.ps1")
+    assert "$ForbiddenDirs" in windows_pack and ".secrets" in windows_pack, (
+        "Windows 打包脚本必须执行同类禁品排除"
+    )
+    assert "ZipFile]::OpenRead" in windows_pack, "Windows 打包后必须重新打开产物复验"
+    assert "Test-ForbiddenArchivePath" in windows_pack, "Windows 成包复验不能只检查必备文件"
+    assert "[System.IO.File]::Delete($Out)" in windows_pack, (
+        "Windows 成包发现禁品后必须删包并失败"
+    )
+
 
 def test_smoke_exercises_the_license_gate_instead_of_the_bypass():
     """冒烟以前不传 model_template_id,任务走 MODEL_REFERENCE 那条已知缝:

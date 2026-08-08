@@ -32,7 +32,7 @@ import ErrorNotice from '../components/ErrorNotice'
 import { AudienceTag } from '../components/AudienceBadge'
 import { AUDIENCES, AUDIENCE_LABEL, type Audience } from '../api/types'
 import {
-  enumParam, flagParam, intParam, narrowOneOf, oneOfParam, textParam, useUrlFilters,
+  enumParam, flagParam, intParam, oneOfParam, textParam, useUrlFilters,
 } from '../hooks/useUrlFilters'
 import {
   ACTION_TAB,
@@ -131,8 +131,8 @@ function SummaryTiles({
  * 「前端最大档位 ≤ 后端 le=」——加一档比后端还大时它会红。
  */
 const PAGE_SIZES = [10, 20, 50, 100] as const
-/** 默认档位。`oneOfParam` 的 fallback 与 antd 回传收窄时的 fallback 共用这一个。 */
-const DEFAULT_PAGE_SIZE = 20
+/** codec 与分页回调共用同一份白名单和默认值，不能在调用点再抄一份。 */
+const pageSizeParam = oneOfParam(20, PAGE_SIZES)
 
 /**
  * 这一页能排的字段。三列 `sorter: true` 加一个默认值。
@@ -170,7 +170,7 @@ export default function WorkbenchListPage() {
     audience: enumParam<Audience | 'UNCONFIRMED'>([...AUDIENCES, 'UNCONFIRMED']),
     only_blocked: flagParam(),
     page: intParam(1, { min: 1 }),
-    page_size: oneOfParam(DEFAULT_PAGE_SIZE, PAGE_SIZES),
+    page_size: pageSizeParam,
     sort: enumParam<string>(LIST_SORT_KEYS),
     order: enumParam<'asc' | 'desc'>(['asc', 'desc']),
   })
@@ -698,10 +698,9 @@ export default function WorkbenchListPage() {
           pageSizeOptions: PAGE_SIZES.map(String),
           showTotal: (t) => `共 ${t} 件命中`,
           // 勾选由 signature 那条 effect 清,这里不再各写一遍
-          // antd 回传的 ps 是 number,而 codec 只认 PAGE_SIZES 那几档;
-          // 收窄走 narrowOneOf,和 codec 用同一个 fallback
+          // antd 回传裸 number；运行期收窄由持有白名单的 codec 负责。
           onChange: (p, ps) =>
-            filters.patch({ page: p, page_size: narrowOneOf(ps, PAGE_SIZES, DEFAULT_PAGE_SIZE) }),
+            filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) }),
         }}
       />
     </Space>

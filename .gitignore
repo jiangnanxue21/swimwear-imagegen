@@ -19,6 +19,11 @@ dist/
 # vitest.config.ts 把它搬了出来(理由在那边:root 装的依赖会让默认位置
 # 对跑测试的用户变成只读),搬出来之后就要在这里单独记一行
 .vite-cache/
+.import_linter_cache/
+.tmp*/
+*.egg-info/
+test-results/
+playwright-report/
 *.tsbuildinfo
 coverage/
 __pycache__/

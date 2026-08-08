@@ -82,9 +82,16 @@ FORBIDDEN_DIRS=(
   __pycache__         # 构建产物
   .pytest_cache
   .ruff_cache
+  .vite-cache
+  .import_linter_cache
+  .tmp*
+  '*.egg-info'
   .venv
   venv
   node_modules
+  test-results
+  playwright-report
+  patch
   dist
   coverage
 )

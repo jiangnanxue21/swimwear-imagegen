@@ -141,6 +141,13 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "  const [, rawSetParams] = useSearchParams()\n  void rawSetParams\n"
         "  const filters = useUrlFilters({",
     ),
+    (
+        "U14",
+        "分页用 as 绕过运行期白名单(URL 写一档、刷新后查询退回另一档)",
+        AUDIT,
+        "page_size: pageSizeParam.narrow(nextSize)",
+        "page_size: nextSize as (typeof PAGE_SIZES)[number]",
+    ),
 ]
 
 SUITE_FILTER = "test_a45_batch14_17_url_filters.py"

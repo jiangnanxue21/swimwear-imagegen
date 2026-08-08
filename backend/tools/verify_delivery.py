@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -149,7 +150,62 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
     if "unzip" not in body:
         raise Failure("打包脚本只排除、没有回头检查产物。排除规则写错时不会有任何征兆")
     if not re.search(r"rm -f .*OUT", body):
-        raise Failure("检查发现禁品时必须删包并退出非零 —— 一个「有警告但仍然生成了」的包会被发出去")
+        raise Failure(
+            "检查发现禁品时必须删包并退出非零 —— "
+            "一个「有警告但仍然生成了」的包会被发出去"
+        )
+
+    windows_script = PROJECT_ROOT / "tools" / "pack.ps1"
+    if not windows_script.exists():
+        raise Failure("缺少 Windows 打包脚本 tools/pack.ps1")
+    windows_body = windows_script.read_text(encoding="utf-8")
+    required_markers = (
+        "$ForbiddenDirs",
+        ".secrets",
+        "$Required",
+        "ZipFile]::OpenRead",
+        "Test-ForbiddenArchivePath",
+        "[System.IO.File]::Delete($Out)",
+    )
+    missing = [marker for marker in required_markers if marker not in windows_body]
+    if missing:
+        raise Failure(
+            "Windows 打包脚本没有完整实现排除、成包复验与失败删包："
+            + ", ".join(missing)
+        )
+
+    # 两套入口若各自维护禁品清单，迟早会出现“Linux 安全、Windows 漏一类”的分叉。
+    # 这里在交付门禁中逐项比较，让新增规则必须同时落到两个脚本。
+    def shell_array(name: str) -> list[str]:
+        match = re.search(rf"{re.escape(name)}=\((.*?)\n\)", body, re.DOTALL)
+        if not match:
+            raise Failure(f"tools/pack.sh 缺少 {name} 数组")
+        return shlex.split(match.group(1), comments=True, posix=True)
+
+    def powershell_array(name: str) -> list[str]:
+        match = re.search(
+            rf"\${re.escape(name)}\s*=\s*@\((.*?)\)",
+            windows_body,
+            re.DOTALL,
+        )
+        if not match:
+            raise Failure(f"tools/pack.ps1 缺少 ${name} 数组")
+        return re.findall(r"'([^']*)'", match.group(1))
+
+    paired_arrays = {
+        "FORBIDDEN_DIRS": "ForbiddenDirs",
+        "CONTENT_ONLY_DIRS": "ContentOnlyDirs",
+        "FORBIDDEN_FILES": "ForbiddenFiles",
+        "ENV_EXAMPLES": "EnvExamples",
+        "REQUIRED": "Required",
+    }
+    for shell_name, windows_name in paired_arrays.items():
+        linux_values = shell_array(shell_name)
+        windows_values = powershell_array(windows_name)
+        if linux_values != windows_values:
+            raise Failure(
+                f"Linux/Windows 打包规则分叉：{shell_name} != ${windows_name}"
+            )
 
 
 def check_backend_dockerignore_excludes_the_key_directory() -> None:
@@ -344,7 +400,10 @@ def check_the_frontend_test_runner_is_actually_wired() -> None:
     # 装上 vitest 之后这个理由就没了——一批不被 tsc 看的测试会慢慢和源码类型脱节
     tsconfig = (FRONTEND / "tsconfig.json").read_text(encoding="utf-8")
     if "tests" not in tsconfig:
-        raise Failure("tsconfig 的 include 还没把 frontend/tests 纳进来 —— 那批用例仍然不过类型检查")
+        raise Failure(
+            "tsconfig 的 include 还没把 frontend/tests 纳进来 —— "
+            "那批用例仍然不过类型检查"
+        )
 
     if not list((FRONTEND / "tests").rglob("*.test.ts")) and not list(
         (FRONTEND / "tests").rglob("*.test.tsx")

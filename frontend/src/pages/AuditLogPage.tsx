@@ -32,7 +32,7 @@ import {
 import { brandVars, fontScale } from '../theme'
 import { formatDateTime } from '../utils/datetime'
 import {
-  enumParam, flagParam, intParam, narrowOneOf, oneOfParam, textParam, useUrlFilters,
+  enumParam, flagParam, intParam, oneOfParam, textParam, useUrlFilters,
 } from '../hooks/useUrlFilters'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import PageHeader from '../components/PageHeader'
@@ -49,8 +49,8 @@ const DAY_VALUES = DAY_OPTIONS.map((o) => o.value)
  * `page_size: int = Query(default=50, ge=1, le=200)`,守卫盯着「≤ 后端 le=」。
  */
 const PAGE_SIZES = [20, 50, 100, 200] as const
-/** 默认档位。`oneOfParam` 的 fallback 与 antd 回传收窄时的 fallback 共用这一个。 */
-const DEFAULT_PAGE_SIZE = 50
+/** codec 与分页回调共用同一份白名单和默认值，不能在调用点再抄一份。 */
+const pageSizeParam = oneOfParam(50, PAGE_SIZES)
 
 export default function AuditLogPage() {
   useDocumentTitle('操作审计')
@@ -76,7 +76,7 @@ export default function AuditLogPage() {
     // 这正是 flagParam 要能带默认值的理由:退回 false 会悄悄把降噪关掉
     workbench_only: flagParam(true),
     page: intParam(1, { min: 1 }),
-    page_size: oneOfParam(DEFAULT_PAGE_SIZE, PAGE_SIZES),
+    page_size: pageSizeParam,
   })
   const {
     actor, entity_type: entityType, action, days,
@@ -254,12 +254,11 @@ export default function AuditLogPage() {
           showSizeChanger: true,
           pageSizeOptions: PAGE_SIZES.map(String),
           showTotal: (total) => `共 ${total} 条`,
-          // antd 回传的是 number,而 codec 只认 PAGE_SIZES 那几档;
-          // 收窄走 narrowOneOf,和 codec 用同一个 fallback
+          // antd 回传裸 number；运行期收窄由持有白名单的 codec 负责。
           onChange: (nextPage, nextSize) =>
             filters.patch({
               page: nextPage,
-              page_size: narrowOneOf(nextSize, PAGE_SIZES, DEFAULT_PAGE_SIZE),
+              page_size: pageSizeParam.narrow(nextSize),
             }),
         }}
         locale={{
