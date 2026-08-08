@@ -128,18 +128,61 @@ def _run_batch_source() -> str:
     return src[start : src.index("\ndef settle(", start)]
 
 
+def _run_batch_fn() -> ast.FunctionDef:
+    src = SERVICE.read_text(encoding="utf-8")
+    return next(
+        n
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.name == "run_batch"
+    )
+
+
+def _call_lines(fn: ast.FunctionDef, name: str, *, qualified: bool = False) -> list[int]:
+    """函数体里那个调用**真正发生**的行号,按出现顺序。
+
+    `qualified=True` 时比整个点号路径而不是最后一段 —— 分得开
+    `session.commit()` 与 `savepoint.commit()`。这一处必须分得开:
+    保存点提交对别的会话是不可见的,拿它顶替会话提交,续租照样看不见。
+    """
+    return sorted(
+        n.lineno
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and (ast.unparse(n.func) if qualified else ast.unparse(n.func).split(".")[-1])
+        == name
+    )
+
+
 def test_the_renewal_is_committed_before_the_paid_call():
     """**这一条是 P2-1 下半段的全部内容。**
 
     顺序对(renew 在 _execute 之前)但没提交,等于没续:回收器在它自己的
     会话里读到的仍是领取时那个 `lease_until`。
+
+    ## 顺序按 AST 比,不按字符串位置比
+
+    第一版用 `body.index("_execute(")`,而 `run_batch` 里在真正那次调用
+    **之前**有一句注释写着「外层事务要等 `_execute()`」—— 那句话解释的正是
+    这次修复本身。于是 `exec_at` 指到注释上,顺序断言在**正确实现**上恒假。
+
+    这条守卫因此和 batch18 那条 `billable_units=1` 是同一型:守卫查的是
+    "这几个字出现在第几个字节",而要问的是"这几件事按什么顺序执行"。
+    调用的行号本来就是 AST 上的精确信息,没必要退回文本匹配。
     """
-    body = _run_batch_source()
-    renew_at = body.index("renew_lease(")
-    commit_at = body.index("session.commit()", renew_at)
-    exec_at = body.index("_execute(")
-    assert renew_at < commit_at < exec_at, (
-        "续租之后、付费调用之前必须提交,否则别的会话看不见新的截止时间"
+    fn = _run_batch_fn()
+    renews = _call_lines(fn, "renew_lease")
+    executes = _call_lines(fn, "_execute")
+    commits = _call_lines(fn, "session.commit", qualified=True)
+
+    assert renews, "run_batch 里找不到续租调用 —— 这条守卫失去了对象"
+    assert executes, "run_batch 里找不到 _execute 调用 —— 这条守卫失去了对象"
+
+    renew_at, exec_at = renews[0], executes[0]
+    assert renew_at < exec_at, "续租排在付费调用之后,等于没续"
+    between = [line for line in commits if renew_at < line < exec_at]
+    assert between, (
+        "续租之后、付费调用之前必须提交,否则别的会话看不见新的截止时间。"
+        f"续租在第 {renew_at} 行、_execute 在第 {exec_at} 行,中间没有 commit"
     )
 
 

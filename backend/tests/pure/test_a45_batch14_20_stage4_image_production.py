@@ -23,7 +23,7 @@ from app.listings import image_set_rules as isr
 from app.workbench import stale_matrix as sm
 from app.workflows import generation_plan as gp
 from app.workflows.idempotency import build_idempotency_key
-from tests.pure._helpers import BACKEND_ROOT, PROJECT_ROOT
+from tests.pure._helpers import BACKEND_ROOT
 
 
 def _plan(**kw) -> gp.PlanView:

@@ -412,10 +412,29 @@ def _report(rows: Sequence[ExternalListing], probe: Mapping[str, int] | None = N
         # 那个数问的是"平台上还占着几个位置",而这些行的答案是不知道 ——
         # 但它们让 `clean` 变成 False
         unreconciled=sum(1 for r in rows if r.needs_reconcile),
-        # 只数真实商品:模拟的那些从来没有出现在任何平台上
-        occupying=sum(1 for r in real if r.occupying),
-        not_delistable=sum(1 for r in real if r.occupying and not r.delistable),
-        # 这两个数**含模拟行**,因为 `run_delist` 就是这么遍历的。
+        # 只数真实商品:模拟的那些从来没有出现在任何平台上。
+        #
+        # **同时排掉不确定行。** 上面那句注释和 `CleanupReport.occupying` 的
+        # 字段说明都写着它们不占这个数,而实现原来照数不误:一行
+        # `SUBMIT_RESULT_UNKNOWN` 且没有外部 ID 的记录会同时进
+        # `unreconciled` 和 `occupying`,于是运营读到的"平台仍占位数量"
+        # 被虚增 —— 然后拿着一个可能根本不存在的数字去后台逐条核对。
+        #
+        # 排掉不等于让它消失:`unreconciled` 单独报、`clean` 照样是 False、
+        # `plan_delist` 照样把它留在清单里、`run_delist` 照样把它连同
+        # locator 记进 `skipped`。这里改的只是"确定占位"这一个口径。
+        occupying=sum(1 for r in real if r.occupying and not r.needs_reconcile),
+        # 跟着 `occupying` 一起收窄 —— CLI 把它印成"其中 N 行……",
+        # 而"其中"的那个整体正是上面这个数。两个口径不一致时,
+        # 屏幕上会出现"仍占着 0 个位置,其中 1 行处理不了"
+        not_delistable=sum(
+            1 for r in real if r.occupying and not r.delistable and not r.needs_reconcile
+        ),
+        # 这两个数**含模拟行,也含不确定行**,因为 `run_delist` 就是这么
+        # 遍历的:它对每一行 `delistable=False` 的记录都记一笔 `skipped`,
+        # 不确定行也不例外。跟着上面两个一起排掉不确定行的话,
+        # "若执行:跳过 N 行"会比实际少 —— 而这两个数存在的唯一理由
+        # 就是"给人看的数字必须等于实际会执行的数量"。
         # 口径差异见 `CleanupReport.to_queue` 的说明
         to_queue=sum(1 for r in rows if r.occupying and r.delistable),
         to_skip=sum(1 for r in rows if r.occupying and not r.delistable),

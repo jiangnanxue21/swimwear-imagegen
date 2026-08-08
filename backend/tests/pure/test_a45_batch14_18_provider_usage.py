@@ -468,18 +468,30 @@ def test_the_migration_does_not_backfill_by_guessing():
 def test_the_paid_paths_that_still_cannot_report_are_named_here():
     """**这条守卫是一笔账,不是一条不变式。**
 
-    今天只有 FASHN 的生成调用报得出 `provider`。另外四类付费调用仍然全是
-    `inferred`,而它们各自的理由不一样:
+    ## 这笔账已经还掉一半(A45-batch18 / P1-2)
+
+    属性识别接线了:`attributes/service.py` 现在把
+    `call_accounting.settle_extraction_units()` 的结果原样写进流水,
+    传的是真实的 `units_source`。所以**它已经从这张点名单里删掉** ——
+    这条守卫从此只盯评分那一条。
+
+    留着它继续点属性识别的名,就是这次回归里的那种假红:实现是对的,
+    门禁却过不去。而一条会规律性误报的欠账守卫,和一条恒绿的守卫一样,
+    很快就没有人再看它说什么。
+
+    今天只有 FASHN 的生成调用报得出 `provider`。还报不出的两类:
 
         轮询 / 取结果      厂商每次真的又调了一次,但那几次不单独计费
         评分(vision)      响应体里有 usage,**没接** —— 见下
-        属性识别(vision)  同上
 
-    vision 那两类刻意不在本批接:它们的计价单位是 token 而不是"次",
-    而价目表 `PROVIDER_PRICE_BOOK` 里 `attribute_extract` / `vision_score`
-    今天配的是**每次调用**的价。改成 token 会在不改任何配置的情况下
-    **静默改变已配价目表的含义** —— 金额一夜之间差几个数量级,
-    而没有任何地方会说为什么。那是另一批的活。
+    评分那一类刻意不接:它的计价单位是 token 而不是"次",而价目表
+    `PROVIDER_PRICE_BOOK` 里 `vision_score` 今天配的是**每次调用**的价。
+    改成 token 会在不改任何配置的情况下**静默改变已配价目表的含义** ——
+    金额一夜之间差几个数量级,而没有任何地方会说为什么。那是另一批的活。
+
+    (识别那一类能先接,是因为它记的是"发出去了几个请求"而不是 token:
+    `settle_extraction_units` 数的是传输层的重试次数,与价目表的
+    每次调用口径同一个单位,接线不改变任何已配价格的含义。)
 
     接线那天这条会红,那时把 STATUS 的欠账表改掉并删掉它。
 
@@ -490,10 +502,7 @@ def test_the_paid_paths_that_still_cannot_report_are_named_here():
     切窄之后**反向断言会静默变真**,而这条守卫整条就是一个反向断言。
     调用的实参名单本来就是 AST 上的一个精确集合,没必要退回文本匹配。
     """
-    for path in (
-        APP / "attributes" / "service.py",
-        APP / "services" / "evaluation_service.py",
-    ):
+    for path in (APP / "services" / "evaluation_service.py",):
         calls = [
             node
             for node in ast.walk(ast.parse(_src(path)))

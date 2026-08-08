@@ -1084,19 +1084,35 @@
 > 而口径其实更严。已改成钉不变式(摊平局部变量后追来源,另加反向断言禁止追到
 > `stored`)。第四次的一般化见 `DECISIONS.md` §3.32 第四节。
 >
-> ### 还报不出真实用量的四类付费调用(欠账,守卫记着)
+> ### 还报不出真实用量的两类付费调用(欠账,守卫记着)
 >
 > | 调用 | 今天的来源 | 为什么本批不接 |
 > |---|---|---|
 > | FASHN 轮询 / 取结果 | `inferred` | 厂商每次真的又调了一次,但那几次不单独计费 |
 > | 评分(vision) | `inferred` | 响应体里有 `usage`,**是 token 不是次** |
-> | 属性识别(vision) | `inferred` | 同上 |
 >
-> vision 那两类刻意不接:价目表里 `attribute_extract` / `vision_score` 今天配的是
-> **每次调用**的价,改成 token 会在不改任何配置的情况下**静默改变已配价目表的含义** ——
-> 金额一夜之间差几个数量级,而没有任何地方会说为什么。那是另一批的活。
-> `test_the_paid_paths_that_still_cannot_report_are_named_here` 记着这笔账,
-> 接线那天它会红。
+> ~~属性识别(vision)~~ **已销账(A45-batch18 / P1-2)**:
+> `attributes/service.py` 现在传真实的 `units_source`,单位是"发出去了几个请求"
+> (`call_accounting.settle_extraction_units`),与价目表的每次调用口径一致,
+> 接线不改变任何已配价格的含义。守卫
+> `test_the_paid_paths_that_still_cannot_report_are_named_here`
+> 已同步收窄到只盯评分那一条 —— 不收窄的话它会在正确实现上稳定报红。
+>
+> **只剩评分那一类刻意不接。**(上一版这里还写着"vision 那两类"、还把
+> `attribute_extract` 和 `vision_score` 并排列着 —— 与紧邻上面那段"属性识别已销账"
+> 直接矛盾。同一节里两句话互相打架时,读的人信哪一句是随机的,而信错的那一半
+> 会去改一处已经改对的代码。A45-batch18 / P3 改掉。)
+>
+> 理由是单位:评分的计价单位是 token,而价目表 `PROVIDER_PRICE_BOOK` 里
+> `vision_score` 今天配的是**每次调用**的价。改成 token 会在不改任何配置的
+> 情况下**静默改变已配价目表的含义** —— 金额一夜之间差几个数量级,
+> 而没有任何地方会说为什么。那是另一批的活。
+>
+> 识别那一类能先接、且已经接了,正是因为它记的不是 token:
+> `call_accounting.settle_extraction_units` 数的是"发出去了几个请求",
+> 与价目表的每次调用口径同一个单位。
+> `test_the_paid_paths_that_still_cannot_report_are_named_here` 记着剩下这笔账
+> (它今天只扫 `services/evaluation_service.py`),接线那天它会红。
 >
 > ### 第一次接真端点时要盯的三件事(本批验不到)
 >

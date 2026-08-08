@@ -7,7 +7,7 @@ from __future__ import annotations
 import ast
 
 from app.core.dotenv import parse_dotenv
-from app.core.settings_schema import SETTING_GROUPS
+from app.core.settings_schema import FIELDS, SETTING_GROUPS
 from tests.pure._helpers import BACKEND_ROOT, PROJECT_ROOT
 
 CONFIG_PY = BACKEND_ROOT / "app" / "core" / "config.py"
@@ -60,23 +60,55 @@ def test_env_example_has_no_unknown_keys():
     assert not unknown, f".env.example 含未知字段(拼写错误?): {unknown}"
 
 
-def test_secret_fields_are_empty_in_example():
-    """按下划线分段匹配,不是子串匹配。
+#: 名字里带这几段、而 `settings_schema` 又没声明过的字段,按密钥对待。
+#:
+#: **分段匹配,不是子串匹配。** 子串匹配会把 ``VISION_MODEL_MAX_OUTPUT_TOKENS=1800``
+#: 判成泄露的密钥 —— 那是一个 token **数量**。
+SECRET_NAME_SEGMENTS = {"KEY", "SECRET", "TOKEN"}
 
-    子串匹配会把 ``VISION_MODEL_MAX_OUTPUT_TOKENS=1800`` 判成泄露的密钥 ——
-    那是一个 token **数量**。一条会规律性误报的安全断言,最后一定会被人加豁免、
-    再被人整个注释掉,所以宁可现在把判据写准。
+
+def _is_secret(key: str) -> bool:
+    """这一项算不算密钥。**声明优先于猜名字。**
+
+    `settings_schema` 已经为每个设置页字段答过这个问题(`Field.secret`),
+    而那份声明是加密落库、回传打码、日志脱敏三处共用的同一个判据。
+    这里复用它,不另起一套 —— 两套判据漂移之后,"哪些值算密钥"在
+    安全断言和真实脱敏之间会有两个答案。
+
+    名字启发式退化成**兜底**:只在字段没被声明过时才用(纯后端配置
+    不进设置页,`FIELDS` 里没有它们,例如 `SETTINGS_SECRET_KEY`、
+    `ADMIN_TOKEN`、`S3_SECRET_ACCESS_KEY`)。
+
+    修的是这条:``EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY=false`` 是一个
+    **布尔开关**,只因为字段名末段是 `KEY` 就被判成"内联了真实密钥"。
+    一条会规律性误报的安全断言,最后一定会被人加豁免、再被人整个注释掉 ——
+    所以这里把判据修准,而不是给它开一个白名单。
     """
+    spec = FIELDS.get(key)
+    if spec is not None:
+        return spec.secret
+    return bool(SECRET_NAME_SEGMENTS & set(key.upper().split("_")))
+
+
+def test_secret_fields_are_empty_in_example():
+    """密钥项在 .env.example 里必须留空。"""
     env = parse_dotenv(ENV_EXAMPLE.read_text(encoding="utf-8"))
-    # 与原判据保持同样的覆盖面,只把匹配方式从子串换成分段 ——
-    # 这次改动的目的是消除误报,不是顺手扩大扫描范围
-    indicators = {"KEY", "SECRET", "TOKEN"}
-    leaked = {
-        k: v
-        for k, v in env.items()
-        if indicators & set(k.upper().split("_")) and v
-    }
+    leaked = {k: v for k, v in env.items() if _is_secret(k) and v}
     assert not leaked, f".env.example 不得含真实密钥: {sorted(leaked)}"
+
+
+def test_the_secret_verdict_is_not_just_a_name_guess():
+    """反向断言:声明为非密钥的项,不许因为名字被判成密钥。
+
+    没有这一条的话,把 `_is_secret` 退回纯名字匹配不会有任何地方变红 ——
+    而那正是刚修掉的那个假红。同时钉住正方向:声明为密钥的那些仍然算。
+    """
+    assert _is_secret("EXTRACTOR_MODEL_SEND_IDEMPOTENCY_KEY") is False, (
+        "布尔开关又被名字判成密钥了"
+    )
+    assert _is_secret("EXTRACTOR_MODEL_API_KEY") is True
+    # 没进设置页的纯后端密钥仍然靠名字兜底
+    assert _is_secret("ADMIN_TOKEN") is True
 
 
 def test_all_provider_keys_default_to_empty_so_app_starts_unconfigured():

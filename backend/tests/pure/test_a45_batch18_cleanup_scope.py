@@ -16,8 +16,9 @@
 ## 为什么这几条能留在 `tests/pure/`
 
 被测的是判定:作用域够不够、`clean` 该不该为真。`_require_scope` 是纯函数;
-`CleanupReport` 是 frozen dataclass,构造它不需要库。真库那一半(查询真的捞得到无 ID 的行、`run_delist` 真的拒绝 channel-only)
-补在 `tests/test_poll_and_delist_db.py`,不另开文件:它要复用那边已经建好的
+`CleanupReport` 是 frozen dataclass,构造它不需要库。真库那一半(查询真的捞得到
+无 ID 的行、`run_delist` 真的拒绝 channel-only)补在
+`tests/test_poll_and_delist_db.py`,不另开文件:它要复用那边已经建好的
 listing / draft 夹具,而"无 ID 的行上不上清单"原本就是那个文件里的一条用例
 —— 那条用例断言的正是被修掉的行为,所以修复必须落在它旁边,让下一个人
 一眼看见两种无 ID 场景的区别。两边缺一不可:判定对而查询漏掉那一类行,

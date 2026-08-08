@@ -29,6 +29,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.attributes import scope_fingerprint
@@ -109,8 +110,14 @@ def ingest(
 ) -> tuple[MediaAsset, bool]:
     """把一张图收敛成素材。返回 (素材, 是否命中去重)。
 
-    **去重键是 (product_id, sha256)。** 供应商重复推同一张图不会产生第二条
-    素材,也不会重复触发识别 —— 后者才是真正的成本:识别是按图计费的。
+    **去重键与数据库那把键(0044)逐字段相同**,判定在 `_dedupe_hit()`。
+    供应商重复推同一张图不会产生第二条素材,也不会重复触发识别 ——
+    后者才是真正的成本:识别是按图计费的。
+
+    这一条以前是 `(product_id, sha256)`,而 0044 起库里那把键是按 SPU 算的。
+    差出来的那一格正是「同一个 SPU 下两个 SKU 传同一张图」:应用层不命中、
+    继续 INSERT、撞唯一索引,`IntegrityError` 一路冒到 `unhandled_handler`,
+    运营看到的是 500,而实际发生的事情是「这张图已经在这个 SPU 下了」。
 
     命中去重时**不覆盖**已有记录的任何字段。角色可能是人工改过的,
     状态可能是人工隔离的,让一次重复推送把它们冲掉是最难查的一类数据丢失。
@@ -128,7 +135,9 @@ def ingest(
     与落库,与 `evidence_rules` / `sample_completeness` 同一套分工。
     """
     same_digest = _same_digest_in_spu(session, product, sha256)
-    existing = next((a for a in same_digest if a.product_id == product.id), None)
+    existing = _dedupe_hit(
+        same_digest, product=product, color_variant_id=color_variant_id
+    )
     conflict = provenance_conflict.verdict(
         source=source, role=role, same_digest_in_spu=same_digest
     )
@@ -234,8 +243,41 @@ def ingest(
         # 理由文案取自判定模块的常量,不在这里手写一句 —— 手写的那份
         # 和素材页上解释这条规则的地方会各自漂移,而运营读到的是这一句。
         asset.quarantine_reason = provenance_conflict.QUARANTINE_REASON[:2000]
-    session.add(asset)
-    session.flush()
+    # 先查后插不是原子的 —— 与 `asset_service.upload_asset` 同一个形状,
+    # 也是 §4.8 把最终裁决交给数据库的原因。两个请求同时把同一张图传给
+    # 同一个 SPU 时,两边都可能在上面那次取数里看不到对方,于是都走到这里,
+    # 其中一个撞 0044 那条唯一索引。
+    #
+    # **保存点是必须的。** 不开保存点的话,冲突会让整个外层事务进入需要回滚
+    # 的状态 —— 而影子写是跟着业务事务一起提交的(见模块顶部),
+    # 上传、状态刷新、审计会一起没。
+    try:
+        with session.begin_nested():
+            session.add(asset)
+            session.flush()
+    except IntegrityError:
+        # 回到保存点,**按完整键**回读赢家:回读用的键必须和刚才撞的那一条
+        # 是同一把,否则捞回来的可能是另一格里的行,而那是一次静默的张冠李戴。
+        #
+        # 查不到才是真异常 —— 那说明撞的不是我们以为的那条约束,
+        # 吞掉它会把一个真实的写入缺陷表现成一次安静的去重命中。
+        winner = _dedupe_key_row(
+            session, product=product, sha256=sha256, color_variant_id=color_variant_id
+        )
+        if winner is None:
+            raise
+        logger.info(
+            "media.ingest.lost_dedupe_race",
+            extra={
+                "product_id": str(product.id),
+                "media_asset_id": str(winner.id),
+                "sha256": sha256,
+            },
+        )
+        _fill_missing_role(winner, role=role, role_source=role_source,
+                           role_confidence=role_confidence)
+        _fill_missing_colour(winner, color_variant_id=color_variant_id)
+        return winner, True
     return asset, False
 
 
@@ -259,6 +301,94 @@ def _same_digest_in_spu(
         else MediaAsset.product_id == product.id
     )
     return list(session.scalars(select(MediaAsset).where(where, MediaAsset.sha256 == sha256)))
+
+
+def _dedupe_hit(
+    rows: list[MediaAsset],
+    *,
+    product: Product,
+    color_variant_id: UUID | None,
+) -> MediaAsset | None:
+    """在同 SPU 同 sha256 的候选行里挑出去重命中的那一条。**键与库一致。**
+
+    0044 落的是两条互斥、合起来覆盖全表的局部唯一索引:
+
+        spu_id IS NOT NULL   ->  (spu_id, COALESCE(color_variant_id::text,''), sha256)
+        spu_id IS NULL       ->  (product_id, sha256)
+
+    这里第一步找的就是这把键。**应用层的键比库里的窄,后果不是漏去重,
+    是 500**:窄出来的那一格(同 SPU 不同 SKU、颜色归属相同)在应用层
+    查不到、于是继续 INSERT,然后撞 `uq_media_assets_spu_colour_sha256`。
+    合法的多 SKU 建档、审核、生成会整笔回滚,而报文里一个字都不提这件事。
+
+    命中另一个 SKU 的行时**复用它**,不是新建也不是报冲突。理由是这一格里
+    库只允许存在一行:这张图在这个 SPU 的这个颜色下就是同一张图,
+    而 `spu` 才是素材的作用域(§5.3 的指纹、§6.2 的完整度门禁都按 SPU 算,
+    不按 SKU 算)。跨颜色那一格库是放行的,所以 §11 场景 1 的「各自成行」
+    不受影响 —— 它走的是下面 `return None` 那条路。
+
+    ## 第二步:同商品跨颜色仍然算命中
+
+    这一步不是库要求的(那一格库放行),是**动线**要求的:
+
+        先传成通用图、回头再补颜色   `_fill_missing_colour` 靠它走到
+        重复上传不许把图挪到别的颜色   靠它命中已定归属的那一行然后什么都不改
+
+    退回这一路只复用、不 INSERT,所以它永远撞不上唯一索引。顺序也不能反:
+    第一步先走,才能保证 `_fill_missing_colour` 要写进去的那一格是空的 ——
+    反过来的话,补归属这一下会把行挪进一个已经被别的 SKU 占着的格子。
+    """
+    if product.spu_id is not None:
+        # `a.color_variant_id == color_variant_id` 两边都可能是 None,
+        # 而 Python 里 `None == None` 为真 —— 这正是 `COALESCE(...,'')`
+        # 那个空桶在应用层的等价写法,不要改成 `is` 比较
+        hit = next(
+            (
+                a
+                for a in rows
+                if a.spu_id == product.spu_id
+                and a.color_variant_id == color_variant_id
+            ),
+            None,
+        )
+    else:
+        hit = next(
+            (a for a in rows if a.spu_id is None and a.product_id == product.id),
+            None,
+        )
+    if hit is not None:
+        return hit
+    return next((a for a in rows if a.product_id == product.id), None)
+
+
+def _dedupe_key_row(
+    session: Session,
+    *,
+    product: Product,
+    sha256: str,
+    color_variant_id: UUID | None,
+) -> MediaAsset | None:
+    """按 0044 那把键直接查库。**只给撞键之后回读赢家用。**
+
+    与 `_dedupe_hit()` 分开是因为两者的输入不同:那个从一次已有的快照里挑,
+    这个必须重新问库 —— 走到这里说明刚才那个快照已经被证明是过期的。
+
+    `color_variant_id` 为空时写 `IS NULL` 而不是 `= NULL`:后者在 SQL 里
+    永远不成立,回读会一无所获,于是上面那句 `raise` 会把一次正常的并发
+    重新抛成 500。
+    """
+    where = [MediaAsset.sha256 == sha256]
+    if product.spu_id is not None:
+        where.append(MediaAsset.spu_id == product.spu_id)
+        where.append(
+            MediaAsset.color_variant_id.is_(None)
+            if color_variant_id is None
+            else MediaAsset.color_variant_id == color_variant_id
+        )
+    else:
+        where.append(MediaAsset.spu_id.is_(None))
+        where.append(MediaAsset.product_id == product.id)
+    return session.scalars(select(MediaAsset).where(*where)).first()
 
 
 def _fill_missing_role(

@@ -179,16 +179,51 @@ def _function(path: Path, name: str) -> str:
     return ast.get_source_segment(src, fn) or ""
 
 
+def _call_in(path: Path, fn_name: str, called: str) -> ast.Call:
+    """按 AST 找函数体里那次调用。**不切源码字符串。**"""
+    src = _source(path)
+    fn = next(
+        n
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name
+    )
+    return next(
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and ast.unparse(n.func).split(".")[-1] == called
+    )
+
+
 def test_extraction_usage_no_longer_hardcodes_one_unit():
     """**这一条守的是修复本身还在。**
 
     `billable_units=1` 是原来那一行。它删掉之前,上面全部判定都可以是绿的
     而账仍然错 —— 算术和接线是两件事,这个仓库为它付过两次代价。
+
+    ## 判据打在实参上,不打在源码字符串上
+
+    第一版是 `assert "billable_units=1" not in body`,而 `body` 是
+    `ast.get_source_segment()` 切出来的**整个函数,含 docstring** ——
+    那段 docstring 里逐字写着 `billable_units=1` 来解释被修掉的旧缺陷。
+    于是这条守卫在**修复完全正确**的代码上稳定报红:它查的是"这几个字
+    出现过没有",而要问的是"那个实参今天是不是一个字面量"。
+
+    §3.26 第四节那句话的又一次:按字符串在源码里找东西,找到的从来不保证
+    是你以为的那个位置。这次的失效方向是**假红** —— 而假红比假绿更贵:
+    它会让人开始怀疑整套守卫,然后加豁免、然后关掉。
     """
+    call = _call_in(ATTR_SERVICE, "_record_extraction_usage", "record_usage")
+    passed = {kw.arg: kw.value for kw in call.keywords}
+
+    assert "billable_units" in passed, "流水里没有计费单位这一项"
+    assert not isinstance(passed["billable_units"], ast.Constant), (
+        "`billable_units` 又是一个字面量了 —— 写死就是这次要修的那个 bug。"
+        f"现在传的是 {ast.unparse(passed['billable_units'])}"
+    )
+    assert "provider_attempts" in passed, "次数要单独落列,供对账用"
+
     body = _function(ATTR_SERVICE, "_record_extraction_usage")
-    assert "billable_units=1" not in body, "写死 1 就是这次要修的那个 bug"
     assert "settle_extraction_units" in body, "计费单位必须由纯判定给出"
-    assert "provider_attempts=" in body, "次数要单独落列,供对账用"
 
 
 def test_both_extraction_branches_pass_the_attempt_count():
