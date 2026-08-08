@@ -189,7 +189,8 @@ def create_spu(session: Session, data: dict[str, Any], *, actor: str) -> Spu:
             variant_code=code,
             working_name=(payload.get("working_name") or "").strip(),
             # `display_name` 刻意不从入参取:它是投影列,唯一写入点是属性服务
-            # 在 `standard_color_name` 被确认时(§4.3)。建档时填一个"正式名称"
+            # 在 VARIANT 层 `primary_color` 被确认时(§4.3;那里原来写的
+            # `standard_color_name` 是个不存在的字段名)。建档时填一个"正式名称"
             # 等于绕过那个写入点,而绕过它的值没有来源、没有证据、不会被复核
             supplier_color_code=(payload.get("supplier_color_code") or None),
             sort_order=index,

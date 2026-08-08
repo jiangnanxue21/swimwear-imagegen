@@ -176,7 +176,7 @@ def test_no_database_read_is_nested_two_loops_deep():
 
         商品数 × 图片集版本数 × 每版图片张数
 
-    改之前 `image_set_service._to_view` 正是这个形状 —— 逐张图打一次
+    改之前 `image_set_service.to_view` 正是这个形状 —— 逐张图打一次
     `session.get(MediaAsset)`,而它自己又被 `resolve_for_publish` 按版本
     循环调用。三层乘起来,500 件商品的列表页要打几万次往返。
 

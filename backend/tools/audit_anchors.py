@@ -137,6 +137,24 @@ SHAPES: dict[str, Shape] = {
         old_at=(3,),
         new_at=(4,),
     ),
+    # A45-batch20。第三种形状,多的那一列是**运行器**,不是测试函数名。
+    #
+    # 存在的理由:5-2 的守卫分在两个运行器上(纯层 + 真库),而
+    # 「`build_draft` 有没有把颜色维违规拼进 `violations`」纯层看不见。
+    # 一张表里的行因此要各自说明自己该由谁跑。
+    #
+    # 不复用 `MUTATIONS` 的 5 列、把运行器塞进描述里,是因为那样锚点审计
+    # 读到的仍是 5 列、而脚本按 6 列解包 —— 两边对同一张表的宽度理解不同,
+    # 表现是审计说"锚点全对"而脚本在解包时静默取错列。
+    "RUNNER_MUTATIONS": Shape(
+        table="RUNNER_MUTATIONS",
+        arity=6,
+        base="backend",
+        label_at=(0, 1),
+        path_at=(2,),
+        old_at=(3,),
+        new_at=(4,),
+    ),
     "CASES": Shape(
         table="CASES",
         arity=4,

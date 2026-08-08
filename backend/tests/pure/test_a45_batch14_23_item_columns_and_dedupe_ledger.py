@@ -3,7 +3,7 @@
 ## 这一批还的是什么
 
 14-20 记下的那笔:`listing_image_items.shared_opt_in` 与 `angle` 落库了、
-`_to_view` 读它们、§6.5 的四条规则用它们判定,**而没有任何代码路径写过**。
+`to_view` 读它们、§6.5 的四条规则用它们判定,**而没有任何代码路径写过**。
 
 这是"读得到、判得了、写不进"的第三次出现(前两次:14-22 的
 `media_assets.color_variant_id`,以及本条自己被记账的那一刻)。三次的
@@ -41,7 +41,7 @@ APP_DIR = BACKEND_ROOT / "app"
 def test_the_two_new_item_columns_are_written_by_the_only_constructor():
     """§6.5 那两列**每一个构造点都写**。**欠账已还**,这是那条守卫的正向替身。
 
-    上一版守卫记的是「`shared_opt_in` 与 `angle` 落库了、`_to_view` 读它们、
+    上一版守卫记的是「`shared_opt_in` 与 `angle` 落库了、`to_view` 读它们、
     §6.5 的四条规则用它们判定,而没有任何代码路径写过它们」。它的失效方式
     不是"少了个功能",是**两条规则的判定结果被钉死**:
 

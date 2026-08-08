@@ -415,9 +415,46 @@ export interface DraftField {
   problems: { code: string; message: string; level: string }[]
 }
 
+/**
+ * 导出预览里一行 SKU 的图片(AC-19,阶段 5 批次 5-5)。
+ *
+ * `primary` 为 null 时 `status` 是 MISSING —— 那一行**留在表里**,不是被跳过。
+ * 跳过的话运营会读成"这个尺码不在这次导出里",而它在,只是没有图。
+ */
+export interface DraftImageRow {
+  sku: string
+  primary: string | null
+  extras: string[]
+  status: 'OK' | 'MISSING'
+}
+
+export interface DraftImageColor {
+  variant_id: string
+  /** 显示用。后端已经处理过"没有颜色码就退回短 id",前端不要再兜一次 */
+  variant_code: string
+  rows: DraftImageRow[]
+  missing_count: number
+}
+
+/**
+ * 颜色→SKU→图片预览。**读的是草稿落库的那一份映射,不是当前上游。**
+ *
+ * 三档状态必须分开显示(后端 `export_preview` 的同一条理由):
+ * UNPROVEN 重新生成草稿就好;INCOMPATIBLE 是有人换过快照形状,
+ * 重新生成一百次也不会变好。合并成一句"没有图片信息"会让运营做错动作。
+ */
+export interface DraftImagePreview {
+  status: 'READY' | 'UNPROVEN' | 'INCOMPATIBLE'
+  /** 非 READY 时的一句可执行的话;READY 时是空串 */
+  note: string
+  colors: DraftImageColor[]
+}
+
 export interface DraftPreview {
   header: DraftField[]
   rows: { row_index: number; sku: string | null; fields: DraftField[] }[]
+  /** 可选:存量后端(未接 5-5)不返回它 */
+  images?: DraftImagePreview
 }
 
 /** 一条上游变化(BE-205 / §4.5.1:哪个上游变了、变了哪些字段、该做什么)。 */
@@ -450,7 +487,6 @@ export const STALE_COMPONENT_LABEL: Record<string, string> = {
   color_set: 'ACTIVE 颜色集合',
   color_facts: '颜色已确认事实',
   color_sample: '颜色样品',
-  color_image_set: '颜色图片集',
   color_plan: '颜色生成方案',
 }
 

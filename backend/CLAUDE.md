@@ -46,6 +46,12 @@ tests/*.py      需要真实 PostgreSQL。文件顶部写 pytestmark = requires_
 外加 `ALLOW_DESTRUCTIVE_TEST_DB=1`。夹具会无条件 `DROP SCHEMA public CASCADE`,
 两道护栏都在 `conftest._assert_safe_to_wipe()` 里,少一道就拒绝执行。
 
+**本地协作默认不跑真实基础设施验证。** 除非用户在当前任务中明确要求,
+不得运行上述真库测试、Alembic 真库升降级或任何 Redis / Celery broker 集成验证;
+只运行纯测试和其他不依赖真实 PostgreSQL / Redis 的相关检查。若完整验收需要真库或
+Redis,交付时明确写「未执行」并提醒用户验证范围与命令,等用户指令后再跑。
+这不改变 CI 与正式验收必须执行这些门禁的要求。
+
 ## 密钥副作用(改 conftest 之前必读)
 
 `app.core.config.settings` 是**模块级单例**,import 那一刻就把环境变量读完了。

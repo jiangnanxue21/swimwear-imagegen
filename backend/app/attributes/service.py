@@ -35,8 +35,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.attributes import colour_projection, queue_policy, run_state, scope_fingerprint, validation
 from app.attributes import confidence as conf
-from app.attributes import queue_policy, run_state, scope_fingerprint, validation
 from app.attributes.decision import decide_status
 from app.attributes.registry import REGISTRY, extractable_fields
 from app.attributes.validation import (
@@ -72,6 +72,7 @@ from app.models.attribute import (
     ProductAttributeValue,
 )
 from app.models.product import Product
+from app.models.spu import ColorVariant
 from app.services import audit
 
 logger = get_logger(__name__)
@@ -1283,7 +1284,7 @@ def confirm(
         )
     owner_type, owner_id = owner_for(field_name, **owner_coordinates(product))
     prints = scope_fingerprints_for(session, product)
-    return set_value(
+    row = set_value(
         session,
         owner_type=owner_type,
         owner_id=owner_id,
@@ -1296,6 +1297,48 @@ def confirm(
             prints, owner_type=owner_type, owner_id=owner_id
         ),
     )
+    _project_colour_name(session, field_name=field_name, owner_id=owner_id, value=value)
+    return row
+
+
+def _project_colour_name(
+    session: Session, *, field_name: str, owner_id: str, value: Any
+) -> None:
+    """颜色事实被确认 -> 把颜色名投影进 `color_variants.display_name`(§4.3)。
+
+    **这一列的唯一写入点。** 列注释从落列那天就这么写着,而写入点一直不存在:
+    后端 5 处读、前端 7 处显示,值恒为空串。`audit_column_writers.LEDGER`
+    上那一条的还款日是阶段 5,本批(5-4)还它。
+
+    ## 三条边界
+
+    1. **同一个事务。** 分成两步的话,中间那个窗口里界面显示的是旧名字,
+       而没有任何东西说明为什么。这里不 commit,跟着 `confirm` 的事务走。
+    2. **只在 VARIANT 层的颜色字段上触发**,判据是 `colour_projection.SOURCE_FIELD`
+       —— 不是"字段名里有 color"。后者会让 `secondary_colors` 也写进来,
+       而那是一个列表,投影出来是一串逗号。
+    3. **owner_id 就是 `color_variants.id`。** `owner_for()` 对 VARIANT 层
+       已经强制了这一点(迁移 0046 之后),所以这里直接拿它当主键查 ——
+       查不到就静默返回:那说明这条值挂在一个已经被删掉的颜色上,
+       而**属性写入本身已经成功了**,不该因为一列显示副本而回滚。
+    """
+    if field_name != colour_projection.SOURCE_FIELD:
+        return
+    wanted = colour_projection.projected_name(value)
+    if wanted is None:
+        return
+    try:
+        variant_pk = UUID(str(owner_id))
+    except (TypeError, ValueError):
+        # 非 UUID 的 owner 是迁移 0046 之前的形状。今天 `owner_for()` 走不到
+        # 这里,但存量脚本可能绕过它 —— 静默跳过而不是抛错,理由同上
+        return
+    row = session.get(ColorVariant, variant_pk)
+    if row is None:
+        return
+    if colour_projection.needs_update(row.display_name, wanted):
+        row.display_name = wanted
+        session.flush()
 
 
 def owner_coordinates(product: Product) -> dict[str, str]:

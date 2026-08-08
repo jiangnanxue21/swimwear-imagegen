@@ -264,7 +264,7 @@ def test_the_sample_covers_more_than_one_audience():
 def test_the_manifest_carries_no_projection_columns():
     """样例里不许出现 `display_name`。
 
-    它是投影列,唯一写入点是属性服务在 VARIANT 层 `standard_color_name`
+    它是投影列,唯一写入点是属性服务在 VARIANT 层 `primary_color`
     被确认时(§4.3)。样例里填一个"正式名称"等于绕过那个写入点,而绕过它
     的值没有来源、没有证据、不会被复核 —— 演示时看起来一切正常,
     而属性确认那条动线在样例上就没有对象了。

@@ -139,7 +139,14 @@ class ColorVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     working_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
 
     #: 正式颜色名称。**投影列,唯一写入点是属性服务**(§4.3):VARIANT 层的
-    #: `standard_color_name` 事实被 CONFIRMED 时,在同一个事务里写下来。
+    #: 颜色事实被 CONFIRMED 时,在同一个事务里写下来
+    #: (`attributes/service._project_colour_name`,A45-batch23 接的)。
+    #:
+    #: **那个字段叫 `primary_color`,不叫 `standard_color_name`。**
+    #: 这里原来写的是后者,而全仓没有那个字段 —— 照着它去找的人会找不到,
+    #: 然后得出"还缺前置"的结论。字段名定死在
+    #: `attributes/colour_projection.SOURCE_FIELD`,守卫钉着它真的在注册表里
+    #: 且真的是 VARIANT 层。
     #:
     #: 与 `products` 上那 8 个投影列同一套规矩和同一条 AST 守卫 ——
     #: `info` 里的标记是给那条扫描读的,注释读不到。

@@ -119,11 +119,14 @@ LEDGER: dict[str, str] = {
     "AttributeCalibration.calibration_version": "整张表由运维灌数据",
     "AttributeCalibration.notes": "整张表由运维灌数据",
     # ---- 三、真欠账:有人读、有人显示,而值恒定。**还款日:阶段 5** ----
-    "ColorVariant.display_name": (
-        "还款日:阶段 5。后端 5 处读、前端 7 处显示,而恒为默认值。"
-        "列注释自己写着「唯一写入点是属性服务在 standard_color_name 被确认时」,"
-        "那一处要等 owner_id 切 UUID(阶段 1 剩余项)"
-    ),
+    # `ColorVariant.display_name` **曾经在这里**(还款日:阶段 5)。
+    # A45-batch23 接上了写入点(`attributes/service._project_colour_name`),
+    # 这一条随之删除 —— 台账只记还没有写入路径的列。
+    #
+    # 顺带订正一句躲了几批的话:旧条目说触发字段是 `standard_color_name`,而注册表里是 `primary_color`。
+    # 全仓没有前者这个字段。照那句话去接线的人
+    # 会先找那个字段、找不到,然后得出"还缺前置"的结论 —— 这正是这笔账
+    # 躲过去的方式。
     "PublishAttempt.provider_request_id": (
         "还款日:阶段 5。列注释写着「出事时这是唯一能和平台对账的东西」,"
         "而 PublishPage 上它恒显示 —— 。今天只有 Simulator transport,"
@@ -140,22 +143,12 @@ LEDGER: dict[str, str] = {
     "ListingDraft.template_checksum": (
         "还款日:阶段 5。恒为 NULL,于是「模板改过了、草稿要重出」判不出来"
     ),
-    # 迁移 0049 / 阶段 5 批次 5-1。**这两条是本仓第一次在落列的同一批就记账** ——
-    # §3.38 那两次(`media_assets.color_variant_id` 躲五批、§4.8 去重键躲六批)
-    # 都是事后被人逐条核出来的。判定层(`workbench/upstream_snapshot.py`)
-    # 本批已落码并被穷举测试,写入点在 `workbench/service.build_draft`,排在 5-2。
-    #
-    # 还款日选阶段 5 而不是 6:`DELIVERY_STAGE` 推到 5 的含义是「阶段 5 的交付项
-    # 落码完毕」,而 5-2 正是阶段 5 的批次 —— 标记推上去那一刻这两列必须有人写。
-    "ListingDraft.upstream_versions": (
-        "还款日:阶段 5(批次 5-2 接线 build_draft)。判定层已落码并有穷举测试,"
-        "写入点未接。恒为 NULL,而 NULL 在判定层的语义是「没算过、不放行」——"
-        "所以这一批里它拦下的是全部草稿,不是静默放行"
-    ),
-    "ListingDraft.color_sku_image_map": (
-        "还款日:阶段 5(批次 5-2 接线 build_draft)。与上一列同批同源,"
-        "口径见 `workbench/upstream_snapshot.map_problems` 的第一个分支"
-    ),
+    # 迁移 0049 的两列(`ListingDraft.upstream_versions` /
+    # `.color_sku_image_map`)**曾经在这里**,是本仓第一次在落列的同一批
+    # 就记账的欠账(5-1)。A45-batch20 把 `build_draft` 的写入点接上之后
+    # 两条已删除 —— 台账只记**还没有写入路径**的列,一条还清的账留在这里
+    # 会让下一个读它的人以为缺口还开着(§3.42:说缺口已关比说过期贵,
+    # 而反过来说一个已关的缺口还开着,代价是让人重做一遍已经做完的事)。
     "ModelTemplate.disabled_reason": (
         "还款日:阶段 5。前端有显示位,而停用原因恒为 NULL —— 运营看到模板不可用,"
         "看不到为什么"

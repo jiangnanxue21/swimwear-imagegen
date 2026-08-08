@@ -384,6 +384,14 @@ class CopyGenerateIn(BaseModel):
     only_fields: list[str] | None = Field(
         default=None, description="只重生这些字段;空 = 整篇生成"
     )
+    force: bool = Field(
+        default=False,
+        description=(
+            "已确认事实没变时也强制重新生成(§4.9 / AC-11)。"
+            "默认 false:同一 SPU 同一语言同一事实版本集只算一个幂等单元,"
+            "S/M/L 三行各点一次不会变成三次付费调用"
+        ),
+    )
 
 
 class CopySaveIn(BaseModel):
@@ -407,6 +415,7 @@ def generate_copy(
         session,
         product,
         only_fields=payload.only_fields or None,
+        force=payload.force,
         actor=current_actor(request),
     )
     session.commit()

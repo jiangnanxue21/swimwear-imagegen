@@ -34,7 +34,8 @@ class ColorVariantCreate(BaseModel):
     """建档时的一个颜色。
 
     `display_name`(正式颜色名称)**不在这里** —— 它是投影列,唯一写入点是
-    属性服务在 VARIANT 层 `standard_color_name` 被确认时(§4.3)。
+    属性服务在 VARIANT 层颜色事实(`primary_color`)被确认时写入(§4.3)。
+    **不是 `standard_color_name`** —— 那个名字只出现在几句注释里,全仓没有这个字段。
     建档阶段能填的是 `working_name`:供应商口中的那个名字,内部用。
     """
 

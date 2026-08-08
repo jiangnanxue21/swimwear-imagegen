@@ -54,8 +54,14 @@ def _now():
     return utc_now()
 
 
-def _to_view(session: Session, row: ListingImageSet) -> rules.SetView:
+def to_view(session: Session, row: ListingImageSet) -> rules.SetView:
     """把 ORM 行翻译成规则层的只读视图。
+
+    **公开的(A45-batch20)。** 草稿的颜色维门禁要拿到同一份 `SetView`,
+    而 `workbench` 手边只有 `ImageSetSnapshot` —— 那个投影缺 `shared_opt_in`、
+    `angle` 与素材的角色可信度三样,恰好是 §6.5 判定用的全部输入。
+    照着它转一次的话,颜色维的检查会**静默**弱下来:每一条规则都还在,
+    喂给它们的事实少了三列,而没有任何地方会红。
 
     素材的状态与角色可信度**一起带进去** —— 规则要判断"这张图能不能当主图",
     而那个判断的依据在素材上,不在图片项上。让规则层自己去查库就等于
@@ -163,7 +169,7 @@ def resolve_for_publish(
 ) -> ListingImageSet | None:
     """发布时该用哪一版。**只返回已批准的。**"""
     rows = list_sets(session, spu)
-    views = [_to_view(session, r) for r in rows]
+    views = [to_view(session, r) for r in rows]
     chosen = rules.resolve_set(views, channel=channel, site=site)
     if chosen is None:
         return None
@@ -447,7 +453,7 @@ def create_set(
                             enabled=bool(item.get("enabled", True)),
                             derivative_purpose=item.get("derivative_purpose"),
                             # §6.5 的两列。**没有这两个 kwarg 时它们恒为默认值**,
-                            # 而 `_to_view` 与 `_section_6_5` 都在读它们 ——
+                            # 而 `to_view` 与 `_section_6_5` 都在读它们 ——
                             # 后果不是「少了个功能」:`angle` 恒 NULL 会让配了方案的
                             # 颜色永远覆盖不了必要角度,而门禁报出来的是「缺正面图」。
                             # 运营会去补图,补多少张都没用。
@@ -547,7 +553,7 @@ def validate(session: Session, image_set_id: UUID) -> list[rules.Violation]:
     """
     row = get_set(session, image_set_id)
     return rules.validate_set(
-        _to_view(session, row),
+        to_view(session, row),
         variant_ids=variants.required_variant_ids(session, row.spu),
         required_angles=_required_angles(session, row.spu),
     )
@@ -642,7 +648,7 @@ def approve(session: Session, image_set_id: UUID, *, actor: str) -> ListingImage
     # 变体覆盖必须在**批准**这一步查(BLOCK-02)。发布时才发现少一个颜色,
     # 那批图已经在等平台回执了;批准时发现,运营手边正好就是那批图
     problems = rules.validate_set(
-        _to_view(session, row),
+        to_view(session, row),
         variant_ids=variants.required_variant_ids(session, row.spu),
         required_angles=_required_angles(session, row.spu),
     )
@@ -936,7 +942,7 @@ def downgrade_sets_using(
     )
     downgraded: list[UUID] = []
     for row in affected:
-        if not rules.needs_downgrade(_to_view(session, row)):
+        if not rules.needs_downgrade(to_view(session, row)):
             continue
         row.status = ImageSetStatus.PENDING_REVIEW.value
         downgraded.append(row.id)

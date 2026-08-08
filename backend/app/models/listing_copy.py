@@ -80,6 +80,13 @@ class ListingCopy(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             name="uq_listing_copies_version",
         ),
         Index("ix_listing_copies_lookup", "spu", "channel", "site", "locale", "status"),
+        # 复用查询按 scope + 键找最新一版。上面那条索引的列序里没有键,
+        # 于是复用检查会退化成按 scope 全扫再逐行比 —— 一个 SPU 的文案版本
+        # 不多,今天扫得动,而它会随重生成次数无声增长
+        Index(
+            "ix_listing_copies_idempotency",
+            "spu", "channel", "site", "locale", "idempotency_key",
+        ),
     )
 
     spu: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -119,6 +126,20 @@ class ListingCopy(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     violations: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
+    #: 这一版属于哪个**文案生成幂等单元**(§4.9 / AC-11,迁移 0050)。
+    #:
+    #: 单元 = SPU + 渠道 + 站点 + 语言 + 已确认事实版本集(+ 颜色,启用时)。
+    #: **刻意不含尺码** —— 一个 S/M/L 三码的 SPU 在三行上各点一次生成,
+    #: 输入完全相同,而在这一列之前那是三次真实的付费调用与三个版本。
+    #:
+    #: 算法在 `app/workflows/copy_idempotency.py`,复用挑选口径
+    #: (失败态不占槽位)也在那里。**这一列上没有唯一索引**,理由写在
+    #: 迁移 0050 的文件头:`REJECTED` 的那一版会永久占住键,
+    #: 于是这个 SPU 的文案再也生成不出来。
+    #:
+    #: 可空:迁移 0050 之前建的版本没有键,判定层把 None 判成"重新生成",
+    #: 不是"复用"。方向与 0049 那两列相反,理由见 0050 的文件头。
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     repair_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -222,8 +243,14 @@ class ListingDraft(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # 与迁移 0042 / 0045 / 0048 是同一条规矩的第四次应用:**默认值不许让
     # 任何人被静默放行或静默拦下。**
     #
-    # 写入点在 `workbench/service.build_draft`,**本批(5-1)未接**,
-    # 记在 `tools/audit_column_writers.LEDGER`,还款日:阶段 5。
+    # 写入点是 `workbench/service.build_draft`(批次 5-2 接的,A45-batch20);
+    # 读取点是 `refresh_draft` 的颜色轴与 `_color_ready_violations`。
+    # **这里原来写着「本批(5-1)未接」并指向 `audit_column_writers.LEDGER`
+    # 的一条欠账 —— 那笔账已经还了**,LEDGER 的两条随之删除。
+    #
+    # NULL 仍然出现在存量草稿上,而且**语义不变**:0049 之前建的每一行
+    # 都一次都没算过颜色维。5-2 没有回填它们(`{}` 会把未知伪装成空集),
+    # 收口方式是分批重新生成,见 `docs/STATUS.md` 的上线演练那一节。
     upstream_versions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     #: 颜色 → SKU → 主图/附图 的最终映射(§4.10)。可空口径同上一列
     color_sku_image_map: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

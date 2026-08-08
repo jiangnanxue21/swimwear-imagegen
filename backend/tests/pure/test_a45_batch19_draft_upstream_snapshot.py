@@ -360,11 +360,15 @@ def test_a_deleted_colour_reads_differently_from_a_paused_one():
 
 
 def test_each_colour_axis_reports_separately_and_names_the_colour():
-    """一个颜色的四个轴各报各的,而且每条都点名是哪个颜色。
+    """一个颜色的三个轴各报各的,而且每条都点名是哪个颜色。
 
     合并成一条「红色的上游变了」的话,运营不知道该去重新识别事实、
     还是去重新出图 —— 那正是 §4.5.1 说的「仅显示『已过期』三个字视为未完成」
     在颜色维上的形状。
+
+    **三个而不是四个:`image_set` 不在这里报**(A45-batch20)。理由与
+    `copies` / `spec_version` / `mapping_version` 一字不差,反向守卫在
+    `test_the_image_set_axis_lands_in_the_snapshot_but_is_never_compared`。
     """
     before = _snapshot(_color("v-red", code="RED"))
     after = _snapshot(
@@ -374,19 +378,49 @@ def test_each_colour_axis_reports_separately_and_names_the_colour():
             facts=("v-2",),
             sample="z" * 64,
             plan="q" * 64,
-            image_set=("is-2", 4),
         )
     )
     changes = us.diff_upstream(before, after)
-    assert _components(changes) == [
-        "color_facts",
-        "color_image_set",
-        "color_plan",
-        "color_sample",
-    ]
+    assert _components(changes) == ["color_facts", "color_plan", "color_sample"]
     for change in changes:
         assert "RED" in change.message, f"{change.component} 那条没点名颜色"
         assert change.action, f"{change.component} 那条没说该做什么"
+
+
+def test_the_image_set_axis_lands_in_the_snapshot_but_is_never_compared():
+    """图片集这一格**存进快照,但一条变化都不出**(A45-batch20)。
+
+    ## 为什么它从被比较的一侧搬走
+
+    5-1 落码时这个轴是被比较的。接线(5-2)一做就暴露了:图片集今天
+    **按 SPU 批准**,所以每个 ACTIVE 颜色引用的是同一版 —— 重新批准一次
+    会让本模块报 N 条、`stale.diff_components` 的 `image_set` 再报 1 条,
+    合计 N+1 条说的是同一件事,而运营看到的「这份草稿有 4 个上游变了」
+    从此不可信,且不会有任何东西报错。
+
+    ## 两个方向都要钉
+
+    只钉「不出变化」的话,最省事的退化是把这一格干脆不写进快照 ——
+    那样 AC-19 要的「可解释的上游版本引用」就没了,而"不出变化"照样绿。
+    所以正向也钉:值真的落进去了。
+    """
+    kept = us.build_upstream_versions(
+        components={}, colors=[_color("v-red", code="RED", image_set=("is-1", 3))]
+    )
+    assert kept["colors"]["v-red"]["image_set"] == {"id": "is-1", "version": 3}, (
+        "图片集没落进快照 —— AC-19 要的是「这个颜色的映射是从哪一版铺出来的」"
+    )
+
+    moved = us.build_upstream_versions(
+        components={}, colors=[_color("v-red", code="RED", image_set=("is-2", 4))]
+    )
+    assert us.diff_upstream(kept, moved) == [], (
+        "换一版图片集出了颜色维的变化 —— 那个轴归 `diff_components` 报,"
+        "两边都比会让「变了几处」这个数字不可信"
+    )
+    assert "color_image_set" not in us.COMPONENTS, (
+        "`color_image_set` 回到了封闭取值集里,而没有任何地方会产出它"
+    )
 
 
 def test_fact_changes_name_fields_instead_of_exposing_version_ids():
@@ -625,7 +659,7 @@ def test_the_snapshot_copies_those_three_axes_instead_of_collecting_them_again()
         )
 
 
-# ---------------------------------------------------------------- 五、欠账
+# ------------------------------------------------- 五、欠账(A45-batch20 已还)
 
 
 def _imports_the_layer(node: ast.AST) -> bool:
@@ -633,7 +667,7 @@ def _imports_the_layer(node: ast.AST) -> bool:
 
     两种写法都要认:`from app.workbench import upstream_snapshot`(别名进来)
     与 `from app.workbench.upstream_snapshot import build_upstream_versions`
-    (直接取函数)。只认前一种的话,5-2 用后一种接线时这条欠账守卫
+    (直接取函数)。只认前一种的话,5-2 用后一种接线时这条守卫
     **不会翻转** —— 一条还清了却不肯变红的欠账,和一条没人记的欠账等价。
     """
     if isinstance(node, ast.ImportFrom):
@@ -646,50 +680,59 @@ def _imports_the_layer(node: ast.AST) -> bool:
     return False
 
 
-def test_the_two_draft_snapshot_columns_have_no_writer_yet():
-    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+def test_the_two_draft_snapshot_columns_are_written_by_build_draft():
+    """**欠账已还(A45-batch20)。这条现在是正向守卫。**
 
-    还款日读作「交付阶段推进到 5 之前必须还清」。`DELIVERY_STAGE` 推到 5 的
-    含义是「阶段 5 的交付项落码完毕」,而接线(批次 5-2)正是阶段 5 的批次 ——
-    标记推上去那一刻这两列必须有人写。
+    5-1 落的是列 + 迁移 + 判定层,两列在 `app/` 下没有任何写入路径,
+    由这条守卫的**反向那一版**与 `audit_column_writers.LEDGER` 的两行记着。
+    5-2 把 `build_draft` 的写入点接上,LEDGER 的两行随之删除。
 
-    本批落的是列 + 迁移 + 判定层,写入点在 `workbench/service.build_draft`,
-    读取点在 `refresh_draft` 与 READY 门禁,三处都排在 5-2。
-
+    翻转而不是删除,是因为要防的事换了方向但没有消失:接上之后最省事的
+    退化是有人在重构里把这两行赋值删掉(比如"这两列没人读"),而
     §3.38 那两次(`media_assets.color_variant_id` 躲五批、§4.8 去重键躲六批)
-    都是事后被人逐条核出来的。这一批在落列的**同一批**就记账,
-    并且记在两处:`audit_column_writers.LEDGER`(门禁读它)与这里
-    (「欠账守卫都在还款日之内」读它)。
-
-    还清的样子:两列在 `build_draft` 里被赋值,`LEDGER` 的两条随之失效
-    并被审计点名要求删除 —— 那时这条守卫翻转成正向的,并补一句「欠账已还」。
+    的形状正是「列在、判定读着、而没有写入路径」—— 删掉之后
+    `map_problems` 会对**每一份新草稿**报「没有映射快照」,
+    而错因看上去像是判定层太严。
     """
-    build = (BACKEND_ROOT / "app" / "workbench" / "service.py").read_text(encoding="utf-8")
+    # **判据是 AST 的赋值目标,不是文本。** 按文本扫的第一版被变异 B2 当场咬穿:
+    # 把那一行改成 `pass  # row.color_sku_image_map = color_sku_image_map`
+    # 之后写入点死了,而**注释里那几个字仍然喂真断言**。
+    #
+    # 同一个坑在本仓是第六次(§3.26 / 14-13 / 14-22 / batch18 的 C2 /
+    # batch19 的 caller 守卫)。修法与前几次同向:**从输入里把注释去掉**,
+    # 而 `ast` 天然做到这一点。
+    tree = ast.parse(
+        (BACKEND_ROOT / "app" / "workbench" / "service.py").read_text(encoding="utf-8")
+    )
+    assigned = {
+        target.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute) and getattr(target.value, "id", "") == "row"
+    }
     for column in ("upstream_versions", "color_sku_image_map"):
-        assert f"row.{column}" not in build, (
-            f"{column} 有写入点了 —— 这条欠账已经还了,"
-            "把它翻转成正向守卫并从 LEDGER 里删掉那一条"
+        assert column in assigned, (
+            f"`row.{column}` 没有赋值语句了 —— 它是 5-2 还的那笔账,"
+            "删掉之后每一份新草稿都会被判成「颜色维没算过」"
         )
 
 
-def test_the_decision_layer_has_no_production_caller_yet():
-    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
-
-    判定层本批已落码并被穷举测试,但 `app/` 下**零调用**。
+def test_the_decision_layer_has_production_callers():
+    """**欠账已还(A45-batch20)。这条现在是正向守卫。**
 
     §3.43 把「上游算对了、没人接最后一跳」点成了一类测试看不见的缺陷:
-    纯层全绿、门禁全绿,而功能整条不通。那条门禁(`WIRED_MODULES`)只看
-    被登记的模块,所以一个没登记的新模块可以安静地躺很久 —— 本条替它记账。
+    纯层全绿、门禁全绿,而功能整条不通。5-1 时判定层在 `app/` 下零调用,
+    由这条守卫的反向那一版记着;5-2 接上之后
+    `verify_delivery.WIRED_MODULES` 登记了 `app.workbench.upstream_snapshot`
+    与 `app.workbench.upstream_collect`,那条门禁接管了「有没有人调」。
 
-    还清的样子:`verify_delivery.WIRED_MODULES` 里加上
-    `app.workbench.upstream_snapshot`,由那条门禁接管,本条随之删除。
+    这里留一条更窄的:**两个接线点都在,而且是不同的两处**。
+    `WIRED_MODULES` 只问「有没有人 import」,一个 import 就够;而这一层
+    需要**写**(`build_draft`)与**读**(`refresh_draft` 的颜色轴)各有一处 ——
+    只接写入点的话,快照会一直落库而没有任何人比较它,表现是颜色维
+    永远不过期,和没接线一模一样,却过得了 `WIRED_MODULES`。
     """
-    # **判据是 import,不是文本。** 第一版按文本扫,当场被自己咬:
-    # `models/listing_copy.py` 的列注释里写着「形状与判定在
-    # `app/workbench/upstream_snapshot.py`」—— 于是守卫报「已经接线了」,
-    # 而那句话恰恰是在说它没接。同一个坑在本仓是第五次(§3.26 / 14-13 /
-    # 14-22 / 18 的 C2),修法与上一次同向:**从输入里把注释去掉**,
-    # 而 `ast` 天然做到这一点。
     hits = sorted(
         {
             path.name
@@ -699,10 +742,34 @@ def test_the_decision_layer_has_no_production_caller_yet():
             if _imports_the_layer(node)
         }
     )
-    assert not hits, (
-        f"{hits} 已经引用了判定层 —— 这条欠账还上了,"
-        "把模块登记进 WIRED_MODULES 并删掉本条"
+    # **这份名单是会长的,长了要在这里记一笔。** batch22(5-5)加了
+    # `export_preview.py`(它读 `IMAGE_MAP_SCHEMA_VERSION` —— 预览要能说出
+    # "形状版本对不上",而那个数只能有一个来源)。
+    #
+    # 名单本身不是成绩,它是"谁在依赖这一层"的清单:多一个消费者就多一处
+    # 会被 schema 版本变化波及的地方,而那正是升版时要逐个看的东西。
+    assert hits == ["export_preview.py", "service.py", "upstream_collect.py"], (
+        f"判定层的引用方变成了 {hits} —— 今天应当是三处:"
+        "`workbench/service.py`(读写)、`workbench/upstream_collect.py`(取数)、"
+        "`listings/export_preview.py`(只读形状版本)"
     )
+
+    src = (BACKEND_ROOT / "app" / "workbench" / "service.py").read_text(encoding="utf-8")
+    for func, needle in (
+        ("build_draft", "build_upstream_versions"),
+        ("build_draft", "build_color_sku_image_map"),
+        ("_color_axis_changes", "diff_upstream"),
+        ("_color_ready_violations", "ready_problems"),
+    ):
+        node = next(
+            n
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name == func
+        )
+        assert needle in ast.unparse(node), (
+            f"`{func}` 不再调用 `{needle}` —— 少了这一跳,"
+            "颜色维会安静地退回「算了但没人看」"
+        )
 
 
 def test_the_migration_is_a_pure_column_add_with_no_backfill():

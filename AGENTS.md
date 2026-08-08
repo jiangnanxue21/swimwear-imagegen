@@ -43,6 +43,17 @@ CI(`.github/workflows/ci.yml`)跑六个 job:`gates` / `backend` / `frontend` /
 **`make check-offline` 跑绿 ≠ 全都过了。** 它不含前端类型、lint、Vitest 与构建;
 目标自己会在末尾打印这句话。改了前端还只跑 offline,等于没验。
 
+### 本地真实基础设施验证须由用户明确触发
+
+日常协作默认只运行不依赖真实 PostgreSQL / Redis 的验证。**没有用户在当前任务中的
+明确指令,不得**设置真库测试环境变量、运行 `requires_db` 用例或 Alembic 真库升降级,
+也不得连接 Redis 做 PING、Celery worker / broker 或其他 Redis 集成验证。
+
+如果改动的完整验收确实需要上述验证,本轮只做两件事:在交付说明中明确标为
+「未执行」,并提醒用户需要验证的范围与建议命令;等用户明确指令后再执行。
+这条是本地协作执行约束,**不改变** CI、发布或阶段验收原有的真库 / Redis 门禁,
+也不允许把未执行写成已验证。
+
 ## 硬规则
 
 1. **凭据不进仓库树。** `.secrets/` / `.env` / `*.key` / `*.pem`。

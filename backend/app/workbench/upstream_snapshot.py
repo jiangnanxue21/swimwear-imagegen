@@ -29,6 +29,18 @@
 「这份草稿有 2 个上游变了」,于是「变了几处」这个数字从此不可信。
 反向守卫在 `tests/pure/test_a45_batch19_draft_upstream_snapshot.py`。
 
+**每个颜色的 `image_set` 是这条分工的第四项(A45-batch20 补的)。**
+5-1 落码时它是被比较的,而接线一做就暴露了:图片集今天**按 SPU 批准**
+(`image_set_service.resolve_for_publish` 解析的是 `(spu, channel, site)`),
+于是每个 ACTIVE 颜色引用的是同一版,重新批准一次会让本模块报 N 条、
+`diff_components` 再报 1 条,合计 N+1 条说的是同一件事。
+
+值仍然落进快照,理由是 AC-19 要「可解释的上游版本引用」——
+「这个颜色的映射是从哪一版图片集铺出来的」在出事之后是第一个要查的东西。
+**记下来但不比较**,与上面那三项一字不差是同一条规矩。
+按颜色批准的图片集哪天真的存在了,把它移回被比较的一侧要连同
+`diff_components` 那一侧一起改,不能只加回来。
+
 ## 只看 ACTIVE 颜色 —— 而「只看」不等于「不记」
 
 §6.7:范围口径只检查 `sellable_status=ACTIVE` 的颜色与其 SKU;
@@ -94,9 +106,13 @@ COMPONENTS: tuple[str, ...] = (
     "color_set",           # 哪些颜色是 ACTIVE(新增 / 停用)
     "color_facts",         # 某个颜色的已确认事实版本集
     "color_sample",        # 某个颜色的样品指纹
-    "color_image_set",     # 某个颜色的图片集(id + version)
     "color_plan",          # 某个颜色当前生效的 GenerationPlan 指纹
 )
+# 这里**刻意没有** `color_image_set`:那个轴归 `diff_components` 的
+# `image_set` 报,见模块文档「每个轴只有一个人报」的第四项。
+# 加回来之前先读那一段 —— 它不是漏了,是 batch20 接线时算出 N+1 条重复提示
+# 之后拿掉的。前端的 `STALE_COMPONENT_LABEL` 与本元组由
+# `tests/pure/test_frontend_contract.py` 做集合相等,所以加回来会当场变红。
 
 
 @dataclass(frozen=True)
@@ -124,7 +140,8 @@ class ColorUpstream:
     sample_fingerprint: str | None = None
     #: 该颜色**当前生效**的方案指纹(`workflows.generation_plan.effective_fingerprints`)
     plan_fingerprint: str | None = None
-    #: 该颜色的图片集。没有已批准的那一版时两项都是 None
+    #: 该颜色的图片集。没有已批准的那一版时两项都是 None。
+    #: **落进快照但不被 `diff_upstream` 比较** —— 见模块文档第四项
     image_set_id: str | None = None
     image_set_version: int | None = None
     #: 这个颜色下 `products.sku` 的全集。采集口径是
@@ -438,18 +455,8 @@ def _one_color_changes(
             )
         )
 
-    old_set, new_set = before.get("image_set") or None, after.get("image_set") or None
-    if _set_key(old_set) != _set_key(new_set):
-        out.append(
-            StaleChange(
-                component="color_image_set",
-                message=f"颜色 {label} 引用的图片集在草稿生成之后换了版本",
-                fields=(variant,),
-                old_value=_set_label(old_set),
-                new_value=_set_label(new_set),
-                action="重新生成草稿,新草稿会引用当前批准的那一版",
-            )
-        )
+    # `image_set` 落在快照里但**不在这里比**(模块文档第四项)。
+    # 图片集按 SPU 批准,`diff_components` 已经报过那一次换版了。
     return out
 
 
@@ -574,18 +581,6 @@ def _color_label(variant_id: str, payload: Mapping[str, Any]) -> str:
     """
     code = str(payload.get("variant_code") or "").strip()
     return code or f"{variant_id[:8]}…"
-
-
-def _set_key(value: Mapping[str, Any] | None) -> tuple[str, str]:
-    if not value:
-        return ("", "")
-    return (str(value.get("id") or ""), str(value.get("version") or ""))
-
-
-def _set_label(value: Mapping[str, Any] | None) -> str:
-    if not value:
-        return "无"
-    return f"v{value.get('version')}({str(value.get('id'))[:8]}…)"
 
 
 __all__ = [

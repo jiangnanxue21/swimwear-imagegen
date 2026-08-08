@@ -728,6 +728,24 @@ WIRED_MODULES: dict[str, tuple[str, ...]] = {
     # 未过滤的**行**。没人调的话 `run_extraction` 迟早会退回
     # `len(usable_assets(...))`,那正是它要挡的那一步。
     "app/media/service.py": ("evidence_assets_for", "usable_asset_count"),
+    # A45-batch20(阶段 5 批次 5-2)。5-1 落判定层时 `app/` 下零调用,
+    # 由 `test_a45_batch19_...` 的两条欠账守卫记着;接线之后由这里接管。
+    #
+    # `active_colors` / `primary_of` **不在这张表里**:前者今天的调用点在
+    # 判定层自己的两个 builder 里(模块内互调,这条门禁刻意排除),后者的
+    # 消费者是 5-5 的导出预览 —— 还没有人读那一列的单行主图。
+    #
+    # `ready_problems` 单独登记而不是只登记 `map_problems`:合取入口正是
+    # 它存在的全部理由。只登记被它包住的那一个的话,有人把服务层改成
+    # 直接调 `map_problems`(少了 §6.5 那一半)照样能过这条门禁,
+    # 而表现是一个红色一张自有图都没有的 SPU 顺利 READY。
+    "app/workbench/upstream_snapshot.py": (
+        "build_upstream_versions",
+        "build_color_sku_image_map",
+        "diff_upstream",
+        "ready_problems",
+    ),
+    "app/workbench/upstream_collect.py": ("collect",),
 }
 
 

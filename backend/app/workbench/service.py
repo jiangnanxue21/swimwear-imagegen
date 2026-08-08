@@ -36,10 +36,13 @@ from app.core.enums import (
 )
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
+from app.db import locks
 from app.listings import (
     copy_generator,
     copy_service,
+    export_preview,
     export_writer,
+    image_set_rules,
     image_set_service,
     variants,
 )
@@ -64,6 +67,7 @@ from app.workbench import flow as flow_rules
 from app.workbench import platform as pf
 from app.workbench import platform_service as ps
 from app.workbench import stale as stale_rules
+from app.workbench import upstream_collect, upstream_snapshot
 from app.workbench.flow import (
     AttributeFacts,
     AudienceFacts,
@@ -74,6 +78,7 @@ from app.workbench.flow import (
     MaterialFacts,
     ProductFlow,
 )
+from app.workflows import copy_idempotency
 
 logger = get_logger(__name__)
 
@@ -514,8 +519,14 @@ def _current_draft_data(
     product: Product,
     *,
     manual: Mapping[str, Any],
-) -> tuple[ListingDraftData | None, list[str]]:
-    """按**当前**上游组装草稿数据。前置不满足时返回 (None, 缺什么)。"""
+) -> tuple[ListingDraftData | None, list[str], ListingImageSet | None]:
+    """按**当前**上游组装草稿数据。前置不满足时返回 (None, 缺什么, 图片集行)。
+
+    第三项是刚解析出来的那一版图片集(A45-batch20)。返回它而不是让
+    颜色维取数自己再 `resolve_for_publish()` 一次:两次解析之间有人批准了
+    新版的话,草稿的 `image_set_id` 写的是第一次的结果、颜色维快照记的是
+    第二次的 —— 一份自己和自己对不上的草稿,而且它下一次刷新就说自己过期。
+    """
     problems: list[str] = []
 
     image_set = image_set_service.resolve_for_publish(
@@ -535,7 +546,7 @@ def _current_draft_data(
         problems.append(f"没有已批准的 {generic.LOCALE} 文案")
 
     if problems:
-        return None, problems
+        return None, problems, image_set
 
     # 阶段 0 修复(PRD v2 §0.2):类目从**商品**派生,不再取模块常量。
     # 男装商品从此拿到 men_swimwear 规则包 —— 用女装 spec 静默导出的路径
@@ -554,7 +565,7 @@ def _current_draft_data(
         spec_version=spec.spec_version,
         mapping_version=MAPPING_VERSION,
     )
-    return data, []
+    return data, [], image_set
 
 
 def _components_of(data: ListingDraftData, attr_fields: Mapping[str, str]) -> dict:
@@ -607,7 +618,7 @@ def refresh_draft(
     if row.status == DraftStatus.ARCHIVED.value:
         return False, []
 
-    current, problems = _current_draft_data(
+    current, problems, image_set_row = _current_draft_data(
         session, product, manual=dict(row.manual_payload or {})
     )
     stored = dict((row.canonical_snapshot or {}).get("components") or {})
@@ -632,18 +643,67 @@ def refresh_draft(
             session.flush()
         return True, changes
 
+    # ---- 颜色轴(§6.7,A45-batch20)----
+    #
+    # **`source_fingerprint` 不含颜色维**,所以颜色轴必须在 `is_stale` 之外
+    # 单独问一次。指纹的输入是 `ListingDraftData`(SPU 属性 + 图片集 + 文案 +
+    # 手填 + 两个版本号),没有一项带颜色 —— 于是"新增了一个 ACTIVE 颜色"
+    # 算出来的指纹和原来一模一样,而那正是最该重新生成草稿的一种变化。
+    #
+    # 顺序也是刻意的:先算颜色轴,再和指纹的结论取并集。反过来写成
+    # `if not is_stale: return False, []` 在前的话,颜色维就永远走不到 ——
+    # 这是 5-1 的判定层最容易被"接线接漏"的一跳。
+    color_changes = _color_axis_changes(session, product, row, current, image_set_row)
+
     is_stale = draft_rules.is_stale(row.source_fingerprint, current)
-    if not is_stale:
+    if not is_stale and not color_changes:
         return False, []
 
     if row.status not in (DraftStatus.STALE.value,) and not dry_run:
         row.status = DraftStatus.STALE.value
         session.flush()
-    changes = stale_rules.diff_components(
-        stored,
-        _components_of(current, _attr_field_names(session, product, attr_values)),
-    )
+    changes = [
+        *(
+            stale_rules.diff_components(
+                stored,
+                _components_of(current, _attr_field_names(session, product, attr_values)),
+            )
+            if is_stale
+            else []
+        ),
+        *color_changes,
+    ]
     return True, changes
+
+
+def _color_axis_changes(
+    session: Session,
+    product: Product,
+    row: ListingDraft,
+    current: ListingDraftData,
+    image_set_row: ListingImageSet | None,
+) -> list[stale_rules.StaleChange]:
+    """颜色轴的过期变化(§6.7 / AC-19)。判定全在 `upstream_snapshot`。
+
+    存量草稿(`upstream_versions IS NULL`)在这里拿到的是一条
+    「颜色维是否仍然成立无法证明」——**不是空列表**。这是 5-1 D2 定下的
+    上线语义:0049 之前建的每一行草稿都一次都没算过颜色维,而放行它们
+    等于让一份缺了整个颜色的草稿显示「上游全部有效」。
+
+    收口方式是分批重新生成,不是回填 `{}`(那会把未知伪装成空集)。
+    """
+    inputs = upstream_collect.collect(
+        session, product, canonical=current.product, image_set_row=image_set_row
+    )
+    return upstream_snapshot.diff_upstream(
+        row.upstream_versions,
+        upstream_snapshot.build_upstream_versions(
+            components=_components_of(current, {}),
+            colors=inputs.colors,
+            shared_fact_versions=inputs.shared_fact_versions,
+            shared_sample_fingerprint=inputs.shared_sample_fingerprint,
+        ),
+    )
 
 
 def _draft_facts(
@@ -816,18 +876,78 @@ def _content_plan_or_raise(
     return plan
 
 
+def _copy_unit(
+    session: Session, product: Product, *, attr_values: _AttrValues | None = None
+) -> copy_idempotency.CopyUnit:
+    """这次生成属于哪个幂等单元(§4.9 / AC-11)。
+
+    事实版本集走 `_confirmed_version_ids`,与草稿指纹、内容计划读的是
+    **同一份取数** —— 另查一次就等于给「这次用的是哪些事实」造第二个答案。
+
+    `color_variant_id` 今天恒为 None:颜色维文案要等 5-4 的颜色结构化字段。
+    留着这个位置而不是等到那天再加,是因为它进的是**哈希**:
+    那天补上去会让全部存量键失效,而失效表现为一次全量重新生成(全是付费调用)。
+    """
+    return copy_idempotency.unit_for(
+        spu=product.spu,
+        channel=generic.CHANNEL,
+        site=generic.SITE,
+        locale=generic.LOCALE,
+        fact_versions=_confirmed_version_ids(session, product, attr_values),
+        color_variant_id=None,
+    )
+
+
 def generate_copy(
     session: Session,
     product: Product,
     *,
     only_fields: Sequence[str] | None = None,
+    force: bool = False,
     actor: str,
 ) -> ListingCopy:
     """生成一版文案(FE-221 / FE-222 单字段重生)。
 
     `only_fields` 给了就只覆盖被点名的字段,其余保留上一版 ——
     合并规则在 `copy_generator.merge_fields`,claims 跟着标题走。
+
+    ## 幂等(§4.9 / AC-11,A45-batch21)
+
+    入口是 SKU 粒度的,而 `listing_copies` 是 SPU 粒度的。一个 S/M/L 三码的
+    SPU 在三行上各点一次生成,输入完全相同,而在这之前那是**三次付费调用**。
+
+    所以先算幂等单元、命中就直接返回那一版,**不建内容计划、不调生成器**。
+    `_content_plan_or_raise` 必须留在判定之后:它每次都 `session.add` 一行
+    `ContentPlan` 并写一条审计 —— 放在前面的话,复用路径会安静地攒垃圾行,
+    而"复用了几次"在审计里看起来和"生成了几次"一模一样。
+
+    `force=True` 是运营的明确重做意图(单字段重生蕴含它)。那是一次点击
+    一次调用,不随尺码数量翻倍 —— AC-11 要收口的是"翻倍"那一项。
     """
+    unit = _copy_unit(session, product)
+    previous_for_reuse = _current_copy(session, product.spu)
+    verdict = copy_idempotency.decide(
+        existing_key=getattr(previous_for_reuse, "idempotency_key", None),
+        existing_status=getattr(previous_for_reuse, "status", None),
+        wanted_key=unit.key(),
+        force=force or bool(only_fields),
+    )
+    if not copy_idempotency.spends_money(verdict):
+        # 命中。**返回既有那一版,不新建版本** —— 新建一个内容相同的版本
+        # 会把上一版挤成 ARCHIVED,于是"批准过的那一版"在界面上消失,
+        # 而没有任何东西说明发生了什么
+        return previous_for_reuse
+
+    # 串行化同一个单元:两个并发请求各自判 GENERATE,各调一次生成器。
+    # 拿不到锁就直接告诉调用方"另一次正在跑",不排队 —— 阻塞版会让一次
+    # HTTP 请求等在那里占着连接池(理由与 `db/locks` 里那段一字不差)
+    if not locks.try_advisory_xact_lock(session, "listing_copy_unit", unit.key()):
+        raise ValidationError(
+            "这个 SPU 的文案正在生成中,请稍候再试",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+
     plan = _content_plan_or_raise(session, product, actor=actor)
     rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
     generator = copy_generator.get_generator()
@@ -870,6 +990,7 @@ def generate_copy(
         rules=rules,
         model_name=merged.generator,
         prompt_version=merged.prompt_version,
+        idempotency_key=unit.key(),
         actor=actor,
     )
 
@@ -971,7 +1092,9 @@ def build_draft(
             {k: v for k, v in manual.items() if v is not None}
         )
 
-    data, problems = _current_draft_data(session, product, manual=merged_manual)
+    data, problems, image_set_row = _current_draft_data(
+        session, product, manual=merged_manual
+    )
     if data is None:
         raise ValidationError(
             "草稿前置条件不满足:" + ";".join(problems),
@@ -991,9 +1114,26 @@ def build_draft(
     # spec 与草稿行必须用**同一个**派生结果,不再各取一次常量
     spec = generic.field_spec(category_id=data.category_id)
     mapped = generic.map_fields(data, spec)
+
+    # ---- 颜色维快照与 READY 门禁(§4.10 / §6.7 / AC-18,A45-batch20)----
+    #
+    # 两列与门禁**共用同一次取数**:检查用的颜色集和构建用的颜色集只要
+    # 有一次不同源,就会凭空造出「这个 SKU 不在映射里」,而两边都不报错。
+    inputs = upstream_collect.collect(
+        session, product, canonical=data.product, image_set_row=image_set_row
+    )
+    color_sku_image_map = upstream_snapshot.build_color_sku_image_map(
+        colors=inputs.colors,
+        coverage=image_set_rules.coverage(
+            inputs.image_set,
+            variant_ids=(c.variant_id for c in upstream_snapshot.active_colors(inputs.colors)),
+            required_angles=inputs.required_angles,
+        ),
+    )
     violations = [
         *generic.validate(mapped, spec),
         *generic.image_count_check(mapped, minimum=1),
+        *_color_ready_violations(color_sku_image_map, inputs),
     ]
     blocking = [v for v in violations if v.is_blocking]
     status = DraftStatus.INVALID if blocking else DraftStatus.VALIDATED
@@ -1027,10 +1167,18 @@ def build_draft(
     row.mapping_version = MAPPING_VERSION
     row.spec_version = data.spec_version
     row.source_fingerprint = data.source_fingerprint()
+    components = _components_of(data, _attr_field_names(session, product))
     row.canonical_snapshot = {
-        "components": _components_of(data, _attr_field_names(session, product)),
+        "components": components,
         "summary": draft_rules.summarize(data),
     }
+    row.upstream_versions = upstream_snapshot.build_upstream_versions(
+        components=components,
+        colors=inputs.colors,
+        shared_fact_versions=inputs.shared_fact_versions,
+        shared_sample_fingerprint=inputs.shared_sample_fingerprint,
+    )
+    row.color_sku_image_map = color_sku_image_map
     row.created_by = row.created_by or actor
     if existing is None:
         session.add(row)
@@ -1052,6 +1200,58 @@ def build_draft(
         },
     )
     return row
+
+
+#: 颜色维 READY 门禁产出的违规码。**一个码,不按问题类型再分**。
+#:
+#: 分成 `MISSING_SKU_IN_MAP` / `FOREIGN_COLOR` / … 的写法在这里是错的:
+#: 具体是哪一种已经写在 `message` 里(`ready_problems` 逐条给),而码是
+#: 前端分组与 §17 断言的键。一个码对应一次「颜色维不 READY」,
+#: 加码要同时改前端与断言表,而那两处不会因为漏改而变红。
+COLOR_READY_VIOLATION_CODE = "COLOR_AXIS_NOT_READY"
+
+
+def _color_ready_violations(
+    mapping: Mapping[str, Any], inputs: upstream_collect.UpstreamInputs
+) -> list[FieldViolation]:
+    """§6.7 的 READY 门禁:图片集规则 **AND** SKU 映射完整性(AC-18)。
+
+    ## 为什么是阻断而不是警告
+
+    §6.7 与 AC-18 的原话是「任一侧失败都不得 READY」。写成警告的话,
+    一份红色 SKU 没有映射到任何主图的草稿会照样导出,而平台那边表现为
+    「红色那几行没有图」或者更糟 —— 挂着黑色的主图上架。
+    5-1 D2 已经为同一件事定过调:默认值不许让任何人被静默放行。
+
+    ## 为什么只调 `ready_problems()`,不在这里各调一次
+
+    `map_problems` 刻意不判主图,`validate_set` 刻意不知道映射里铺了哪些 SKU。
+    在这里手写两次调用的话,少读任一侧都只会让本函数少报几条 ——
+    **没有任何测试会红**。合取入口在判定层,那里能被穷举。
+
+    ## 没有图片集时不报
+
+    `image_set is None` 只在 `_current_draft_data` 已经把「没有已批准图片集」
+    拦成前置不满足时才可能出现,而那条路上根本走不到这里。留这个分支是因为
+    传 None 进 `validate_set` 会抛 `AttributeError`,而那个栈指向的是规则层,
+    不是真正缺的东西。
+    """
+    if inputs.image_set is None:
+        return []
+    return [
+        FieldViolation(
+            field_key="color_sku_image_map",
+            code=COLOR_READY_VIOLATION_CODE,
+            message=problem,
+            level="error",
+        )
+        for problem in upstream_snapshot.ready_problems(
+            mapping,
+            colors=inputs.colors,
+            image_set=inputs.image_set,
+            required_angles=inputs.required_angles,
+        )
+    ]
 
 
 def _jsonable(value: Any) -> Any:
@@ -1106,9 +1306,17 @@ def draft_preview(session: Session, product: Product, row: ListingDraft) -> dict
     # 预览会用新 spec 去解释旧 payload,列头对不上值
     spec = generic.field_spec(category_id=row.category_id)
     mapped = _mapped_from_row(row)
-    return export_writer.preview_tables(
+    preview = export_writer.preview_tables(
         mapped, spec, violations=mapped.violations
     )
+    # ---- 颜色→SKU→图片(AC-19 的另一半,A45-batch22)----
+    #
+    # 读**落库的那一份**(`row.color_sku_image_map`),不重新推断。
+    # 重新推断的预览永远自洽:它显示"当前该用哪些图",而导出用的是草稿
+    # 生成那一刻存下来的那些 —— 上游变过之后两者不是一回事,
+    # 于是运营在预览里看到红色有主图、导出出来那一行是空的,两边都不报错。
+    preview["images"] = export_preview.image_preview(row.color_sku_image_map)
+    return preview
 
 
 def stale_reason(

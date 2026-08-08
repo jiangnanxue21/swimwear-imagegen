@@ -123,6 +123,7 @@ def save_copy(
     prompt_version: str | None = None,
     repair_rounds: int = 0,
     synonyms: dict[str, str] | None = None,
+    idempotency_key: str | None = None,
     actor: str = "system",
 ) -> ListingCopy:
     """落一版文案并**立刻校验**。
@@ -132,6 +133,13 @@ def save_copy(
 
     结构不合格的输出也落库(经 `sanitize_*` 折成安全形态),状态是
     `REJECTED`。丢掉的话运营只能看到"生成失败",看不到模型到底吐了什么。
+
+    `idempotency_key`(§4.9 / AC-11):这一版属于哪个文案生成幂等单元。
+    由调用方(`workbench/service.generate_copy`)算好传进来,见下面那段注释。
+    **`REJECTED` 的行也带着键落库**,而复用口径把失败态排除在外 ——
+    两者的分工是:列如实记录"这一版是为哪个单元生成的",
+    判定层决定"哪些状态可以拿来复用"。合成一件事的写法(失败就不写键)
+    会让"这个单元试过没有"查不出来。
     """
     violations = copy_rules.validate_copy(
         copy,
@@ -179,6 +187,11 @@ def save_copy(
                     prompt_version=prompt_version,
                     repair_rounds=repair_rounds,
                     spec_version=rules.spec_version,
+                    # §4.9 / AC-11。**不传就留 NULL,不在这里现算一个** ——
+                    # 现算的话这一层要知道"已确认事实版本集"是什么,
+                    # 而那是调用方刚刚算过的东西;算第二次就是第二个答案,
+                    # 表现是刚生成的那一版立刻判"不命中"、下次点生成又付一次费
+                    idempotency_key=idempotency_key,
                 )
                 session.add(row)
                 session.flush()
