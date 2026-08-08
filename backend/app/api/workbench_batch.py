@@ -635,6 +635,10 @@ def list_spus(
                 spu_rules.SkuRow(
                     product_id=str(product.id),
                     sku=product.sku,
+                    # 硬规则 4:主键由后端给,前端不许拿 `spu` 字符串码去凑一个。
+                    # 老建档路径建的行这一列仍可能是 NULL —— 那时给 None,
+                    # 而不是给一个"看起来像 id"的东西
+                    spu_id=str(product.spu_id) if product.spu_id else None,
                     name=product.name,
                     color=product.primary_color or None,
                     size=product.size,

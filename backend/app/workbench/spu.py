@@ -54,6 +54,16 @@ class SkuRow:
     name: str = ""
     color: str | None = None
     size: str | None = None
+    #: 这一行商品挂的 SPU 主键(`products.spu_id`,阶段 1 落的外键)。
+    #:
+    #: **它不是 `spu` 那个字符串码。** 两者的区别是这一批存在的全部理由:
+    #: 生成方案、颜色变体、按颜色上传三条动线的接口收的都是 UUID,而这一页
+    #: 此前只有字符串码 —— 前端因此没有任何一条路径拿得到主键,方案面板
+    #: 写完了三批也接不进去(见 `docs/DECISIONS.md` §3.48)。
+    #:
+    #: 可空:老建档路径(`create_product` / CSV 导入)建的行今天仍可能没有
+    #: 这一列。**空就是空,前端据此不给链接**,不许拿字符串码顶上去。
+    spu_id: str | None = None
     attributes: Mapping[str, str] = None  # type: ignore[assignment]
     #: 这个 SKU 自己的流程状态,用于在展开行上显示卡点
     completion: int = 0
@@ -96,6 +106,31 @@ class SpuGroup:
     inconsistent: tuple[FieldConsistency, ...]
     #: 变体维度的取值汇总,如 {"颜色": ("黑","白"), "尺码": ("S","M")}
     variants: Mapping[str, tuple[str, ...]]
+
+    @property
+    def spu_id(self) -> str | None:
+        """这一组的 SPU 主键。**推不出来时给 None,不猜一个出来。**
+
+        分组键是 `spu` 字符串码,而主键住在每一行商品上,所以这里做的是
+        一次收敛而不是一次读取。三种情况:
+
+            全组同一个非空值   给它 —— 这是建档路径建出来的正常形状
+            一个非空值都没有   给 None(老建档路径,那批商品还没有主键)
+            **两个以上不同值** 给 None
+
+        第三种是这个属性存在的理由。它意味着两个不同的 SPU 行共用了同一个
+        字符串码 —— §4.1 的唯一约束不允许,但**约束在库里、这个函数在纯层**,
+        而纯层拿到的是别人喂进来的行。挑一个出来的代价是运营点进去看到的是
+        另一个款:方案面板会照着那个主键列方案、启用、把**别人的**图片集
+        判过期,而每一步都不会报错。
+
+        与 `FieldConsistency.value` 同一条口径(不一致时返回 None),
+        理由也同一条:**这一页宁可少给一个链接,不可给一个错的。**
+        """
+        ids = {row.spu_id for row in self.skus if row.spu_id}
+        if len(ids) != 1:
+            return None
+        return next(iter(ids))
 
     @property
     def sku_count(self) -> int:
@@ -208,6 +243,9 @@ def serialize(groups: Iterable[SpuGroup]) -> list[dict[str, object]]:
     return [
         {
             "spu": g.spu,
+            # 主键与字符串码**并排给出**,不合并成一个字段。前端要判「这一行
+            # 点不点得进去」,而那个判断的依据是主键在不在,不是码长什么样
+            "spu_id": g.spu_id,
             "name": g.name,
             "sku_count": g.sku_count,
             "completion": g.completion,

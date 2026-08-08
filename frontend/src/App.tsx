@@ -12,6 +12,7 @@ import NotFoundPage from './pages/NotFoundPage'
 import SystemStatusPage from './pages/SystemStatusPage'
 import TodayPage from './pages/TodayPage'
 import SpuCreatePage from './pages/SpuCreatePage'
+import SpuDetailPage from './pages/SpuDetailPage'
 import WorkbenchListPage from './pages/WorkbenchListPage'
 import WorkbenchProductPage from './pages/WorkbenchProductPage'
 import WorkbenchBatchPage from './pages/WorkbenchBatchPage'
@@ -154,6 +155,11 @@ export const router = createBrowserRouter(
         {/* 三步建档(阶段 1)。放在 /spus/new 而不是 /workbench-spus/new:
             后者的前缀属于只读聚合视图,而这是一条写动线 */}
         <Route path="/spus/new" element={<SpuCreatePage />} />
+        {/* 生成方案面板的宿主页(阶段 4)。**必须排在 /spus/new 后面** ——
+            `:spuId` 会把 "new" 也吃掉,那时建档页永远打不开,而路由不报错。
+            react-router 6 的排序是分数优先、静态段胜过动态段,所以今天两条
+            顺序反过来也对;写成这个顺序是为了让读代码的人不必去查那条规则 */}
+        <Route path="/spus/:spuId" element={<SpuDetailPage />} />
         <Route path="/workbench-spus" element={<WorkbenchSpuPage />} />
         <Route path="/workbench-import" element={<WorkbenchImportPage />} />
         {/* B-02:发布链路的前端入口。`?product_id=` 会直接打开提交弹窗 */}

@@ -567,6 +567,15 @@ export interface SpuSkuRow {
 
 export interface SpuGroup {
   spu: string
+  /**
+   * SPU 主键(UUID)。**与 `spu` 那个字符串码是两样东西。**
+   *
+   * 生成方案、颜色变体、按颜色上传三条动线的接口收的都是它。为空表示这一组
+   * 是老建档路径建出来的(没有 `products.spu_id`),或者组内几行商品指向了
+   * 不同的主键 —— 两种情况后端都给 null,前端**据此不给链接**,
+   * 不许把 `spu` 塞进需要 UUID 的地方(那会得到一个 422,而错因指向后端)。
+   */
+  spu_id: string | null
   name: string
   sku_count: number
   /** 各 SKU 的最小值,不是平均值 —— 上架文件是整个 SPU 一起导的 */

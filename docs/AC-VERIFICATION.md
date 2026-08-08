@@ -139,9 +139,10 @@ POST /api/products {"spu":"SPU-100","sku":"SKU-REG01-A","name":"回归测试泳�
 
 ```bash
 cd backend
-TEST_DATABASE_URL="postgresql+psycopg2://postgres:xue900830@39.97.61.13:5432/imagegen_test" \
+# 先从环境或 secret manager 注入 TEST_POSTGRES_PASSWORD / REDIS_PASSWORD。
+TEST_DATABASE_URL="postgresql+psycopg://postgres:${TEST_POSTGRES_PASSWORD}@127.0.0.1:5432/imagegen_test" \
 ALLOW_DESTRUCTIVE_TEST_DB=1 CI=1 \
-REDIS_URL="redis://:xue900830@39.97.61.13:6379/0" \
+REDIS_URL="redis://:${REDIS_PASSWORD}@39.97.61.13:6379/0" \
 CELERY_BROKER_URL="$REDIS_URL" CELERY_RESULT_BACKEND="$REDIS_URL" \
 python3 -m pytest \
   tests/test_a45_batch12_4_recovery_db.py \
@@ -431,9 +432,10 @@ AC-10 / AC-11 / AC-18 / AC-19   阶段 5:Listing 与草稿 本轮不在范围
 ```bash
 cd backend
 # 前置:连 PG / Redis
-export TEST_DATABASE_URL="postgresql+psycopg2://postgres:xue900830@39.97.61.13:5432/imagegen_test"
+# TEST_POSTGRES_PASSWORD / REDIS_PASSWORD 由环境或 secret manager 注入,不写进仓库。
+export TEST_DATABASE_URL="postgresql+psycopg://postgres:${TEST_POSTGRES_PASSWORD}@127.0.0.1:5432/imagegen_test"
 export ALLOW_DESTRUCTIVE_TEST_DB=1 CI=1
-export REDIS_URL="redis://:xue900830@39.97.61.13:6379/0"
+export REDIS_URL="redis://:${REDIS_PASSWORD}@39.97.61.13:6379/0"
 export CELERY_BROKER_URL="$REDIS_URL" CELERY_RESULT_BACKEND="$REDIS_URL"
 
 # P0-1

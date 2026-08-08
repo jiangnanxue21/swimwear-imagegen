@@ -15,7 +15,7 @@
  * 平均值会给出"4 个 SKU 三个做完了 = 75%"这种读数,而这个 SPU 一件也上不了架。
  */
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Alert, Button, Card, Empty, Input, Progress, Space, Table, Tag, Tooltip,
 } from 'antd'
@@ -56,9 +56,21 @@ export default function WorkbenchSpuPage() {
       title: 'SPU',
       key: 'spu',
       width: 220,
+      // 链接只在后端**真给了主键**时出现。老建档路径(create_product / CSV
+      // 导入)建的行没有 `products.spu_id`,组内几行指向不同主键时后端也给
+      // null —— 两种情况都不给链接,而不是拿 `spu` 字符串码去凑一个 UUID:
+      // 那会得到一个 422,而错因指向后端(14-23 逐条核路由时点名的那种坏法)
       render: (_, row) => (
         <div>
-          <span className="mono">{row.spu}</span>
+          {row.spu_id ? (
+            <Link className="mono" to={`/spus/${row.spu_id}`}>
+              {row.spu}
+            </Link>
+          ) : (
+            <Tooltip title="这个 SPU 是老建档路径建的,没有主键,配不了生成方案。走三步建档重新建一次即可">
+              <span className="mono">{row.spu}</span>
+            </Tooltip>
+          )}
           <div style={{ fontSize: fontScale.meta, color: brandVars.slate }}>{row.name}</div>
         </div>
       ),
@@ -288,7 +300,13 @@ export default function WorkbenchSpuPage() {
           ),
         }}
         locale={{
-          emptyText: (
+          // 这一页的 dataSource 在失败时清空,于是 antd 必然渲染 emptyText。
+          // 不分岔的话一次网络失败会说「还没有商品。先在导入页导入一批」——
+          // 一句错得很有说服力的话,而运营照着它去导入一遍已经存在的商品。
+          // 存量台账 `_UNBRANCHED_EMPTY_STATES` 的第三条到此还清
+          emptyText: query.isError ? (
+            <Empty description="拉不到 SPU 聚合,点上方「刷新」再试一次。" />
+          ) : (
             <Empty
               description={
                 search ? `没有匹配「${search}」的 SPU` : '还没有商品。先在导入页导入一批。'

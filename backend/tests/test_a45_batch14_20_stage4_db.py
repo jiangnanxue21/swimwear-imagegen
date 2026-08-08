@@ -1,4 +1,4 @@
-"""A45-batch14-20:阶段 4 的**真库**用例。**一次都没跑过。**
+"""A45-batch14-20:阶段 4 的真库用例。
 
 ## 为什么这几条非要真库
 
@@ -20,7 +20,7 @@
 
 ## 顺序
 
-    alembic upgrade head        # 0040 / 0041 从未执行过
+    alembic upgrade head        # 从空库执行完整迁移链
     pytest tests/test_a45_batch14_20_stage4_db.py
     pytest -m requires_db       # 再跑全量
 
@@ -36,11 +36,16 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.enums import GenerationPlanStatus, SellableStatus, SpuStatus
+from app.models.generation import GenerationTask
 from app.models.generation_plan import GenerationPlan
+from app.models.listing_image import ListingImageSet
+from app.models.product import Product
 from app.models.spu import ColorVariant, Spu
+from app.services import generation_plan_service
 from app.workflows import generation_plan as gp
+from tests.conftest import requires_db
 
-pytestmark = pytest.mark.requires_db
+pytestmark = requires_db
 
 
 def _spu(session) -> Spu:
@@ -86,96 +91,124 @@ def _plan(spu: Spu, **kw) -> GenerationPlan:
 # ---------------------------------------------------------------- 唯一性
 
 
-def test_a_second_spu_default_plan_is_rejected_by_the_database(db_session):
+def test_a_second_spu_default_plan_is_rejected_by_the_database(session):
     """**这一条是本文件的第一位。**
 
     NULL 互不相等,所以 `UNIQUE(spu_id, color_variant_id)` 挡不住它。
     挡得住的只有 `COALESCE(color_variant_id::text, '')` 那条表达式索引。
     """
-    spu = _spu(db_session)
-    db_session.add(_plan(spu))
-    db_session.flush()
+    spu = _spu(session)
+    session.add(_plan(spu))
+    session.flush()
 
-    db_session.add(_plan(spu))
+    session.add(_plan(spu))
     with pytest.raises(IntegrityError):
-        db_session.flush()
+        session.flush()
 
 
-def test_two_colours_can_each_have_their_own_override(db_session):
+def test_two_colours_can_each_have_their_own_override(session):
     """颜色覆盖之间互不影响 —— 唯一性是按 (spu, 颜色) 这一对算的。"""
-    spu = _spu(db_session)
-    red = _variant(db_session, spu, "RED")
-    blue = _variant(db_session, spu, "BLU")
-    db_session.add(_plan(spu))
-    db_session.add(_plan(spu, color_variant_id=red.id))
-    db_session.add(_plan(spu, color_variant_id=blue.id))
-    db_session.flush()
+    spu = _spu(session)
+    red = _variant(session, spu, "RED")
+    blue = _variant(session, spu, "BLU")
+    session.add(_plan(spu))
+    session.add(_plan(spu, color_variant_id=red.id))
+    session.add(_plan(spu, color_variant_id=blue.id))
+    session.flush()
 
 
-def test_an_archived_plan_frees_the_slot(db_session):
+def test_an_archived_plan_frees_the_slot(session):
     """归档之后可以再配一份。
 
     少了 `WHERE status <> 'ARCHIVED'`,一个 SPU 一辈子只能改一次方案 ——
     而旧方案又不能删(图片集过期判定要拿它的指纹比)。
     """
-    spu = _spu(db_session)
+    spu = _spu(session)
     old = _plan(spu)
-    db_session.add(old)
-    db_session.flush()
+    session.add(old)
+    session.flush()
 
     old.status = GenerationPlanStatus.ARCHIVED.value
-    db_session.flush()
+    session.flush()
 
-    db_session.add(_plan(spu))
-    db_session.flush()  # 不该炸
+    session.add(_plan(spu))
+    session.flush()  # 不该炸
 
 
-def test_a_negative_budget_cap_is_rejected(db_session):
+def test_a_negative_budget_cap_is_rejected(session):
     """负上限的表现是"每次创建任务都被预算拦下",而提示写的是"预算不足"。"""
-    spu = _spu(db_session)
-    db_session.add(_plan(spu, budget_cap=-1))
+    spu = _spu(session)
+    session.add(_plan(spu, budget_cap=-1))
     with pytest.raises(IntegrityError):
-        db_session.flush()
+        session.flush()
 
 
 # ---------------------------------------------------------------- 删除方向
 
 
-def test_deleting_a_plan_does_not_take_the_pictures_with_it(db_session):
+def test_deleting_a_plan_keeps_the_task_and_clears_only_the_reference(session):
     """`generation_tasks.generation_plan_id` 是 SET NULL,不是 CASCADE。
 
     CASCADE 的话,删一份方案会连着删掉它出过的任务 —— 而那些任务的候选图
     可能已经批准、已经发布。指纹快照留在任务行上,所以"当时那份方案长什么样"
     仍然答得出来。
     """
-    spu = _spu(db_session)
+    spu = _spu(session)
     plan = _plan(spu)
-    db_session.add(plan)
-    db_session.flush()
+    session.add(plan)
+    session.flush()
     plan_id = plan.id
 
-    db_session.delete(plan)
-    db_session.flush()
+    product = Product(
+        spu_id=spu.id,
+        spu=spu.spu_code,
+        sku=f"{spu.spu_code}-BLK-S",
+        name="阶段四外键测试商品",
+        category="swimwear",
+        audience="WOMEN",
+    )
+    session.add(product)
+    session.flush()
+    task = GenerationTask(
+        product_id=product.id,
+        mode="product_to_model",
+        provider="mock",
+        idempotency_key=f"stage4-delete-{uuid.uuid4().hex}",
+        generation_plan_id=plan.id,
+        plan_fingerprint="snapshot-survives-plan-deletion",
+    )
+    session.add(task)
+    session.flush()
+    task_id = task.id
 
-    remaining = db_session.execute(
-        text("SELECT count(*) FROM generation_tasks WHERE generation_plan_id = :pid"),
-        {"pid": str(plan_id)},
-    ).scalar_one()
-    assert remaining == 0
+    session.delete(plan)
+    session.flush()
+
+    row = session.execute(
+        text(
+            "SELECT generation_plan_id, plan_fingerprint "
+            "FROM generation_tasks WHERE id = :tid"
+        ),
+        {"tid": str(task_id)},
+    ).one()
+    assert row[0] is None
+    assert row[1] == "snapshot-survives-plan-deletion"
+    assert session.get(GenerationTask, task_id) is not None
+    assert session.get(GenerationPlan, plan_id) is None
 
 
-def test_deleting_a_colour_takes_its_override_but_not_the_spu_default(db_session):
+def test_deleting_a_colour_takes_its_override_but_not_the_spu_default(session):
     """颜色没了,它的覆盖跟着走(CASCADE);SPU 默认那份留下。"""
-    spu = _spu(db_session)
-    red = _variant(db_session, spu, "RED")
-    db_session.add(_plan(spu))
-    db_session.add(_plan(spu, color_variant_id=red.id))
-    db_session.flush()
+    spu = _spu(session)
+    red = _variant(session, spu, "RED")
+    session.add(_plan(spu))
+    session.add(_plan(spu, color_variant_id=red.id))
+    session.flush()
 
-    db_session.delete(red)
-    db_session.flush()
+    session.delete(red)
+    session.flush()
 
-    left = db_session.execute(
+    left = session.execute(
         text("SELECT count(*) FROM generation_plans WHERE spu_id = :sid"),
         {"sid": str(spu.id)},
     ).scalar_one()
@@ -185,81 +218,94 @@ def test_deleting_a_colour_takes_its_override_but_not_the_spu_default(db_session
 # ---------------------------------------------------------------- §6.5 接线
 
 
-def test_the_new_image_item_columns_exist_with_the_conservative_default(db_session):
+def test_the_new_image_item_columns_have_the_conservative_database_shape(session):
     """`shared_opt_in` 默认必须是 false(§6.5「默认不混入」)。
 
     默认 true 在今天看不出差别(库里的 `variant_id` 全是 NULL),而颜色
     绑定入口一上线,每个颜色的附图位都会自动灌满所有通用图。
     """
-    row = db_session.execute(
+    rows = session.execute(
         text(
-            "SELECT column_default, is_nullable FROM information_schema.columns "
-            "WHERE table_name = 'listing_image_items' AND column_name = 'shared_opt_in'"
+            "SELECT column_name, column_default, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'listing_image_items' "
+            "AND column_name IN ('shared_opt_in', 'angle')"
         )
-    ).one()
-    assert row[1] == "NO"
-    assert "false" in str(row[0]).lower()
+    ).all()
+    shape = {row[0]: (row[1], row[2]) for row in rows}
+    assert set(shape) == {"shared_opt_in", "angle"}
+    assert shape["shared_opt_in"][1] == "NO"
+    assert "false" in str(shape["shared_opt_in"][0]).lower()
+    assert shape["angle"] == (None, "YES")
 
 
-def test_no_existing_image_set_becomes_unapprovable(db_session):
-    """**§3.1「系统尚未投入使用」这句话在这里被真的验一次。**
+def _approved_multicolour_image_set_count(session) -> int:
+    """上线前盘点 SQL。生产执行时只读,测试里用造出的风险行反验。"""
+    return session.execute(
+        text(
+            "SELECT count(*) FROM listing_image_sets s "
+            "WHERE s.status = 'APPROVED' AND EXISTS ("
+            "  SELECT 1 FROM spus p "
+            "  JOIN color_variants v ON v.spu_id = p.id "
+            "  WHERE p.spu_code = s.spu "
+            "  GROUP BY p.id HAVING count(v.id) > 1)"
+        )
+    ).scalar_one()
+
+
+def test_inventory_finds_an_approved_multicolour_set_with_only_shared_images(session):
+    """盘点必须抓到「多颜色 SPU + 全部通用图」,不能靠 item 已经带颜色。
 
     §6.5 的门禁把"有通用图就算覆盖"那条放行拿掉了。如果库里真的存在
     多色 SPU 的已批准图片集,它们会在下一次校验时全部变成 BLOCKED ——
     那不是修复,是停产(`image_set_service.variant_coverage` 的注释里
     写过这个顾虑,本批是靠 §6.5 才敢动它)。
 
-    这条断言的是**前提**而不是行为:库里没有已批准的多色图片集。
-    它红了说明那句"没有存量数据"不成立,那时该做的是先做数据盘点,
-    而不是把门禁调松。
+    测试夹具每次先清空 schema,所以它不能证明真实环境"没有存量"。这里
+    反向造一条风险数据,证明上线前使用的只读盘点 SQL 不会得到平凡的零。
     """
-    stale = db_session.execute(
-        text(
-            "SELECT count(*) FROM listing_image_sets s "
-            "WHERE s.status = 'APPROVED' AND EXISTS ("
-            "  SELECT 1 FROM listing_image_items i "
-            "  WHERE i.image_set_id = s.id AND i.variant_id IS NOT NULL)"
+    spu = _spu(session)
+    _variant(session, spu, "RED")
+    _variant(session, spu, "BLU")
+    session.add(
+        ListingImageSet(
+            spu=spu.spu_code,
+            version=1,
+            status="APPROVED",
+            approved_by="stage4-db-test",
         )
-    ).scalar_one()
-    assert stale == 0, (
-        "库里已经有绑定了颜色的已批准图片集 —— §6.5 的门禁会影响它们,"
-        "先盘点再上线,不要调松门禁"
     )
+    session.flush()
+
+    assert _approved_multicolour_image_set_count(session) == 1
 
 
-def test_the_stored_fingerprint_matches_what_the_pure_layer_computes(db_session):
+def test_save_plan_stores_the_fingerprint_the_pure_layer_computes(session):
     """存下来的指纹必须是纯层算出来的那一个。
 
     服务层自己拼一个的表现是:创建任务时用 A,判过期时用 B,于是每次
     创建任务都会顺带把自己的图片集判成过期 —— 一个只会多花钱、不会报错的洞。
     """
-    spu = _spu(db_session)
+    spu = _spu(session)
     angles = gp.normalize_angles(["FRONT", "BACK"])
-    plan = _plan(
-        spu,
-        angles_json=gp.serialize_angles(angles),
-        plan_fingerprint=gp.plan_fingerprint(
-            model_template_id=None,
-            provider="mock",
-            scene="studio",
-            pose="STANDING_FRONT",
-            angles=angles,
-            budget_cap=None,
-        ),
-    )
-    db_session.add(plan)
-    db_session.flush()
-    db_session.refresh(plan)
-
-    view = gp.PlanView(
-        plan_id=str(plan.id),
-        color_variant_id=None,
+    expected = gp.plan_fingerprint(
         model_template_id=None,
-        provider=plan.provider,
-        scene=plan.scene,
-        pose=plan.pose,
-        angles=gp.normalize_angles(plan.angles_json),
-        budget_cap=plan.budget_cap,
-        status=plan.status,
+        provider="mock",
+        scene="studio",
+        pose="STANDING_FRONT",
+        angles=angles,
+        budget_cap=None,
     )
-    assert gp.fingerprint_of(view) == plan.plan_fingerprint
+    plan = generation_plan_service.save_plan(
+        session,
+        spu_id=spu.id,
+        provider="mock",
+        scene="studio",
+        pose="STANDING_FRONT",
+        angles=["FRONT", "BACK"],
+        actor="stage4-db-test",
+    )
+    session.refresh(plan)
+
+    assert plan.plan_fingerprint == expected
+    assert plan.angles_json == gp.serialize_angles(angles)

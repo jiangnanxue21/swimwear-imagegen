@@ -84,9 +84,15 @@ A42 又修正了三列的上报口径(Mock 出图 / Mock 评分曾被报成 REAL
 ```
 src/api/          按资源分文件,统一走 client.ts(拦截器、错误归一、身份头)
 src/components/   通用组件 + workbench/ 下的工作台各 Tab
-src/hooks/        useUrlSeed(URL 即状态)、useServerSort、useIdentity、useThemeMode
+src/hooks/        useUrlFilters(URL 是唯一真相)、useServerSort、useIdentity、useThemeMode
 src/theme.ts      antd token 与暗色模式,颜色不要写死在组件里
 ```
 
-`useUrlSeed` 的约定:筛选条件进 URL query,刷新和分享链接都要能还原同一屏。
+`useUrlFilters` 的约定:筛选条件进 URL query,刷新和分享链接都要能还原同一屏。
 新增筛选项时一并加进去,不要只存 useState。
+
+**这里原来写的是 `useUrlSeed`,而那个文件在 A45-batch14-17 就删掉了** ——
+它的做法是"用完把参数擦掉",于是 URL 只是初值、组件内 state 是第二处真相,
+§8.2 的四条要求里三条落空。删它是刻意的:留着下一个人会照着抄回来。
+照这一段去找 `useUrlSeed` 的人会找不到文件,然后多半自己写一个 —— 
+那正是它被删掉要防的东西。

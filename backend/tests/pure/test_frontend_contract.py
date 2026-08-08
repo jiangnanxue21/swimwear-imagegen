@@ -78,7 +78,9 @@ _FRONTEND_PAGES = PROJECT_ROOT / "frontend" / "src" / "pages"
 _UNBRANCHED_EMPTY_STATES = {
     "AuditLogPage.tsx": {"query"},
     "WorkbenchBatchPage.tsx": {"list"},
-    "WorkbenchSpuPage.tsx": {"query"},
+    # WorkbenchSpuPage 那一条由 A45-batch18 还清(改那一页时顺手 —— §3.46 第 2
+    # 条把它归给"与宿主页无关",而宿主页这一批恰好动到了它)。**台账自净**:
+    # 补好之后条目必须删掉,不然它会从"已知欠账"变成"我们不看这一页"
 }
 
 _BLANKS_ON_ERROR = re.compile(r"dataSource=\{\s*(\w+)\.isError\s*\?\s*\[\]\s*:")
