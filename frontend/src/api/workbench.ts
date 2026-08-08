@@ -444,6 +444,14 @@ export const STALE_COMPONENT_LABEL: Record<string, string> = {
   spec: '导出模板',
   mapping: '字段映射',
   missing: '上游对象',
+  upstream_snapshot: '颜色维快照',
+  shared_facts: 'SPU 已确认事实',
+  shared_sample: '共享样品',
+  color_set: 'ACTIVE 颜色集合',
+  color_facts: '颜色已确认事实',
+  color_sample: '颜色样品',
+  color_image_set: '颜色图片集',
+  color_plan: '颜色生成方案',
 }
 
 export interface DraftViolation {

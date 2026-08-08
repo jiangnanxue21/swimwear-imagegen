@@ -140,6 +140,22 @@ LEDGER: dict[str, str] = {
     "ListingDraft.template_checksum": (
         "还款日:阶段 5。恒为 NULL,于是「模板改过了、草稿要重出」判不出来"
     ),
+    # 迁移 0049 / 阶段 5 批次 5-1。**这两条是本仓第一次在落列的同一批就记账** ——
+    # §3.38 那两次(`media_assets.color_variant_id` 躲五批、§4.8 去重键躲六批)
+    # 都是事后被人逐条核出来的。判定层(`workbench/upstream_snapshot.py`)
+    # 本批已落码并被穷举测试,写入点在 `workbench/service.build_draft`,排在 5-2。
+    #
+    # 还款日选阶段 5 而不是 6:`DELIVERY_STAGE` 推到 5 的含义是「阶段 5 的交付项
+    # 落码完毕」,而 5-2 正是阶段 5 的批次 —— 标记推上去那一刻这两列必须有人写。
+    "ListingDraft.upstream_versions": (
+        "还款日:阶段 5(批次 5-2 接线 build_draft)。判定层已落码并有穷举测试,"
+        "写入点未接。恒为 NULL,而 NULL 在判定层的语义是「没算过、不放行」——"
+        "所以这一批里它拦下的是全部草稿,不是静默放行"
+    ),
+    "ListingDraft.color_sku_image_map": (
+        "还款日:阶段 5(批次 5-2 接线 build_draft)。与上一列同批同源,"
+        "口径见 `workbench/upstream_snapshot.map_problems` 的第一个分支"
+    ),
     "ModelTemplate.disabled_reason": (
         "还款日:阶段 5。前端有显示位,而停用原因恒为 NULL —— 运营看到模板不可用,"
         "看不到为什么"
@@ -149,10 +165,18 @@ LEDGER: dict[str, str] = {
         "还款日:阶段 5。`width` 有写入点而 `height` 没有 —— 两列本该成对。"
         "Provider 侧回传的尺寸只落了一半"
     ),
-    "ProductAttributeExtraction.prompt_tokens": "还款日:阶段 5。识别侧 token 计量未接线,四列一起",
-    "ProductAttributeExtraction.completion_tokens": "还款日:阶段 5。识别侧 token 计量未接线,四列一起",
-    "ProductAttributeExtraction.raw_response_ref": "还款日:阶段 5。识别侧原始响应留存未接线,四列一起",
-    "ProductAttributeExtraction.raw_response_summary": "还款日:阶段 5。识别侧原始响应留存未接线,四列一起",
+    "ProductAttributeExtraction.prompt_tokens": (
+        "还款日:阶段 5。识别侧 token 计量未接线,四列一起"
+    ),
+    "ProductAttributeExtraction.completion_tokens": (
+        "还款日:阶段 5。识别侧 token 计量未接线,四列一起"
+    ),
+    "ProductAttributeExtraction.raw_response_ref": (
+        "还款日:阶段 5。识别侧原始响应留存未接线,四列一起"
+    ),
+    "ProductAttributeExtraction.raw_response_summary": (
+        "还款日:阶段 5。识别侧原始响应留存未接线,四列一起"
+    ),
 }
 
 
@@ -376,7 +400,7 @@ def main() -> int:
 
     print(
         f"{out.covered} 列都答得出「谁写它」"
-        f"（{len(ledger := LEDGER)} 条在台账上，{len(out.skipped)} 个模型判不了）"
+        f"（{len(LEDGER)} 条在台账上，{len(out.skipped)} 个模型判不了）"
     )
     return 0
 

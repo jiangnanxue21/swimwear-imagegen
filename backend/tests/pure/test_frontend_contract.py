@@ -226,6 +226,7 @@ def _label_contracts() -> list[tuple[str, str, str, set[str]]]:
     )
     from app.workbench.flow import FlowStep, IssueLevel, NextActionCode, StepState
     from app.workbench.import_plan import ROW_PLAN_LABELS
+    from app.workbench.upstream_snapshot import COMPONENTS as UPSTREAM_COMPONENTS
 
     # `settings_service` 顶层 import 了 sqlalchemy，而这批用例刻意零三方依赖
     # （见 `test_pure_suite_is_self_contained` 的约束），import 不进来。
@@ -259,6 +260,21 @@ def _label_contracts() -> list[tuple[str, str, str, set[str]]]:
         ("workbench.ts", "COPY_STATUS_LABEL", "文案状态", _values(CopyStatus)),
         ("workbench.ts", "DRAFT_STATUS_LABEL", "草稿状态", _values(DraftStatus)),
         ("workbench.ts", "IMAGE_SET_STATUS_LABEL", "图片集状态", _values(ImageSetStatus)),
+        (
+            "workbench.ts",
+            "STALE_COMPONENT_LABEL",
+            "草稿过期组件",
+            {
+                "attributes",
+                "image_set",
+                "copy",
+                "manual",
+                "spec",
+                "mapping",
+                "missing",
+                *UPSTREAM_COMPONENTS,
+            },
+        ),
         # ---- batch.ts：批量与审计 ----
         ("batch.ts", "BATCH_ACTION_LABEL", "批量动作", _values(BatchAction)),
         ("batch.ts", "BATCH_ACTION_HINT", "批量动作说明", _values(BatchAction)),

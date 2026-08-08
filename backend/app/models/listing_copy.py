@@ -197,6 +197,36 @@ class ListingDraft(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     template_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: 上游事实的指纹。任一变化 -> 指纹变化 -> 草稿 STALE -> 不允许导出与提交
     source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+    # ---- 颜色维的上游快照(PRD v3.1 §4.10,迁移 0049)----
+    #
+    # 指纹回答「变没变」,`canonical_snapshot["components"]` 回答「哪个轴变了」,
+    # 而两者都**没有颜色维**:新增一个 ACTIVE 颜色、某个颜色的样品换了、
+    # 某个颜色的方案换了指纹,这三件事今天在草稿这一侧一个字都说不出来。
+    #
+    # 形状与判定在 `app/workbench/upstream_snapshot.py`(零依赖纯函数),
+    # 这里只落列。**草稿不复制事实值,只存版本引用与提交快照**(§4.10 原话)。
+    #
+    # ## 为什么可空,且不给 server_default
+    #
+    # 与 `ListingDraft` 上其它 JSONB 列(`canonical_snapshot` 等)刻意不同。
+    # 那几列给 `{}` 是对的:它们从第一版起就有写入点,空字典的含义是
+    # 「这份草稿确实没有手填字段」。
+    #
+    # 这两列不是。0049 之前建的草稿一行都没算过颜色维,而 `{}` 的含义是
+    # 「算过,颜色维是空的」—— READY 门禁读到它会在颜色轴上**静默放行**,
+    # 表现是一份缺了整个颜色的草稿显示「上游全部有效」。
+    #
+    # 留 NULL,让「没算过」如实显示成「不知道」;判定层把 None 判成
+    # 不可证明、不放行(`diff_upstream` / `map_problems` 的第一个分支)。
+    # 与迁移 0042 / 0045 / 0048 是同一条规矩的第四次应用:**默认值不许让
+    # 任何人被静默放行或静默拦下。**
+    #
+    # 写入点在 `workbench/service.build_draft`,**本批(5-1)未接**,
+    # 记在 `tools/audit_column_writers.LEDGER`,还款日:阶段 5。
+    upstream_versions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    #: 颜色 → SKU → 主图/附图 的最终映射(§4.10)。可空口径同上一列
+    color_sku_image_map: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: 最近一次导出(迁移 0017)。完整导出历史在审计日志里,这里只放页面要直接显示的
     exported_at: Mapped[datetime | None] = mapped_column(nullable=True)
