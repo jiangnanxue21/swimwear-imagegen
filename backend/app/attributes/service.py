@@ -458,17 +458,18 @@ def run_extraction(
     # ---- §11 第一行:哪个颜色全军覆没(A45-batch14-13)----
     #
     # 归集在 `run_state.outcome_by_scope`(零依赖、输入空间被穷举验过),
-    # 这里只把逐图成绩递过去。**今天它一定给出空清单** —— `scope_of` 读的是
-    # 阶段 2 的归属外键 `color_variant_id`,那一列还不存在,于是每张图都落在
-    # 共享作用域里,一个颜色子集都分不出来。
+    # 这里只把逐图成绩递过去。
     #
-    # 那为什么现在就接:接的是**形状**。这一列落库那天,不接线的表现是
-    # 「判定写好了没人调」,而最省事的补法是就近抓一个 `variant_hint` 来分组 ——
-    # 那正是 §4.8 明令不许的(模型猜的值决定重试范围,而重试范围决定付多少钱)。
+    # **这里原来写着「今天它一定给出空清单」,那句话已经不成立**:
+    # `scope_of` 读的 `media_assets.color_variant_id` 从迁移 0037(A45-batch14-15)
+    # 起就是真列,上传接口收得下、`ExtractRequest.color_variant_ids`
+    # (batch14-28)把重试范围接回了入参。所以失败作用域**会**真实产出,
+    # 按颜色重试是一条今天就走得通的路。A45-batch17-2 改掉这句 ——
+    # 读到"一定给出空清单"的人不会去验它,而这条路径决定的是下一次付多少钱。
     #
-    # 落点只有日志,**这是本批的欠账不是设计**:§11 要的「失败颜色明确列出」
-    # 要一列才成立,理由与规格见
-    # `test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one`。
+    # 落点仍然只有日志:§11 要的「失败颜色在界面上明确列出」还欠一个消费方,
+    # 规格见 `test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one`。
+    # 那是欠账,不是设计 —— 但它欠的是**界面**,不再是那一列。
     outcome = run_state.outcome_by_scope(outcomes)
     if outcome.failed_scopes:
         logger.warning(

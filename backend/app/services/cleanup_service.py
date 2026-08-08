@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -36,7 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.channels.simulator import is_simulated_external_id
-from app.core.clock import iso_utc
+from app.core.clock import iso_utc, utc_now
 from app.core.enums import PublishOperation, PublishStatus
 from app.core.errors import ErrorCode, ValidationError
 from app.core.logging import get_logger
@@ -502,7 +502,7 @@ def purge_superseded_exports(
     from app.models.audit_log import AuditLog
     from app.models.batch_job import BatchJob
 
-    moment = now or datetime.now(UTC)
+    moment = now or utc_now()
     cutoff = moment - timedelta(days=older_than_days)
 
     rows = session.scalars(

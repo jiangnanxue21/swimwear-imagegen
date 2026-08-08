@@ -68,7 +68,16 @@ frontend/tests/e2e/*.spec.ts     Playwright。跑 vite preview 的**构建产物
 
 关键页面必须可见的信息(方案 4.1 节 F):Mock/真实、测试/UAT/生产、
 真实渠道/Simulator、渠道、站点、语言、干跑/真实提交、发布状态。
-其中「真实渠道 / Simulator」与环境标识对应任务 5、6,**尚未实现**。
+其中「真实渠道 / Simulator」与环境标识对应任务 5、6。
+**这里原来写着「尚未实现」—— 那句话是错的**:a37 已经落了
+`GET /api/environment` + `src/components/EnvironmentBanner.tsx`,
+A42 又修正了三列的上报口径(Mock 出图 / Mock 评分曾被报成 REAL、
+正常工作的渠道 Simulator 曾被报成 UNAVAILABLE)。12.1 表里两条都标 ✅。
+按这一段开工的人会去重写一个已经挂在页面上的横幅。
+
+新接一个真后端时,`is_simulator` 由实现类自己声明(默认 True),
+不查名单 —— 忘了写 `is_simulator = False` 只会多喊一次警告,
+不会反过来把假的说成真的。
 
 ## 代码组织
 

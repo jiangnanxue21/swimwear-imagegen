@@ -143,12 +143,18 @@ app/workbench/platform_service.py 驳回台账(`record_api_rejection` 是轮询�
    **注意这里原来写着「全仓只有这一份『现在几点』」,那句话不成立** ——
    还剩 14 处直接 `datetime.now(UTC)`,清单与影响评估在 `core/clock.py`
    的「收敛没有做完」一节。这条是对**新代码**的要求,不是对现状的描述。
-   **这个数字改过三次(18 → 17 → 14),别照抄下游文档里的旧值** ——
-   `core/clock.py` 那一节写了怎么用 AST 重新数,手数漏过一次。
-   A34 收掉了其中**唯一一处原样写着上面那个被点名禁止的形式**的地方
-   (`batch_service.py:1007`);A41 收掉 `batch_service.py` 的 3 处
+   **这个数字改过四次(18 → 17 → 16 → 14),别照抄下游文档里的旧值** ——
+   `core/clock.py` 那一节写了怎么用 AST 重新数,手数漏过一次,
+   **建成清单之后又漏账过一次**(A45-batch17-2:`cleanup_service.py` 与
+   `model_license.py` 两处从未进过清单)。现在有
+   `tests/pure/test_a45_batch17_2_clock_ledger.py` 每次现数一遍并和清单比对,
+   所以这个数字从本批起是**被守着的**,不是被记着的。
+   A34 收掉了 `batch_service.py:1007`;A41 收掉 `batch_service.py` 的 3 处
    (回执写入 / `create_batch` / 导出文件落库 —— 它们的 `now` 全部用途都是写库,
-   归一到入口语义不变,不需要真库)。剩下 14 处是"aware 的 now 赋给变量、
+   归一到入口语义不变,不需要真库);A45-batch17-2 收掉上面那漏账的两处。
+   **这里原来还写着「A34 收掉的是全仓唯一一处原样写着那个被点名禁止的形式的
+   地方」—— 那半句是假的**:`model_license.py:53` 一直原样长着它,
+   到 A45-batch17-2 才收。剩下 14 处是"aware 的 now 赋给变量、
    用到的地方各自归一",收敛它们要动发布链路的事务编排,必须带真库跑。
 5. **出参里的时间戳走 `core/clock.iso_utc()`,不要裸 `.isoformat()`。**
    `SessionLocal` 配的是 `expire_on_commit=False`,于是"刚写完就回读"拿到的是
@@ -230,11 +236,20 @@ app/tasks/maintenance_tasks.py  reap_batch_leases  beat 每 60 秒一拍
    用 AST 钉着 —— 改回无锁 SELECT 会让租约变成一个没人写的列,
    而回收器会把**正在跑**的条目当成残骸。
 
-未做:任务 7(真实多模态抽取器)、任务 9(FASHN ProviderCall 持久化与 Usage)、
-任务 20 起的 Phase 4/5。**任务 19 两半都已落地**(N+1 在 a38,事务边界在 a42),
+未做:任务 20 起的 Phase 4/5。**任务 19 两半都已落地**(N+1 在 a38,事务边界在 a42),
 但两半守的都是源码形状,不是运行时行为 —— 见下面单独一节。
 **任务 5 / 6 已由 a37 完成**(12.1 表已标 ✅);这里原来还写着「未做:任务 5、6」,
 和任务表对不上 —— 改了表没改总纲,正是 A38 走读点名过的那类过期。
+**任务 7 / 9 已由 A45-batch14 / batch14-18 完成**;这里原来也还写着
+「未做:任务 7(真实多模态抽取器)、任务 9(FASHN ProviderCall 持久化与 Usage)」,
+**那句话在 A45-batch17-2 之前一直是错的** —— 任务 7 落在 `app/extractors/vision.py`
+(注册表接线在 `api/attributes.py`、`workbench/batch_service.py`),任务 9 落在
+`providers/fashn.py` + `providers/base.settle_billable_units` + `units_source` 列
+(迁移 0039),调用点在 `tasks/generation_tasks.py`。两者都**从未连过真端点**,
+`docs/STATUS.md`「已知限制」如实记着 —— 但"没连过真端点"和"没做"是两件事,
+按这一段开工的人会去重做一遍已经写好的东西。
+同一段话在同一份文件里连着说错三次(5/6、7/9),原因每次都一样:
+**12.1 表改了,总纲没跟着改。** 下面那两行 236-237 恰好就在点名这一类过期。
 
 ## 请求的事务边界:归接口所有(任务 19 后半,A42)
 

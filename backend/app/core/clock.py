@@ -51,13 +51,48 @@ postgresql.conf),所有业务时间整体偏 8 小时:
     scripts/export_parity.py        1 处
 
 **数这个数的办法**(别手数,上一次就是手数漏的):按 AST 找
-`datetime.now(...)` 调用,排除本文件自己那一处。
+`datetime.now(...)` 调用,排除本文件自己那一处。这份清单现在由
+`tests/pure/test_a45_batch17_2_clock_ledger.py` 钉着 —— 它每次现数一遍,
+和上面这张表比对文件与数量。**清单短了会红**,那正是下面这段要说的事。
 
-原来是 18 处。A34 收掉了 `batch_service.py:1007` —— 全仓**唯一**一处原样写着
-下面那个被点名禁止的 `datetime.now(UTC).replace(tzinfo=None)` 的地方,
-A27 那轮漏掉的那一处。A41 又收掉 `batch_service.py` 的 3 处:回执写入、
-`create_batch` 与导出文件落库,它们的 `now` **全部用途都是写库**,归一到入口
-语义完全不变,不需要真库验证。
+## 这份台账自己漏过两处(A45-batch17-2 更正)
+
+上一版这里写的也是 14,而真实数字是 16。漏的两处是
+`services/cleanup_service.py` 与 `services/model_license.py`,两处都是
+台账建成之后新增的,而**没有任何东西在数**。本批把它们收掉了(两处都只写库
+或只做比较,归一到入口语义不变,不需要真库),所以 14 这个数今天成立 ——
+但成立的理由从"有人数对了"换成了"有一条守卫在数",这才是重点。
+
+顺带更正一句**说反了的话**。上一版写着:
+
+    A34 收掉了 `batch_service.py:1007` —— 全仓**唯一**一处原样写着
+    下面那个被点名禁止的 `datetime.now(UTC).replace(tzinfo=None)` 的地方
+
+**「唯一」那半句是假的。** 写下这句话的时候,`services/model_license.py:53`
+原样就是那个形状,一直到本批才收掉。这类失实比过期贵得多(§3.42):
+一句"缺口已关"会让读到的人不再去看,而这句话恰好长在**教别人怎么数**的
+那一段旁边。
+
+## 收掉 `model_license.py` 那一处时撞见的东西
+
+它原来是 `now = datetime.now(UTC).replace(tzinfo=None)`,然后拿 `now` 和
+`template.license_expires_at` 直接比。**归一了一侧,没归一另一侧** ——
+而那一列是 `timestamptz`,换一个 session 重新查出来是 **aware** 的,
+两者相减/比较当场 `TypeError`。写入侧
+(`model_template_service._naive_utc`)只保证刚写进去的那个对象是 naive,
+`expire_on_commit=False` 让这件事在"写完立刻回读"的路径上一直不暴露。
+
+这正是下面 `as_naive_utc()` 的 docstring 描述的那条路,而且它落在 §11.3 的
+硬阻断上:抛出去的表现是「点生成 → 500」,不是「授权已过期」。本批一并修了
+(两侧都过 `as_naive_utc` / `utc_now`)。
+
+**这也说明上面那两轮 AST 扫描的射程边界是真的**:第二轮找的是
+「`now = datetime.now(UTC)` 之后未经 `.replace` 就继续使用」,而这一处
+**replace 过了** —— 它不在扫描的模式里,因为出问题的是**另一侧**。
+
+A34 收掉了 `batch_service.py:1007`,A41 又收掉 `batch_service.py` 的 3 处:
+回执写入、`create_batch` 与导出文件落库,它们的 `now` **全部用途都是写库**,
+归一到入口语义完全不变,不需要真库验证。
 
 `batch_service.py` 剩下的那一处(`batch_file`)是**刻意**的:它喂
 `ExportMeta.exported_at`,而 `listings/export_writer.py` 直接对它 `.isoformat()`

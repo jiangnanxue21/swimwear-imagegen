@@ -1,3 +1,38 @@
+# A45-batch17-2 补丁审核:发布落库 fencing 合入,并补正来包的三处盲点
+
+> 审核输入:`patch/A45-batch17-2-review-fixes.patch` 与同目录交接。
+> 验收依据:`docs/REVIEW.md` §4.1 D / §7.4 / §7.8、根硬规则 4。
+> 完整决定见 `docs/DECISIONS.md` §3.47,当前状态见 `docs/STATUS.md` 顶部。
+
+来包的主修复成立:发布 Outbox 新增 `lease_token`(迁移 0047),领取时换令牌,
+续租与结果落库认同一把令牌,终态和人工重投吊销。迟到调用失去执行权后只写
+审计,不再把较新的 DONE / SUCCEEDED / LISTED 覆盖成未知状态。
+
+合入前补了三处来包自身没有守住的问题:
+
+- SQLAlchemy 会把 `lease_token == None` 编译成 `IS NULL`;原实现会让无令牌
+  调用命中存量 NULL 行。续租与落库现在都先显式拒绝空令牌,新增 1 条纯守卫
+  与 M10/M11 两个反向变异。
+- 时钟台账守卫用 Windows 反斜杠拼路径时会把 `core\\clock.py` 误判为入口外文件;
+  改为 `Path.as_posix()` 后跨平台一致。
+- 真库并发用例的 teardown 写入审计用 outbox ID,却拿 listing/attempt ID 删除;
+  现单独记录 outbox ID,避免测试向共享测试库遗留审计行。
+
+补丁的 5 个新增文件原来没有标准 Git new-file 头,`git apply` 会报不存在;
+已只修元数据、不改来包内容语义后完成合入。变异工具也补齐 Windows 临时目录与
+缓存排除,本机 11/11 变异全部验红。
+
+本机复验(2026-08-08):后端纯测试 2506/2506；Ruff 全绿；架构契约 3/3；
+交付 16/16；样例 10/10；imports 428；锚点 467/467；源码守卫 547；
+列写入审计 537。前端 typecheck、Vitest 74/74、build、syntax 88/88 全绿，
+lint 0 error / 4 个既有 warning。
+
+仍欠真实环境证据:`tests/test_publish_lease_concurrency_db.py` 因本机未配置
+`TEST_DATABASE_URL` 明确 7 skip；迁移 0047 只确认静态单 head,未做真库
+upgrade/downgrade。重叠投递窗口本身仍在,本批只关闭状态互踩。
+
+---
+
 # A45-batch17-1 补丁审核:只移植与当前基线独立成立的两项
 
 > 来包 `patch/A45-batch17-1-offline-blind-spots.patch` 明确要求先有

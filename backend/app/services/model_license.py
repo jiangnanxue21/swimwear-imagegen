@@ -10,9 +10,9 @@ prohibited_categories),测试因此可以传任何简单对象。
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
+from app.core.clock import as_naive_utc, utc_now
 from app.core.enums import ModelLicenseStatus
 from app.core.errors import ErrorCode, ValidationError
 
@@ -47,10 +47,15 @@ def assert_usable(template: Any, *, category_id: str | None = None) -> None:
             "该模特暂不可用,请选择其他模特(授权已失效,管理员可在模特库查看详情)",
             code=ErrorCode.INPUT_INVALID,
         )
-    expires = template.license_expires_at
+    expires = as_naive_utc(template.license_expires_at)
     if expires is not None:
-        # 库列是 naive UTC(与全仓约定一致);比较前把 now 也脱去 tzinfo
-        now = datetime.now(UTC).replace(tzinfo=None)
+        # 两侧都过一次归一。**`as_naive_utc` 不是装饰**:写入侧
+        # (`model_template_service._naive_utc`)只保证刚写进去的那个对象是 naive,
+        # 而这一列是 `timestamptz` —— 换一个 session 重新查出来的是 **aware**,
+        # 拿它和 naive 的 `now` 比会当场 `TypeError`。而这条路径是 §11.3 的
+        # 硬阻断,它抛出去的表现是「点生成 → 500」,不是「授权过期」。
+        # 见 `core/clock.py::as_naive_utc` 的 docstring
+        now = utc_now()
         if expires <= now:
             raise ValidationError(
                 "该模特暂不可用,请选择其他模特(授权已到期,管理员可在模特库续期)",

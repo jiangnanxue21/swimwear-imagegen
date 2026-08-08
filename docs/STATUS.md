@@ -11,6 +11,71 @@
   或者把还款日往后改并写清为什么改 —— 不是回来把这个数字调回去。
 -->
 
+> ## A45-batch17-2:1442 包审阅意见的修复(基线 1505,2026/08/08)
+>
+> ### P2-1:发布投递的落库端没有归属校验
+>
+> `publish_service._save()` 取三行、**无条件**写三行。租约过期被重领之后,
+> 迟到返回的那次调用会把较新的结论盖回去:
+>
+> ```
+> DONE → DEAD        SUCCEEDED → UNKNOWN        LISTED → SUBMIT_RESULT_UNKNOWN
+> ```
+>
+> 商品在平台上真的上架了(`external_spu_id` 还留着,幂等三道防线保证不会
+> 多出一件),而界面会说"结果未知、需人工"—— 人工唯一能做的 RECONCILE
+> 是一次本来不必发生的付费调用。批次链路的同型缺口 A43 / BLOCK-02 已修,
+> 发布这条当时没跟着改,`STATUS.md` 的已知限制里也没有对应的一行。
+>
+> 修法:迁移 0047 给 `publish_outbox` 加 `lease_token`,领取时生成、
+> 续租与落库都认它、落终态与人工重投时吊销。失去执行权时结果只进审计
+> (`_record_stale_outcome`),`run_due` 新增 `stale` 分桶。
+>
+> **合入复审又拦下一处安全默认值写反。** 来包声称空令牌比较会按
+> `lease_token = NULL` 判假,但 SQLAlchemy 实际生成 `IS NULL`,会命中存量无主行。
+> 现在续租与落库两处都在发 SQL 前显式拒绝空令牌,守卫与 M10/M11 分别钉住;
+> 取舍见 `DECISIONS.md` §3.47 第八节。
+>
+> **评审给的"退一步最小修法"(`lease_until == 领取值`)在本仓是错的**,
+> 而且错的方向更贵:`_renew_lease()` 在发请求之前就把库里那个值改掉了,
+> 按它写会让**每一次**投递的结论都落不了库。详见 `DECISIONS.md` §3.47 第二节。
+>
+> ### 顺带修掉的两处(报告没点到)
+>
+> | | |
+> |---|---|
+> | `reconcile_unknown()` 从不领租约 | 加了 WHERE 之后它的结论会被判成 stale —— "点了确认、界面纹丝不动"。本批让它领令牌,但**不动 status**(改成 LEASED 会让 DEAD 悄悄变回自动重试,见 §3.47 第三节) |
+> | `model_license` 只归一了比较的一侧 | `license_expires_at` 是 `timestamptz`,换个 session 查出来是 aware 的,和 naive 的 `now` 比会 `TypeError`。落在 §11.3 硬阻断上,表现是「点生成 → 500」 |
+>
+> ### P3-1 ~ P3-4:四条文档失实,修法一律是"引述并驳斥"
+>
+> | | 原话 | 事实 |
+> |---|---|---|
+> | `CLAUDE.md:233` | 未做:任务 7、9 | 两者 A45-batch14 / 14-18 就落码了(从未连真端点 ≠ 没做) |
+> | `frontend/CLAUDE.md:71` | 任务 5、6 尚未实现 | a37 落地 + A42 修正上报口径 |
+> | `core/clock.py` 台账 | 14 处;"唯一一处被禁形式已由 A34 收掉" | 实数 16;`model_license.py:53` 原样长着那个形式 |
+> | `run_state.py` / `attributes/service.py` | `color_variant_id`「今天还不存在」 | 迁移 0037 起是真列,失败作用域会真实产出 |
+>
+> 第三条是最贵的一种(§3.42:说缺口已关比说过期贵),而且它长在**教别人
+> 怎么数**的那一段旁边。本批把两处漏账的收掉,并加一条守卫每次现数一遍
+> 与台账比对 —— 数字从"被记着"换成"被守着"。
+>
+> ### 本批的门禁
+>
+> ```
+> 当前工作树纯测试 2506/2506         本批变异 11/11 验红
+> verify_delivery 16/16              audit_anchors 467/467(24 份脚本)
+> audit_source_guards 547            audit_column_writers 537 列
+> verify_imports 428 文件            样例数据 10/10
+> Ruff 全绿                          import-linter 3/3
+> 前端 typecheck / Vitest 74/74 / build / syntax 88/88 全绿
+> 前端 lint 0 error / 4 个既有 warning
+> ```
+>
+> **没跑的**:`tests/test_publish_lease_concurrency_db.py` 7 条双 session 用例
+> (本机无 `TEST_DATABASE_URL`,pytest 明确显示 7 skip)、迁移 0047 的真实升降级。
+> 静态迁移链已确认单 head `0047`。见「二、证据缺口」。
+
 > ## A45-batch14-28:阶段 1 身份收口 + 三条「算好了没人读」的最后一跳(基线 14-27,2026/08/08)
 >
 > ### 本批最先做的事是**装依赖**,而它当场证伪了一条卡点
@@ -1962,6 +2027,7 @@
 | 成品图无批量重算入口 | 网站改尺寸时需要整批重算,目前只在「再次通过」时触发 |
 | Celery 单队列 | 未做优先级与并发调优 |
 | 租约回收对「跑到一半才崩」仍会重复付费 | 回执表(`batch_action_receipts`)挡的是「已经跑完的不重跑」,它在调用**之后**才写。worker 恰好死在付费调用与写回执之间时,重排那一次会真的再花一笔。唯一的缓解是租约足够长(`ITEM_LEASE_SECONDS` > `CLAIM_CHUNK` × 单件最长合法耗时,带 assert 守着)与 `MAX_ITEM_ATTEMPTS = 3` 的上限。**这一段没有真库测试** —— 见下一行 |
+| 发布投递的状态互踩已经关掉(A45-batch17-2),重叠投递窗口仍在 | `publish_service._save()` 原来无条件写三张表:租约过期被重领之后,迟到返回的那次调用会把 DONE / SUCCEEDED / LISTED 覆写成 DEAD / UNKNOWN / SUBMIT_RESULT_UNKNOWN —— 商品在平台上好好的,界面说结果未知需人工。**本行原来根本不存在**:批次侧的同型缺口 A43 已修并记账,发布侧当时既没修也没记。现在落库走令牌(迁移 0047,`lease_token`),执行权不在自己手上时结果只进审计。仍**没有**关掉的是重叠投递本身:调用耗时越过 `LEASE_SECONDS = 180` 时同一份报文仍可能被发两遍,靠幂等键 + 唯一索引 + 平台 409 三道防线保证不多出商品(`DECISIONS.md` §3.19),而三道防线里第三道要依赖平台真的实现了幂等。今天不可达 —— 唯一的 transport 是进程内瞬时返回的 Simulator;第一个真实 HTTP transport 接入且客户端超时未钳制在 `LEASE_SECONDS` 以下时变为可达。真库双 session 用例 `tests/test_publish_lease_concurrency_db.py`(7 条)**已写、未跑** |
 | 租约到期窗口仍在,但**状态互踩已经关掉** | `reap_expired_leases` 只看 `lease_until` 过期,**不问 owner 还在不在**(系统里没有活体名单,`lease_owner` 明写只用于排查)—— 这一半仍然成立,而且是刻意的。**另一半已经不成立了**:本行原来还写着「`_apply_outcome` 不校验本 worker 是否仍持有租约就覆写 status」,那是 A42 的事实;A43 / BLOCK-02 之后落库走 `apply_outcome(owner=, token=)`,四个条件进 WHERE,令牌被回收吊销之后旧 worker 的更新影响 0 行、结果只进审计。不带校验的 `_apply_outcome` 现在是**零调用点的废弃函数**(留着是为了让旧调用点立刻可见)。所以准确的说法是:**重叠执行仍可能发生(钱可能真的花两次),状态互踩不会**;前者靠租约时长与续租控制,后者靠令牌。双 session 场景在 `tests/test_batch_lease_concurrency_db.py`(10 条,含「租约过期但 worker 还活着」那一条),A42 跑绿过,batch12-6 之后**未重跑** |
 | ~~租约与回收的行为**未在真库验证**~~ **A42 已验** | `tests/test_batch_lease_concurrency_db.py`,8 条双 session 用例,在真 PostgreSQL 16 上跑绿:两个 worker 互不相交(`SKIP LOCKED`)、活租约领不走、过期租约可接管、`lease_until IS NULL` 的存量残骸可领、回收放回队列、超上限落 `WORKER_LOST`、一次只领一件。变异验证过:删掉 `skip_locked` 会在 3 秒锁超时后失败并点名原因(**不是挂起** —— 用例给 B 装了 `lock_timeout`,否则 CI 只会报「作业超时」);领取漏掉 `IS NULL` 分支会让存量残骸那条变红 |
 | 提交这件事集成测试验不了 | `tests/conftest.py` 的 `client` 夹具把 `db_session` 覆盖成一个**不提交**的 session(每个用例一个事务,结束回滚)。同一个 session 里读得到未提交的写,所以「真的提交了」与「只是 flush 了」在 API 测试里完全等价 —— 一个写端点漏掉 commit,现有测试一条都不会红。这不是夹具写错了(用例之间要隔离只能这么写),但代价是提交落在测试射程之外。**唯一防线是 `tests/pure/test_transaction_boundaries.py`「HTTP 边界」那五条**,它们做过变异验证。摘掉请求级自动 commit 这次改动**没有在真库上跑过** |

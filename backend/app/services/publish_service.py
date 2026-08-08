@@ -41,7 +41,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -349,9 +349,18 @@ class _Call:
     operation: str
     attempt_count: int
     prepared: PreparedRequest
-    #: 领取时盖上的租约到期时刻。续租时拿它做条件 —— 库里的值不再等于它,
-    #: 说明这一行已经被别的 worker 重领走了(BLOCK-16)
+    #: 领取时盖上的租约到期时刻。**只用于排查,不再做任何判据。**
+    #:
+    #: 它当过一阵子续租的条件。那个判据本身是对的(时间戳微秒级,别人重领
+    #: 必然盖成另一个值),但它只在续租之前成立 —— 续租那一次 UPDATE 会把
+    #: 库里的值改掉,而 `_Call` 里这个值不动。落库时再拿它比,比的是一个
+    #: 我们自己刚刚作废掉的值。判据换成了下面的令牌
     lease_until: datetime | None = None
+    #: 领取时生成的 fencing token(迁移 0047)。**续租与落库唯一的归属判据。**
+    #: 为 None 表示这次调用没有执行权(存量行、或者构造方没走领取路径),
+    #: 续租与落库必须在发 SQL 前显式拒绝。不能依赖 `column == None`:
+    #: SQLAlchemy 会把它编译成 `IS NULL`,反而命中存量无主行
+    lease_token: UUID | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -418,6 +427,12 @@ def _lease(session: Session, row: PublishOutbox, *, now: datetime) -> _Call | No
     row.status = PublishOutboxStatus.LEASED.value
     lease_until = now + timedelta(seconds=policy.LEASE_SECONDS)
     row.lease_until = lease_until
+    # 每一次领取生成一个新令牌(迁移 0047)。**上一任的令牌从此作废** ——
+    # 它的落库会打在 `WHERE lease_token = :token` 上,影响 0 行。
+    # 令牌由领取方直接生成而不是读一次再加一:"读-改-写"在两个 worker
+    # 之间正是这里要防的那件事。与 `batch_service.claim_items` 逐字同源
+    lease_token = uuid4()
+    row.lease_token = lease_token
     row.attempt_count = (row.attempt_count or 0) + 1
 
     attempt.status = PublishAttemptStatus.IN_FLIGHT.value
@@ -432,6 +447,7 @@ def _lease(session: Session, row: PublishOutbox, *, now: datetime) -> _Call | No
         operation=attempt.operation,
         attempt_count=row.attempt_count,
         lease_until=lease_until,
+        lease_token=lease_token,
         prepared=PreparedRequest(
             method=str(snapshot.get("method") or "POST"),
             path=str(snapshot.get("path") or ""),
@@ -473,6 +489,11 @@ def run_due(
         "failed": 0,
         "unknown": 0,
         "lost_lease": 0,
+        # `stale` 与 `lost_lease` 是同一件事的两个时刻:租约在**发之前**丢的
+        # 记 lost_lease(没花钱),在**发之后**才发现丢了的记 stale(钱花了、
+        # 结论只进审计)。分开计数是因为处置不同 —— 前者说明续租窗口偏紧,
+        # 后者说明真实调用耗时已经越过 LEASE_SECONDS,那是要调参数的信号
+        "stale": 0,
     }
 
     session = session_factory()
@@ -529,18 +550,34 @@ def _renew_lease(
     """把这一行的租约续到"从现在起再 LEASE_SECONDS"。**续不上就别发。**
 
     条件 UPDATE 而不是"读出来改一下":读改写之间同样有窗口,而这个函数
-    存在的全部意义就是关掉窗口。判据是 `lease_until` 仍然等于我们领取时
-    盖上的那个值 —— 没有 owner 列也能判出所有权,因为那个时间戳是
-    `now + LEASE_SECONDS` 算出来的,微秒级精度下别人重领必然盖成另一个值。
+    存在的全部意义就是关掉窗口。
 
-    返回 False 有两种情况,处理方式相同(跳过):
+    ## 判据从 `lease_until` 换成了 `lease_token`(A45-batch17-2)
 
-        租约被别人重领   对方会去发,我们再发就是发两遍
-        状态已经不是 LEASED  别的路径(取消、置死)动过它
+    原来的判据是"库里的 `lease_until` 仍然等于我们领取时盖的那个值"。
+    那句话**在这一行是对的**(时间戳微秒级,别人重领必然盖成另一个值),
+    问题在它只对这一次成立:下面这条 UPDATE 一旦跑成功,库里的值就被我们
+    自己改掉了,而 `call.lease_until` 不动。于是同一个判据到了
+    `_save()` 那一步会**恒假** —— 那正是落库端一直没有归属校验的原因,
+    也正是那个缺口不能靠"把同一个条件抄过去"来关的原因。
+
+    令牌在续租时不变、在重领时必变,两处可以用同一份判据,
+    与 `batch_service.renew_lease` / `apply_outcome` 是同一套口径。
+
+    返回 False 有三种情况,处理方式相同(跳过):
+
+        令牌被别人重领     对方会去发,我们再发就是发两遍
+        状态已经不是 LEASED   别的路径(取消、置死)动过它
+        自己没有令牌       存量行,或者调用方没走领取路径 —— 都没有执行权
 
     **单独一个短事务。** 借用外面那个 session 的话,这个更新会一直不提交,
     直到本轮全部调用结束 —— 那就等于没续。
     """
+    # SQLAlchemy 会把 ``column == None`` 编译成 ``IS NULL``,不是
+    # ``column = NULL``。因此不能依赖 SQL 三值逻辑把无令牌调用挡在外面:
+    # 存量的 NULL 行反而会被它匹配。无令牌就是没有执行权,在开事务前拒绝。
+    if call.lease_token is None:
+        return False
     moment = now or _now()
     session = session_factory()
     try:
@@ -549,7 +586,7 @@ def _renew_lease(
             .where(
                 PublishOutbox.id == call.outbox_id,
                 PublishOutbox.status == PublishOutboxStatus.LEASED.value,
-                PublishOutbox.lease_until == call.lease_until,
+                PublishOutbox.lease_token == call.lease_token,
             )
             .values(lease_until=moment + timedelta(seconds=policy.LEASE_SECONDS))
         )
@@ -602,6 +639,28 @@ def _save(
 
     `now=None` 时取当下 —— 退避与结束时间要以**这一件做完的时刻**为准,
     不是整批开始的时刻(见 `run_due`)。
+
+    ## 归属校验(A45-batch17-2 / P2-1):这个函数原来没有 WHERE
+
+    它原来是"取三行、无条件写三行"。于是下面这条路是通的:
+
+        1. worker A 领走,租约 180 秒,发出真实外部调用
+        2. 调用挂住超过 180 秒
+        3. `claim_due()` 把「LEASED 且租约过期」当成"A 崩了"重新发出
+        4. worker B 领走同一行、发同一把幂等键的同一份报文、成功,
+           落 DONE / SUCCEEDED / LISTED + external_spu_id
+        5. A 的调用这时才超时返回 —— CREATE 超时被判成不可重试的 UNKNOWN,
+           于是 A **无条件**把 attempt 从 SUCCEEDED 改成 UNKNOWN、
+           outbox 从 DONE 改成 DEAD、listing 从 LISTED 退回 SUBMIT_RESULT_UNKNOWN
+
+    第 5 步覆盖掉的是**较新的事实**:商品在平台上确实上架了,而界面会说
+    "结果未知、需人工"。批次链路的同型缺口在 A43 / BLOCK-02 用令牌关掉了,
+    发布这条当时没跟着改 —— `DECISIONS.md` §3.19 论证的是"不会重复创建"
+    (那一条今天仍然成立,三道防线都在),不覆盖"结果不会被回写"。
+
+    现在的形状与 `batch_service.apply_outcome` 一致:**执行权不在自己手上时,
+    结果只进审计,不进这三张表。** 它是一份 stale outcome —— 调用真的发生过,
+    记录要留,但它不能改变一个已经由别人决定了的状态。
     """
     moment = now or _now()
     session = session_factory()
@@ -612,6 +671,10 @@ def _save(
         if row is None or attempt is None or listing is None:
             session.rollback()
             return "failed"
+        if not _still_holds(session, call):
+            _record_stale_outcome(session, call, outcome, listing=listing)
+            session.commit()
+            return "stale"
         bucket = apply_outcome(
             session, row=row, attempt=attempt, listing=listing, outcome=outcome, now=moment
         )
@@ -622,6 +685,99 @@ def _save(
         raise
     finally:
         session.close()
+
+
+def _still_holds(session: Session, call: _Call) -> bool:
+    """这次调用现在还有没有这一行的执行权。**判据只有令牌。**
+
+    ## 为什么不带 `status == LEASED`
+
+    带上它,`reconcile_unknown` 那条路会全线落不了库:确认走的是一行
+    **DEAD** 的 outbox(结果未知且不可重试时 `apply_outcome` 把它落成 DEAD),
+    而确认本身是一次真实调用、它的结论必须写得进去。令牌自己就够:
+    重领会换掉它,落终态会清掉它(见 `apply_outcome`),人工重投会吊销它
+    (见 `redeliver_dead`)—— 三种"执行权易主"都表现为同一件事,
+    条件更少反而判得更准。
+
+    ## 为什么是 `SELECT … FOR UPDATE` 而不是一条条件 UPDATE
+
+    批次那边用的是条件 UPDATE + rowcount,因为它一次只写一张表。这里的
+    `apply_outcome` 要写三张(outbox / attempt / listing),一条 UPDATE 的
+    rowcount 管不到另外两张 —— 校验和写入之间必须没有窗口,否则挡住的只是
+    三分之一。行锁在本事务提交前一直握着,而 `claim_due` 用的是
+    `FOR UPDATE SKIP LOCKED`:一个想在这中间重领的 worker 会跳过这一行,
+    不会排队等,也不会插进来。
+
+    `call.lease_token` 为 None 时(存量行、或者构造 `_Call` 时没走领取路径)
+    必须显式返回 False。SQLAlchemy 会把 ``column == None`` 编译成
+    ``IS NULL``,若直接拼进 WHERE,反而会匹配存量 NULL 行。方向取安全的一侧:
+    宁可让一次结果只进审计,也不要让它盖掉别人的结论。
+    """
+    if call.lease_token is None:
+        return False
+    return (
+        session.scalar(
+            select(PublishOutbox)
+            .where(
+                PublishOutbox.id == call.outbox_id,
+                PublishOutbox.lease_token == call.lease_token,
+            )
+            .with_for_update()
+        )
+        is not None
+    )
+
+
+def _record_stale_outcome(
+    session: Session,
+    call: _Call,
+    outcome: policy.Outcome,
+    *,
+    listing: ChannelListing,
+) -> None:
+    """执行权已经丢了,但这次调用确实发生过。**记录,不覆盖。**
+
+    进审计而不是只打日志,理由与 `batch_service._record_stale_outcome` 同:
+    这次调用的结论在业务表里**不会**留下任何痕迹(那正是本次修复要的),
+    于是"平台那边到底发生了什么"没有落脚点。审计是追加的,它是唯一
+    还能回答这个问题的地方。
+
+    日志里同时点名 WARNING:这件事意味着同一次提交被投递了两遍 ——
+    幂等键保证平台上不会多出商品,但它不是正常运行的一部分,
+    值得有人去看一眼 `LEASE_SECONDS` 和真实调用耗时的关系。
+    """
+    audit.record(
+        session,
+        actor="system",
+        action=AuditAction.UPDATE,
+        entity_type="PublishOutbox",
+        entity_id=call.outbox_id,
+        payload={
+            "action": "stale_outcome",
+            "publish_attempt_id": str(call.attempt_id),
+            "channel_listing_id": str(listing.id),
+            "operation": call.operation,
+            "attempt_count": call.attempt_count,
+            # 结论本身照记 —— 它是这次调用真实拿到的东西,只是不再有资格
+            # 决定这一行的状态
+            "attempt_status": outcome.attempt_status,
+            "platform_status": outcome.platform_status,
+            "external_spu_id": outcome.external_spu_id,
+            "error_code": outcome.error_code,
+            "error_message": (outcome.error_message or "")[:500],
+        },
+    )
+    logger.warning(
+        "publish.stale_outcome",
+        extra={
+            "extra_fields": {
+                "outbox_id": str(call.outbox_id),
+                "attempt_id": str(call.attempt_id),
+                "listing_id": str(listing.id),
+                "attempt_status": outcome.attempt_status,
+            }
+        },
+    )
 
 
 def apply_outcome(
@@ -673,6 +829,10 @@ def apply_outcome(
             listing.external_sku_ids = dict(final.external_sku_ids)
         row.status = PublishOutboxStatus.DONE.value
         row.lease_until = None
+        # 落终态就吊销令牌:这一件已经有结论了,任何还拿着旧令牌的执行体
+        # 都不该再写它(`_still_holds` 会判假)。与批次那边 `_outcome_values`
+        # 里那一行同源
+        row.lease_token = None
         row.next_attempt_at = None
         row.last_error = None
         session.flush()
@@ -684,6 +844,7 @@ def apply_outcome(
         )
         row.status = PublishOutboxStatus.PENDING.value
         row.lease_until = None
+        row.lease_token = None
         row.next_attempt_at = moment + timedelta(seconds=wait)
         row.last_error = (final.error_message or "")[:2000]
         session.flush()
@@ -692,6 +853,7 @@ def apply_outcome(
     # 不可重试:进人工。DEAD 不是「失败」的同义词,是「需要人来看一眼」
     row.status = PublishOutboxStatus.DEAD.value
     row.lease_until = None
+    row.lease_token = None
     row.next_attempt_at = None
     row.last_error = (final.error_message or "")[:2000]
     session.flush()
@@ -763,6 +925,18 @@ def reconcile_unknown(
         # 一直不给准信的 listing 可以被无限次"确认",而每一次都是一次真的
         # 请求。重试有上限、确认没有,这件事不该只存在于某个人的记忆里。
         row.attempt_count = (row.attempt_count or 0) + 1
+        # **确认也要领一个令牌**(A45-batch17-2)。
+        #
+        # `_save()` 从本批起要求执行权,而确认这条路原来一个都没领 ——
+        # 不领的话它的结论会被当成 stale 丢进审计,也就是"点了确认、
+        # 界面纹丝不动",而那比被覆写更难查。
+        #
+        # **不动 `status`。** 确认走的通常是一行 DEAD 的 outbox,把它改成
+        # LEASED 会让进程恰好死在这中间的那一次变成:租约过期 → `claim_due`
+        # 重新领走 → 自动再发一次。DEAD 的语义就是"不再自动投递",
+        # 一次人工确认不该把它悄悄改回自动重试。令牌不需要状态配合:
+        # 它自己就能回答"这次调用还有没有资格落库"。
+        row.lease_token = uuid4()
         call = _Call(
             outbox_id=row.id,
             attempt_id=attempt.id,
@@ -770,6 +944,7 @@ def reconcile_unknown(
             channel=listing.channel,
             operation=attempt.operation,
             attempt_count=row.attempt_count,
+            lease_token=row.lease_token,
             prepared=PreparedRequest(
                 method=str((attempt.safe_request_snapshot or {}).get("method") or "POST"),
                 path=str((attempt.safe_request_snapshot or {}).get("path") or ""),
@@ -875,6 +1050,11 @@ def redeliver_dead(
     row.status = PublishOutboxStatus.PENDING.value
     row.next_attempt_at = moment
     row.lease_until = None
+    # **吊销令牌**(A45-batch17-2):重新排队意味着执行权回到队列手里。
+    # 还有一次确认在飞的话,它回来时会发现自己的令牌已经作废,结果只进审计 ——
+    # 人工发起的这个动作赢,而不是被一个几分钟前发出去的调用悄悄盖掉。
+    # 与批次回收器 `reap_expired_leases` 吊销令牌是同一个动作
+    row.lease_token = None
     # 保留 last_error:它是\"上一次为什么死的\",重新投递不该把它抹掉 ——
     # 这一次要是又死了,两次的原因对比正是排查的依据
     session.flush()

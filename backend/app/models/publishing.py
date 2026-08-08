@@ -241,8 +241,23 @@ class PublishOutbox(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 租约到期时间。为空表示没人领
+    #: 租约到期时间。为空表示没人领。
+    #: **它是回收的判据,不是落库的判据** —— 后者见下面 `lease_token`
     lease_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    #: 租约 fencing token(迁移 0047 / A45-batch17-2)。每一次领取生成一个新的,
+    #: **上一任的令牌从此作废**:它的落库打在 `WHERE lease_token = :token` 上,
+    #: 影响 0 行。无令牌调用由服务层显式拒绝;不能写成 `column == None`,
+    #: SQLAlchemy 会把后者编译成 `IS NULL` 并匹配存量行。
+    #:
+    #: 为什么不能用 `lease_until` 代替:`_renew_lease()` 在发请求之前就把它改了,
+    #: 于是"领取时的值"在落库那一刻已经不在库里 —— 拿它当判据会让**正常路径**
+    #: 也落不了库。判据必须是一个续租时不变、重领时必变的值。
+    #:
+    #: 与 `batch_job_items.lease_token` 是同一个东西同一套语义(迁移 0026),
+    #: 两条链路当时只修了一条,发布这条的缺口由本列关掉
+    lease_token: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
