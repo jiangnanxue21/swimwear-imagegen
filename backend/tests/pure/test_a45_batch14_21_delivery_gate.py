@@ -341,3 +341,24 @@ def test_the_gate_offers_exactly_one_form_of_due_date():
         "而永不被走的分支会让覆盖数变成谎话"
     )
     assert source.count("_DUE_STAGE = re.compile") == 1
+
+
+def test_git_tracking_gate_covers_runtime_tests_and_delivery_tools():
+    """Git 门禁不能只看迁移和 DB 测试，clean checkout 还需要运行源码与工具。"""
+    body = _code(_gate_func("check_every_migration_and_db_test_is_tracked_by_git"))
+    required_roots = (
+        "BACKEND / 'app'",
+        "BACKEND / 'migrations' / 'versions'",
+        "BACKEND / 'tests'",
+        "BACKEND / 'tools'",
+        "FRONTEND / 'src'",
+        "FRONTEND / 'tests'",
+        "FRONTEND / 'tools'",
+        "PROJECT_ROOT / 'tools'",
+    )
+    for root in required_roots:
+        assert root in body, f"Git 跟踪门禁漏掉交付目录：{root}"
+
+    assert "rglob('*')" in body, "门禁没有递归检查目录里的新增源码"
+    assert "p.suffix.lower() in suffixes" in body, "门禁没有把范围约束在源码后缀"
+    assert "*git_paths" in body, "git ls-files 没有读取与工作树检查相同的目录集合"

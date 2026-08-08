@@ -1004,7 +1004,7 @@ def check_no_debt_guard_is_past_its_due_stage() -> None:
 
 
 def check_every_migration_and_db_test_is_tracked_by_git() -> None:
-    """迁移与数据库测试**必须已经被 Git 跟踪**(A45-batch18 / P1-1)。
+    """交付所需源码、迁移、测试与工具**必须已经被 Git 跟踪**。
 
     ## 这条是被一次"本机全绿、clean checkout 起不来"换来的
 
@@ -1033,13 +1033,14 @@ def check_every_migration_and_db_test_is_tracked_by_git() -> None:
     发生在仓库里。从 tarball 解出来的目录跑不了这一条,也确实不该在那里
     宣布"交付卫生检查通过" —— 那正是上一次事故里那份 16/16 的作用。
 
-    ## 范围为什么只到迁移与 `*_db.py`
+    ## 范围为什么覆盖生产源码、测试和交付工具
 
-    这两类是"漏提交之后**别人的环境**会坏、而本机一切正常"的那一批:
-    迁移决定新环境的 schema,DB 测试是唯一会在 CI 里跑真库的东西。
-    普通源码漏提交会在 CI 的 import 检查里当场炸,不需要这条兜。
-    范围写窄是刻意的:一条把整个工作树都算进来的检查会在任何人有一个
-    临时脚本时变红,而最省事的消法是把整条门禁删掉(§3.37 第一版当场踩过)。
+    只盯迁移与 `*_db.py` 仍然会漏掉同一种事故:已跟踪的 `App.tsx` 可以导入
+    一个未跟踪页面,当前工作树的 typecheck 全绿,clean checkout 却直接缺模块;
+    `verify_delivery` 也可以读取一个未跟踪的 `tools/pack.ps1` 并宣布打包门禁通过。
+
+    这里仍然不扫描整个工作树,只扫描会进入运行、测试或交付动作的高信号目录,
+    并按源码后缀过滤。个人笔记和临时数据不会因此让门禁变红。
     """
     try:
         inside = subprocess.run(
@@ -1060,8 +1061,19 @@ def check_every_migration_and_db_test_is_tracked_by_git() -> None:
             "上一次事故里本机那份 16/16 起的正是这个作用。"
         )
 
+    watched_roots: tuple[tuple[Path, frozenset[str]], ...] = (
+        (BACKEND / "app", frozenset({".py"})),
+        (BACKEND / "migrations" / "versions", frozenset({".py"})),
+        (BACKEND / "tests", frozenset({".py"})),
+        (BACKEND / "tools", frozenset({".py"})),
+        (FRONTEND / "src", frozenset({".ts", ".tsx", ".css"})),
+        (FRONTEND / "tests", frozenset({".ts", ".tsx"})),
+        (FRONTEND / "tools", frozenset({".js", ".mjs", ".cjs"})),
+        (PROJECT_ROOT / "tools", frozenset({".py", ".sh", ".ps1"})),
+    )
+    git_paths = [str(root.relative_to(PROJECT_ROOT)) for root, _ in watched_roots]
     listed = subprocess.run(
-        ["git", "ls-files", "-z", "--", "backend/migrations/versions", "backend/tests"],
+        ["git", "ls-files", "-z", "--", *git_paths],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -1074,12 +1086,12 @@ def check_every_migration_and_db_test_is_tracked_by_git() -> None:
         if name.strip()
     }
 
-    watched: list[Path] = [
+    watched = sorted(
         p
-        for p in (BACKEND / "migrations" / "versions").glob("*.py")
-        if p.name != "__init__.py"
-    ]
-    watched += sorted((BACKEND / "tests").rglob("*_db.py"))
+        for root, suffixes in watched_roots
+        for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in suffixes
+    )
 
     missing = sorted(
         str(p.relative_to(PROJECT_ROOT)) for p in watched if p.resolve() not in tracked
@@ -1088,10 +1100,10 @@ def check_every_migration_and_db_test_is_tracked_by_git() -> None:
         raise Failure(
             "这些文件在工作树里、但 Git 没有跟踪:\n  "
             + "\n  ".join(missing)
-            + "\n\n从 main 做 clean checkout 的人拿不到它们。迁移缺席意味着"
-            "新环境的 schema 比代码旧一截,而运行时报的是 UndefinedColumn —— "
-            "在部署之后、在别人的机器上。\n"
-            "把代码、迁移与对应测试作为**同一个提交**交付:git add 上面这些文件。"
+            + "\n\n从 main 做 clean checkout 的人拿不到它们。结果可能是模块缺失、"
+            "schema 比代码旧一截、测试证据缺席,或者打包安全入口消失。\n"
+            "把生产代码、迁移、测试与交付工具作为**同一个提交**交付:"
+            "git add 上面这些文件。"
         )
 
 
@@ -1186,7 +1198,7 @@ CHECKS = [
     ("Vitest 四件事都接上了", check_the_frontend_test_runner_is_actually_wired),
     ("前端用例 0 skip", check_no_skipped_frontend_tests),
     ("迁移链单一 head", check_the_migration_chain_has_a_single_head),
-    ("迁移与 DB 测试都已被 Git 跟踪", check_every_migration_and_db_test_is_tracked_by_git),
+    ("交付源码、迁移与测试都已被 Git 跟踪", check_every_migration_and_db_test_is_tracked_by_git),
     ("决策日志编号不重复", check_the_decision_log_has_no_duplicate_section_numbers),
     ("欠账守卫都在还款日之内", check_no_debt_guard_is_past_its_due_stage),
     ("落地的模块真的被接线了", check_every_wired_module_is_actually_called),
