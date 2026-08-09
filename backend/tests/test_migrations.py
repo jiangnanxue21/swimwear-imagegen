@@ -26,6 +26,7 @@ from app.models import (
     Product,
     Spu,
 )
+from app.models.generation_plan import GenerationPlan
 from tests.conftest import TEST_CONNECT_ARGS, TEST_DB_URL, requires_db
 
 pytestmark = requires_db
@@ -112,6 +113,60 @@ def test_upgrade_is_idempotent_from_scratch(alembic_config, clean_engine):
     command.upgrade(alembic_config, "head")
     tables = set(inspect(clean_engine).get_table_names())
     assert {"products", "generation_tasks", "generation_candidates"} <= tables
+
+
+def test_0052_downgrade_archives_the_unrepresentable_draft(
+    alembic_config, clean_engine
+):
+    """0051 不能表示同层 ACTIVE + DRAFT;降级保留 ACTIVE 且不删草稿正文。"""
+    command.upgrade(alembic_config, "head")
+    with Session(clean_engine) as session:
+        spu = Spu(
+            spu_code="MIG-0052",
+            internal_name="0052 downgrade",
+            audience="WOMEN",
+            base_category="swimwear",
+            created_by="migration-test",
+        )
+        session.add(spu)
+        session.flush()
+        active = GenerationPlan(
+            spu_id=spu.id,
+            provider="mock",
+            scene="studio",
+            pose="STANDING_FRONT",
+            angles_json=[{"angle": "FRONT", "count": 1}],
+            plan_fingerprint="active-fingerprint",
+            status="ACTIVE",
+        )
+        draft = GenerationPlan(
+            spu_id=spu.id,
+            provider="mock",
+            scene="beach",
+            pose="STANDING_FRONT",
+            angles_json=[{"angle": "FRONT", "count": 1}],
+            plan_fingerprint="draft-fingerprint",
+            status="DRAFT",
+        )
+        session.add_all((active, draft))
+        session.commit()
+        active_id, draft_id = active.id, draft.id
+
+    command.downgrade(alembic_config, "0051")
+    with clean_engine.connect() as conn:
+        statuses = dict(
+            conn.execute(
+                text(
+                    "SELECT id::text, status FROM generation_plans "
+                    "WHERE id IN (:active_id, :draft_id)"
+                ),
+                {"active_id": str(active_id), "draft_id": str(draft_id)},
+            ).all()
+        )
+    assert statuses[str(active_id)] == "ACTIVE"
+    assert statuses[str(draft_id)] == "ARCHIVED"
+
+    command.upgrade(alembic_config, "head")
 
 
 def _two_spus_with_the_same_variant_key(engine) -> tuple[dict[str, str], dict[str, str]]:

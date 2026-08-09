@@ -41,8 +41,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[3]
 FRONTEND = REPO / "frontend" / "src"
 
@@ -85,23 +83,19 @@ def _form_field_names(path: Path) -> set[str]:
     return set(re.findall(r"""name=\{?["']([A-Za-z_][A-Za-z0-9_]*)["']\}?""", src))
 
 
-@pytest.mark.parametrize(
-    ("step", "source", "form", "field"),
-    COMPLETION_FIELDS,
-    ids=[f"{s}:{f}" for s, _, _, f in COMPLETION_FIELDS],
-)
-def test_the_form_can_produce_what_the_step_needs_to_be_done(step, source, form, field):
-    path = FRONTEND / form
-    assert path.exists(), f"{form} 不存在 —— 表单挪了位置,这张表要跟着改"
+def test_the_form_can_produce_what_the_step_needs_to_be_done():
+    for step, source, form, field in COMPLETION_FIELDS:
+        path = FRONTEND / form
+        assert path.exists(), f"{form} 不存在 —— 表单挪了位置,这张表要跟着改"
 
-    names = _form_field_names(path)
-    assert field in names, (
-        f"{step} 步的完成条件依赖 `{field}`(判定出处:{source}),"
-        f"而 {form} 的表单里没有这个字段。"
-        f"后果不是报错,是这一步在界面上**永远做不完** —— "
-        f"判定层照样绿,因为它的夹具直接把那个字段填好了。"
-        f"表单里现有的字段:{sorted(names)}"
-    )
+        names = _form_field_names(path)
+        assert field in names, (
+            f"{step} 步的完成条件依赖 `{field}`(判定出处:{source}),"
+            f"而 {form} 的表单里没有这个字段。"
+            f"后果不是报错,是这一步在界面上**永远做不完** —— "
+            f"判定层照样绿,因为它的夹具直接把那个字段填好了。"
+            f"表单里现有的字段:{sorted(names)}"
+        )
 
 
 def test_the_plan_form_actually_sends_the_model_template():

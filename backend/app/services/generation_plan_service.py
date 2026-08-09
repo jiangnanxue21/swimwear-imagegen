@@ -15,15 +15,14 @@
 ——创建任务时用 A、判过期时用 B,于是每次创建任务都会顺带把自己的
 图片集判成过期。一个只会多花钱、不会报错的洞。
 
-## 启用一份方案 = 归档上一份,不是原地改
+## ACTIVE 不原地改,DRAFT 可以原地改
 
-`uq_generation_plans_scope` 带 `WHERE status <> 'ARCHIVED'`,所以同一层
-最多一份非归档的方案。`activate()` 先归档旧的再启用新的,两步在**同一个
-事务**里 —— 分开提交的话中间那一刻两份都是 ACTIVE,而唯一索引会把第二步
-挡下来,留下一个没有生效方案的 SPU。
+ACTIVE 与 DRAFT 各有一个部分唯一槽。保存时更新同层 DRAFT;启用时先归档
+旧 ACTIVE,再把 DRAFT 置 ACTIVE,两步在**同一个事务**里。这样启用后的方案
+仍能由一份新 DRAFT 替换,而 ACTIVE 的指纹历史不会被覆盖。
 
-原地改的另一个问题在 §8.1:图片集过期判定要拿"这批图当初按哪份方案生成"
-和"现在生效的是哪份"比,原地改会把前者覆盖掉。
+并发首次保存靠 DRAFT 唯一索引裁决。冲突必须在保存点里捕获并回读赢家;
+没有保存点时一次正常双击会把整个外层事务打成不可用。
 """
 from __future__ import annotations
 
@@ -32,7 +31,9 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_attribute
 
 from app.core.enums import AuditAction, GenerationPlanStatus
 from app.core.errors import DuplicateError, ErrorCode, NotFoundError, ValidationError
@@ -127,6 +128,45 @@ def _assert_plan_usable(view: gp.PlanView, *, raw_angle_count: int) -> None:
         )
 
 
+def _draft_for_scope(
+    session: Session,
+    *,
+    spu_id: UUID,
+    color_variant_id: UUID | None,
+    lock: bool = False,
+) -> GenerationPlan | None:
+    """同作用域正在编辑的唯一 DRAFT。锁只用于顺序编辑已有草稿。"""
+    scope_filter = (
+        GenerationPlan.color_variant_id.is_(None)
+        if color_variant_id is None
+        else GenerationPlan.color_variant_id == color_variant_id
+    )
+    statement = select(GenerationPlan).where(
+        GenerationPlan.spu_id == spu_id,
+        scope_filter,
+        GenerationPlan.status == GenerationPlanStatus.DRAFT.value,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return session.scalars(statement).one_or_none()
+
+
+def _update_draft(target: GenerationPlan, source: GenerationPlan) -> None:
+    """DRAFT 尚未被生成任务引用,可在启用前保留身份并更新内容。"""
+    target.model_template_id = source.model_template_id
+    target.provider = source.provider
+    target.scene = source.scene
+    target.pose = source.pose
+    target.angles_json = source.angles_json
+    target.budget_cap = source.budget_cap
+    target.plan_fingerprint = source.plan_fingerprint
+    # 列写入审计对 `obj.note = ...` 刻意按名字宽认,会把这一句同时算成
+    # `ListingImageSet.note` 的写入点,让那笔真实欠账从台账里消失。
+    # 走 SQLAlchemy 的正式属性 API,既保留脏标记/事件,又不制造假写入者。
+    set_attribute(target, GenerationPlan.note.key, source.note)
+    target.row_version += 1
+
+
 def save_plan(
     session: Session,
     *,
@@ -141,7 +181,7 @@ def save_plan(
     note: str | None = None,
     actor: str = "system",
 ) -> GenerationPlan:
-    """落一份 DRAFT 方案。**不直接生效**(见模块文档最后一段)。"""
+    """保存同作用域的唯一 DRAFT。**不直接生效**。"""
     _assert_scope(session, spu_id=spu_id, color_variant_id=color_variant_id)
 
     if model_template_id is not None:
@@ -174,8 +214,58 @@ def save_plan(
     # **唯一写入点。**见模块文档第二段
     row.plan_fingerprint = gp.fingerprint_of(view)
 
-    session.add(row)
-    session.flush()
+    existing = _draft_for_scope(
+        session,
+        spu_id=spu_id,
+        color_variant_id=color_variant_id,
+        lock=True,
+    )
+    if existing is not None:
+        # 相同请求直接复用,连 row_version 与审计都不多写一次。
+        if (
+            existing.plan_fingerprint == row.plan_fingerprint
+            and existing.note == row.note
+        ):
+            return existing
+        _update_draft(existing, row)
+        session.flush()
+        audit.record(
+            session,
+            actor=actor,
+            action=AuditAction.UPDATE,
+            entity_type="GenerationPlan",
+            entity_id=existing.id,
+            payload={
+                "status": GenerationPlanStatus.DRAFT.value,
+                "plan_fingerprint": existing.plan_fingerprint,
+                "angles": existing.angles_json,
+            },
+        )
+        return existing
+
+    try:
+        # `add` 必须在保存点里面:`begin_nested()` 会先 flush 已有 pending,
+        # 放在外面会让唯一冲突发生在 try 覆盖不到的位置。
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+    except IntegrityError:
+        winner = _draft_for_scope(
+            session,
+            spu_id=spu_id,
+            color_variant_id=color_variant_id,
+        )
+        if winner is None:
+            raise
+        if (
+            winner.plan_fingerprint != row.plan_fingerprint
+            or winner.note != row.note
+        ):
+            raise DuplicateError(
+                "生成方案草稿已被另一个请求修改,请刷新后重试"
+            ) from None
+        return winner
+
     audit.record(
         session,
         actor=actor,
@@ -201,17 +291,31 @@ def activate(session: Session, plan_id: UUID, *, actor: str = "system") -> Gener
     if row.status == GenerationPlanStatus.ARCHIVED.value:
         raise DuplicateError("已归档的方案不能重新启用,请复制一份新的")
 
+    scope_filter = (
+        GenerationPlan.color_variant_id.is_(None)
+        if row.color_variant_id is None
+        else GenerationPlan.color_variant_id == row.color_variant_id
+    )
     previous = session.scalars(
-        select(GenerationPlan).where(
+        select(GenerationPlan)
+        .where(
             GenerationPlan.spu_id == row.spu_id,
+            scope_filter,
             GenerationPlan.status == GenerationPlanStatus.ACTIVE.value,
         )
+        .with_for_update()
     ).all()
+    archived: list[GenerationPlan] = []
     for old in previous:
         if old.id == row.id:
             continue
-        if old.color_variant_id == row.color_variant_id:
-            old.status = GenerationPlanStatus.ARCHIVED.value
+        old.status = GenerationPlanStatus.ARCHIVED.value
+        archived.append(old)
+
+    # 两次 flush 仍在同一事务里。先释放 ACTIVE 唯一槽,再让 DRAFT 占进去;
+    # 合成一次 flush 时 ORM 的 UPDATE 顺序不承诺先旧后新。
+    if archived:
+        session.flush()
 
     row.status = GenerationPlanStatus.ACTIVE.value
     row.row_version += 1
@@ -228,7 +332,7 @@ def activate(session: Session, plan_id: UUID, *, actor: str = "system") -> Gener
             "plan_fingerprint": row.plan_fingerprint,
             # 谁被顶下去了要留痕:§8.1「更换生成方案」那一行的触发时机
             # 就是这一刻,而"哪些颜色因此要重出图"要能追溯
-            "archived": [str(o.id) for o in previous if o.id != row.id],
+            "archived": [str(o.id) for o in archived],
         },
     )
     return row

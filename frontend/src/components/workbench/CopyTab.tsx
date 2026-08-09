@@ -175,10 +175,13 @@ function ClaimTable({ claims, attributes }: { claims: CopyClaim[]; attributes: A
 
 export default function CopyTab({
   productId,
+  flowProductId = productId,
   copy,
   step,
 }: {
   productId: string
+  /** 向导跨色操作后刷新入口页,详情页不传时仍刷新自身。 */
+  flowProductId?: string
   copy: ListingCopy | null
   step: FlowStepResult | undefined
 }) {
@@ -205,9 +208,9 @@ export default function CopyTab({
   })
 
   const refresh = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['workbench-flow', productId] })
+    queryClient.invalidateQueries({ queryKey: ['workbench-flow', flowProductId] })
     queryClient.invalidateQueries({ queryKey: ['workbench'] })
-  }, [queryClient, productId])
+  }, [queryClient, flowProductId])
 
   /**
    * 文案三个动作全是写请求(BLOCK-05)。

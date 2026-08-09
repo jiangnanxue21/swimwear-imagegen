@@ -24,7 +24,7 @@ AC-05 的判据原文:
 
 ## 所以这一版把"哪些端点属于前进动作"做成表
 
-三张表,三条守卫(`tests/pure/test_a45_batch31_action_gate.py`):
+三张表,三条守卫(`tests/test_a45_batch31_action_gate.py`):
 
     GATED_ENDPOINTS          端点 -> 它执行的动作码。**这些必须调闸**
     UNGATED_ENDPOINTS        端点 -> 为什么它不需要过闸(一句话,不是空白)

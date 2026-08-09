@@ -5,7 +5,7 @@
  * 在页面上找不到是哪一条,只能去素材库翻。放行也在这里做 —— 那是
  * 「处理隔离素材」这个推荐动作唯一能被执行完的地方。
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   App, Button, Card, Empty, Image, Input, Modal, Select, Skeleton, Space, Tag, Tooltip, Upload,
 } from 'antd'
@@ -146,10 +146,16 @@ export function groupByColour(
 
 export default function MaterialTab({
   productId,
+  flowProductId = productId,
   step,
+  focusColorVariantId,
 }: {
   productId: string
+  /** 向导从另一颜色 SKU 进入时,写后要刷新入口页的查询键。 */
+  flowProductId?: string
   step: FlowStepResult | undefined
+  /** 向导明确选中的颜色。详情页不传,仍默认通用图。 */
+  focusColorVariantId?: string | null
 }) {
   const { message } = App.useApp()
   const queryClient = useQueryClient()
@@ -165,6 +171,10 @@ export default function MaterialTab({
    * 不选就是通用图,与本参数存在之前逐字相同。
    */
   const [uploadColour, setUploadColour] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (focusColorVariantId !== undefined) setUploadColour(focusColorVariantId)
+  }, [focusColorVariantId])
 
   /**
    * 能选的颜色。**取数与上传接口的白名单同源**(后端 `colours_for`)。
@@ -188,9 +198,9 @@ export default function MaterialTab({
   /** 素材状态一变,流程判定跟着变(§4.5:素材被替换或隔离 -> 图片集与草稿过期) */
   const refresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['workbench-media', productId] })
-    queryClient.invalidateQueries({ queryKey: ['workbench-flow', productId] })
+    queryClient.invalidateQueries({ queryKey: ['workbench-flow', flowProductId] })
     queryClient.invalidateQueries({ queryKey: ['workbench'] })
-  }, [queryClient, productId])
+  }, [queryClient, productId, flowProductId])
 
   /**
    * 四个动作都是写请求(BLOCK-05)。上传尤其不能说"请重试" ——

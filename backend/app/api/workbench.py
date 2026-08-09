@@ -38,6 +38,7 @@ from app.core.sorting import normalize_sort, sort_in_memory
 from app.models.audit_log import AuditLog
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
+from app.models.spu import ColorVariant
 from app.services.storage import asset_url, build_storage
 from app.workbench import color_rollup, cost_rollup
 from app.workbench import flow as flow_rules
@@ -357,6 +358,56 @@ def _color_axis(session: Session, product):
     return color_rollup.views_and_rollup(session, product, canonical=canonical)
 
 
+def _color_selection(
+    session: Session,
+    product: Product,
+    *,
+    requested_code: str | None,
+    default_code: str | None,
+) -> dict[str, str | None] | None:
+    """把向导颜色码解析成同 SPU 的稳定变体与可操作商品行。
+
+    文案、属性等写入口仍然以 ``product_id`` 为路由身份。只返回颜色码会让
+    界面看着已经切到 BLU,点击后却继续修改原来 RED 那一行。目标商品由后端
+    按 SKU 稳定排序挑选,前端不复制一次「颜色 -> 商品」规则。
+    """
+    code = requested_code or default_code
+    if code is None and product.color_variant_id is not None:
+        own = session.get(ColorVariant, product.color_variant_id)
+        code = own.variant_code if own is not None else None
+    if code is None:
+        if requested_code:
+            raise ValidationError("这件商品没有可选择的颜色")
+        return None
+    if product.spu_id is None:
+        raise ValidationError("这件商品还没有 SPU 归属,不能按颜色操作")
+
+    variant = session.scalars(
+        select(ColorVariant).where(
+            ColorVariant.spu_id == product.spu_id,
+            ColorVariant.variant_code == code,
+        )
+    ).one_or_none()
+    if variant is None:
+        raise ValidationError(f"颜色 {code} 不属于这件商品的 SPU")
+
+    target = session.scalars(
+        select(Product)
+        .where(
+            Product.spu_id == product.spu_id,
+            Product.color_variant_id == variant.id,
+        )
+        .order_by(Product.sku, Product.id)
+    ).first()
+    return {
+        "variant_id": str(variant.id),
+        "variant_code": variant.variant_code,
+        # 建了颜色但还没有 SKU 时仍允许查看颜色子态与配置方案;需要商品行的
+        # 面板会明确提示先完成建档,不借原颜色的 product_id 顶上去。
+        "product_id": str(target.id) if target is not None else None,
+    }
+
+
 def _color_rollup(
     session: Session, product, *, rollup: SpuColorRollup | None = None
 ) -> dict[str, Any] | None:
@@ -405,6 +456,11 @@ def _wizard_block(
 @router.get("/products/{product_id}/flow")
 def product_flow(
     product_id: UUID,
+    color: str | None = Query(
+        default=None,
+        max_length=16,
+        description="向导当前操作的颜色码;为空时由后端 focus_color 决定",
+    ),
     session: Session = Depends(db_session),
     storage=Depends(_storage),
 ) -> dict[str, Any]:
@@ -412,6 +468,18 @@ def product_flow(
     product = _product(session, product_id)
     ctx = wb.collect(session, product, dry_run=True)
     views, rollup = _color_axis(session, product)
+    wizard_block = _wizard_block(ctx, rollup=rollup, views=views)
+    color_selection = _color_selection(
+        session,
+        product,
+        requested_code=color,
+        default_code=wizard_block["focus_color"],
+    )
+    selected_copy = ctx.copy
+    if color_selection is not None:
+        selected_copy = wb._current_copy(
+            session, product.spu, color_selection["variant_id"] or ""
+        )
 
     draft_block: dict[str, Any] | None = _draft_out(ctx.draft)
     if ctx.draft is not None:
@@ -434,7 +502,10 @@ def product_flow(
         # 向导块(阶段 6 批次 6-4 / AC-01 / AC-05 / AC-16)。**同一个端点** ——
         # 向导要的七步状态、颜色子态、阻塞项与费用预估是 AC-15 点名的一次请求;
         # 而"同一份判定"这件事只有共用一个 `ctx.result` 才是结构保证的
-        "wizard": _wizard_block(ctx, rollup=rollup, views=views),
+        "wizard": wizard_block,
+        # F-4/F-12:颜色不再只是一个 Tag。颜色码、稳定变体 id 与真正承接
+        # 写请求的 product_id 一次下发,前端只负责把它传给既有操作面板。
+        "color_selection": color_selection,
         "image_set": (
             {
                 "id": str(ctx.image_set.id),
@@ -444,7 +515,7 @@ def product_flow(
             if ctx.image_set
             else None
         ),
-        "copy": _copy_out(ctx.copy),
+        "copy": _copy_out(selected_copy),
         "draft": draft_block,
     }
     # 评审第 19 条:详情页是只读的。**位置和列表页同一个理由** ——

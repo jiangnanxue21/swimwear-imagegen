@@ -126,11 +126,14 @@ function toDraft(detail: ImageSetDetail | undefined): Draft[] {
 
 export default function ImageSetTab({
   productId,
+  flowProductId = productId,
   spu,
   imageSetId,
   step,
 }: {
   productId: string
+  /** 跨色向导的缓存仍以入口商品为键。 */
+  flowProductId?: string
   spu: string
   imageSetId: string | null
   step: FlowStepResult | undefined
@@ -224,7 +227,7 @@ export default function ImageSetTab({
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['image-sets', spu] })
     queryClient.invalidateQueries({ queryKey: ['image-set', imageSetId] })
-    queryClient.invalidateQueries({ queryKey: ['workbench-flow', productId] })
+    queryClient.invalidateQueries({ queryKey: ['workbench-flow', flowProductId] })
     queryClient.invalidateQueries({ queryKey: ['workbench'] })
   }
 

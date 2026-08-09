@@ -1,0 +1,13 @@
+# Packaging entrypoints must stay executable/parseable after a Windows checkout.
+# Repository-local rules override a user's core.autocrlf setting.
+*.sh text eol=lf
+*.ps1 text eol=lf
+Makefile text eol=lf
+
+# CI runs these files on Linux even when a package was created on Windows.
+.github/workflows/*.yml text eol=lf
+.github/workflows/*.yaml text eol=lf
+
+# Native Windows launchers are the only scripts that require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

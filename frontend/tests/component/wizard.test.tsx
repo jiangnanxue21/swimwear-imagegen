@@ -20,7 +20,7 @@
  * 只有在真的跑一遍挂载流程时才验得了。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -46,7 +46,11 @@ vi.mock('../../src/api/workbench', async (importOriginal) => ({
 }))
 
 const stub = (name: string) => ({
-  default: () => <div data-testid={`panel-${name}`}>{name}</div>,
+  default: (props: { productId?: string }) => (
+    <div data-testid={`panel-${name}`} data-product-id={props.productId ?? ''}>
+      {name}
+    </div>
+  ),
 })
 
 vi.mock('../../src/components/workbench/MaterialTab', () => stub('material'))
@@ -104,7 +108,30 @@ function detail(overrides: Partial<ProductFlowDetail['wizard']> = {}): ProductFl
       },
       steps: [],
     },
-    colors: null,
+    colors: {
+      active_count: 2,
+      blocking_codes: ['BLU'],
+      blocking_summary: 'BLU 待补',
+      worst_by_step: { ATTRIBUTE: 'NEEDS_CONFIRM' },
+      colors: [
+        {
+          variant_id: 'variant-red',
+          variant_code: 'RED',
+          is_active: true,
+          current_step: 'ATTRIBUTE',
+          is_blocking: false,
+          steps: [],
+        },
+        {
+          variant_id: 'variant-blue',
+          variant_code: 'BLU',
+          is_active: true,
+          current_step: 'ATTRIBUTE',
+          is_blocking: true,
+          steps: [],
+        },
+      ],
+    },
     wizard: {
       current_step: 'ATTRIBUTE',
       focus_color: 'BLU',
@@ -124,6 +151,11 @@ function detail(overrides: Partial<ProductFlowDetail['wizard']> = {}): ProductFl
       })),
       cost: null,
       ...overrides,
+    },
+    color_selection: {
+      variant_id: 'variant-blue',
+      variant_code: 'BLU',
+      product_id: 'p-blue',
     },
     image_set: null,
     copy: null,
@@ -239,6 +271,32 @@ describe('刷新恢复', () => {
   it('手敲一个不存在的步骤退回当前步,不白屏', async () => {
     renderWizard('/wizard/p-1?step=TELEPORT')
     await waitFor(() => expect(screen.getByTestId('panel-attribute')).toBeTruthy())
+  })
+
+  it('URL 颜色传给后端,颜色级面板使用后端返回的目标商品', async () => {
+    const response = detail()
+    response.wizard.steps = response.wizard.steps.map((s) =>
+      s.step === 'COPY' ? { ...s, is_open: true, gate_reason: '' } : s,
+    )
+    api.flow.mockResolvedValue(response)
+
+    renderWizard('/wizard/p-1?step=COPY&color=BLU')
+    await waitFor(() => expect(screen.getByTestId('panel-copy')).toBeTruthy())
+
+    expect(api.flow).toHaveBeenCalledWith('p-1', 'BLU')
+    expect(screen.getByTestId('panel-copy').getAttribute('data-product-id')).toBe('p-blue')
+  })
+
+  it('切换颜色会写 URL 并按新颜色重新取数', async () => {
+    renderWizard()
+    await waitFor(() => expect(screen.getByTestId('wizard-color-select')).toBeTruthy())
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: '当前操作颜色' }))
+    await screen.findByRole('option', { name: 'RED' })
+    const redOptions = screen.getAllByText('RED')
+    fireEvent.click(redOptions[redOptions.length - 1])
+
+    await waitFor(() => expect(api.flow).toHaveBeenCalledWith('p-1', 'RED'))
   })
 
   it('挂载**不发起任何写请求** —— 刷新不等于重新提交一次', async () => {

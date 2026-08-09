@@ -195,10 +195,13 @@ function ConfidenceCell({ row }: { row: AttributeValue }) {
 
 export default function AttributeTab({
   productId,
+  flowProductId = productId,
   step,
   product,
 }: {
   productId: string
+  /** 颜色切换后操作的是目标 SKU,但向导查询仍挂在入口 SKU 上。 */
+  flowProductId?: string
   step: FlowStepResult | undefined
   /** §9.4 的受众确认卡要用。`CONFIRM_AUDIENCE` 指向本标签页,
    *  而在这之前这一页没有任何受众控件 —— 那个动作码会落进死胡同 */
@@ -235,9 +238,9 @@ export default function AttributeTab({
   const refresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['attributes', productId] })
     // 属性一改,文案与草稿按 §4.5 立刻过期 —— 流程判定必须跟着重拉
-    queryClient.invalidateQueries({ queryKey: ['workbench-flow', productId] })
+    queryClient.invalidateQueries({ queryKey: ['workbench-flow', flowProductId] })
     queryClient.invalidateQueries({ queryKey: ['workbench'] })
-  }, [queryClient, productId])
+  }, [queryClient, productId, flowProductId])
 
   /**
    * 属性识别与确认都是写请求(BLOCK-05)。

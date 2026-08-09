@@ -29,11 +29,14 @@
 """
 from __future__ import annotations
 
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 from app.core.enums import GenerationPlanStatus, SellableStatus, SpuStatus
 from app.models.generation import GenerationTask
@@ -309,3 +312,177 @@ def test_save_plan_stores_the_fingerprint_the_pure_layer_computes(session):
 
     assert plan.plan_fingerprint == expected
     assert plan.angles_json == gp.serialize_angles(angles)
+
+
+def test_an_active_plan_can_still_be_replaced(session):
+    """启用不是终点:新 DRAFT 与旧 ACTIVE 共存,再启用时旧方案归档。"""
+    spu = _spu(session)
+    first = generation_plan_service.save_plan(
+        session,
+        spu_id=spu.id,
+        provider="mock",
+        scene="studio",
+        pose="STANDING_FRONT",
+        angles=["FRONT"],
+        actor="stage4-db-test",
+    )
+    generation_plan_service.activate(session, first.id, actor="stage4-db-test")
+
+    replacement = generation_plan_service.save_plan(
+        session,
+        spu_id=spu.id,
+        provider="mock",
+        scene="beach",
+        pose="STANDING_FRONT",
+        angles=["FRONT", "BACK"],
+        actor="stage4-db-test",
+    )
+    assert replacement.id != first.id
+    assert first.status == GenerationPlanStatus.ACTIVE.value
+    assert replacement.status == GenerationPlanStatus.DRAFT.value
+
+    generation_plan_service.activate(
+        session, replacement.id, actor="stage4-db-test"
+    )
+    assert first.status == GenerationPlanStatus.ARCHIVED.value
+    assert replacement.status == GenerationPlanStatus.ACTIVE.value
+
+
+def test_saving_the_same_plan_twice_is_idempotent(session):
+    """双击不建第二份,也不多写一次版本。"""
+    spu = _spu(session)
+    kwargs = {
+        "spu_id": spu.id,
+        "provider": "mock",
+        "scene": "studio",
+        "pose": "STANDING_FRONT",
+        "angles": ["FRONT"],
+        "note": "same request",
+        "actor": "stage4-db-test",
+    }
+    first = generation_plan_service.save_plan(session, **kwargs)
+    version = first.row_version
+    second = generation_plan_service.save_plan(session, **kwargs)
+
+    assert second.id == first.id
+    assert second.row_version == version
+    count = session.scalar(
+        select(func.count())
+        .select_from(GenerationPlan)
+        .where(GenerationPlan.spu_id == spu.id)
+    )
+    assert count == 1
+
+
+def test_http_double_save_returns_the_same_plan(
+    admin_client, session, monkeypatch
+):
+    """真实 POST 双击不该 500,两次响应必须指向同一份 DRAFT。"""
+    from app.api import generation_plans as plan_api
+
+    monkeypatch.setattr(
+        plan_api.action_gate,
+        "ensure_allowed_for_spu",
+        lambda *args, **kwargs: None,
+    )
+    spu = _spu(session)
+    payload = {
+        "spu_id": str(spu.id),
+        "provider": "mock",
+        "scene": "studio",
+        "pose": "STANDING_FRONT",
+        "angles": [{"angle": "FRONT", "count": 1}],
+        "note": "same HTTP request",
+    }
+
+    first = admin_client.post("/api/generation-plans", json=payload)
+    second = admin_client.post("/api/generation-plans", json=payload)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["id"] == second.json()["id"]
+    count = session.scalar(
+        select(func.count())
+        .select_from(GenerationPlan)
+        .where(GenerationPlan.spu_id == spu.id)
+    )
+    assert count == 1
+
+
+def test_editing_a_draft_updates_it_without_rewriting_an_active_plan(session):
+    """同层已有 DRAFT 时保存是编辑草稿,不是覆盖 ACTIVE 历史。"""
+    spu = _spu(session)
+    draft = generation_plan_service.save_plan(
+        session,
+        spu_id=spu.id,
+        provider="mock",
+        scene="studio",
+        pose="STANDING_FRONT",
+        angles=["FRONT"],
+        actor="stage4-db-test",
+    )
+    original_id = draft.id
+    original_version = draft.row_version
+
+    updated = generation_plan_service.save_plan(
+        session,
+        spu_id=spu.id,
+        provider="mock",
+        scene="beach",
+        pose="STANDING_FRONT",
+        angles=["FRONT", "BACK"],
+        actor="stage4-db-test",
+    )
+
+    assert updated.id == original_id
+    assert updated.scene == "beach"
+    assert updated.row_version == original_version + 1
+
+
+def test_two_sessions_racing_to_save_the_same_plan_reuse_one_winner(engine):
+    """两个真事务并发保存:两个调用都成功,库里只有一个 DRAFT。"""
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as setup:
+        spu = _spu(setup)
+        setup.commit()
+        spu_id = spu.id
+
+    barrier = threading.Barrier(2)
+
+    def save_once(actor: str):
+        with factory() as worker:
+            barrier.wait(timeout=10)
+            row = generation_plan_service.save_plan(
+                worker,
+                spu_id=spu_id,
+                provider="mock",
+                scene="studio",
+                pose="STANDING_FRONT",
+                angles=["FRONT"],
+                note="same concurrent request",
+                actor=actor,
+            )
+            worker.commit()
+            return row.id
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ids = list(pool.map(save_once, ("session-a", "session-b")))
+
+        assert ids[0] == ids[1]
+        with factory() as check:
+            count = check.scalar(
+                select(func.count())
+                .select_from(GenerationPlan)
+                .where(
+                    GenerationPlan.spu_id == spu_id,
+                    GenerationPlan.status == GenerationPlanStatus.DRAFT.value,
+                )
+            )
+            assert count == 1
+    finally:
+        with factory() as cleanup:
+            row = cleanup.get(Spu, spu_id)
+            if row is not None:
+                cleanup.delete(row)
+                cleanup.commit()

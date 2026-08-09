@@ -31,7 +31,7 @@
  */
 import { useMemo } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Alert, Button, Card, Col, Empty, Row, Skeleton, Space, Tag } from 'antd'
+import { Alert, Button, Card, Col, Empty, Row, Select, Skeleton, Space, Tag } from 'antd'
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -98,11 +98,13 @@ function PlanPanel({
   spuId,
   variantLabels,
   productAudience,
+  selectedVariantId,
 }: {
   spuId: string | null
   variantLabels: Record<string, string>
   /** 受众下传只为一件事:按 §10.5 收窄模特候选集。`null` = 待确认 */
   productAudience: Audience | null
+  selectedVariantId: string | null
 }) {
   if (!spuId) {
     return (
@@ -117,6 +119,7 @@ function PlanPanel({
       spuId={spuId}
       variantLabels={variantLabels}
       productAudience={productAudience}
+      initialColorVariantId={selectedVariantId}
     />
   )
 }
@@ -130,7 +133,17 @@ function StepPanel({
   data: ProductFlowDetail
   stepOf: Map<FlowStep, FlowStepResult>
 }) {
-  const id = data.product.id
+  const baseId = data.product.id
+  const selectedVariantId = data.color_selection?.variant_id ?? null
+  // 没有颜色轴的旧商品继续用路由商品;有颜色轴却没有目标 SKU 时必须停住。
+  // 借原颜色的 id 顶上去会让界面显示 BLU、实际写 RED。
+  const targetId = data.color_selection?.product_id ?? (data.colors ? null : baseId)
+  const needsTarget = (
+    <Empty
+      image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description="这个颜色还没有 SKU,不能执行该操作。先回建档补齐颜色与 SKU。"
+    />
+  )
   const variantLabels = Object.fromEntries(
     (data.colors?.colors ?? []).map((c) => [c.variant_id, c.variant_code]),
   )
@@ -139,46 +152,63 @@ function StepPanel({
     case 'SETUP':
       return <SetupPanel spuId={data.product.spu_id} step={stepOf.get('SETUP')} />
     case 'MATERIAL':
-      return <MaterialTab productId={id} step={stepOf.get('MATERIAL')} />
+      return targetId ? (
+        <MaterialTab
+          productId={targetId}
+          flowProductId={baseId}
+          step={stepOf.get('MATERIAL')}
+          focusColorVariantId={selectedVariantId}
+        />
+      ) : needsTarget
     case 'ATTRIBUTE':
-      return (
+      return targetId ? (
         <AttributeTab
-          productId={id}
+          productId={targetId}
+          flowProductId={baseId}
           step={stepOf.get('ATTRIBUTE')}
           product={data.product}
         />
-      )
+      ) : needsTarget
     case 'PLAN':
       return (
         <PlanPanel
           spuId={data.product.spu_id}
           variantLabels={variantLabels}
           productAudience={data.product.audience}
+          selectedVariantId={selectedVariantId}
         />
       )
     case 'IMAGE_SET':
-      return (
+      return targetId ? (
         <ImageSetTab
-          productId={id}
+          productId={targetId}
+          flowProductId={baseId}
           spu={data.product.spu}
           imageSetId={data.image_set?.id ?? null}
           step={stepOf.get('IMAGE_SET')}
         />
-      )
+      ) : needsTarget
     case 'COPY':
-      return <CopyTab productId={id} copy={data.copy} step={stepOf.get('COPY')} />
+      return targetId ? (
+        <CopyTab
+          productId={targetId}
+          flowProductId={baseId}
+          copy={data.copy}
+          step={stepOf.get('COPY')}
+        />
+      ) : needsTarget
     case 'DRAFT':
       // 草稿与导出在同一步下:PRD §16 的第七行是"形成完整 Draft",
       // 而导出是它的出口。拆成两步的话向导会有八步,与七步口径分叉
       return (
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           <DraftTab
-            productId={id}
+            productId={baseId}
             draft={data.draft}
             step={stepOf.get('DRAFT')}
             onJump={() => {}}
           />
-          <ExportTab productId={id} draft={data.draft} />
+          <ExportTab productId={baseId} draft={data.draft} />
         </Space>
       )
   }
@@ -196,8 +226,8 @@ export default function WizardPage() {
   })
 
   const query = useQuery({
-    queryKey: ['workbench-flow', id],
-    queryFn: () => workbenchApi.flow(id),
+    queryKey: ['workbench-flow', id, values.color || 'DEFAULT'],
+    queryFn: () => workbenchApi.flow(id, values.color || undefined),
     enabled: Boolean(id),
   })
 
@@ -239,7 +269,12 @@ export default function WizardPage() {
   // 手敲一个关着的步骤:如实说它关着,而不是偷偷跳走。
   // 偷偷跳走的表现是地址栏和页面对不上,而运营把这个链接发给了同事
   const openable = activeStep?.is_open ?? false
-  const focusColor = values.color || wizard.focus_color
+  const focusColor = data.color_selection?.variant_code ?? wizard.focus_color
+  const colorOptions = (data.colors?.colors ?? []).map((row) => ({
+    value: row.variant_code,
+    label: row.is_active ? row.variant_code : `${row.variant_code}（非在售）`,
+    disabled: !row.is_active,
+  }))
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -265,9 +300,21 @@ export default function WizardPage() {
         <span className="mono" style={{ color: brandVars.slate }}>
           {data.product.sku} · 完成度 {data.flow.completion}%
         </span>
+        {colorOptions.length > 0 && (
+          <Select<string>
+            size="small"
+            style={{ minWidth: 150 }}
+            data-testid="wizard-color-select"
+            aria-label="当前操作颜色"
+            value={focusColor ?? undefined}
+            placeholder="选择操作颜色"
+            options={colorOptions}
+            onChange={(color) => patch({ color })}
+          />
+        )}
         {focusColor && (
           <Tag color="processing" data-testid="wizard-focus-color">
-            先补:{focusColor}
+            当前操作:{focusColor}
           </Tag>
         )}
       </Space>

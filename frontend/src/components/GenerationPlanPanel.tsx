@@ -39,6 +39,8 @@ interface Props {
   spuId: string
   /** 颜色 id → 显示名。**显示一律用名字,不用 id** */
   variantLabels?: Record<string, string>
+  /** 向导当前颜色。SPU 详情页不传,表单仍默认 SPU 级。 */
+  initialColorVariantId?: string | null
   /**
    * 这件商品的受众。**只用来收窄模特候选集(§10.5),不用来做别的判断。**
    *
@@ -61,6 +63,7 @@ export default function GenerationPlanPanel({
   spuId,
   variantLabels = {},
   productAudience = null,
+  initialColorVariantId,
 }: Props) {
   const { message } = App.useApp()
   const [plans, setPlans] = useState<GenerationPlan[]>([])
@@ -68,6 +71,12 @@ export default function GenerationPlanPanel({
   const [creating, setCreating] = useState(false)
   const [effect, setEffect] = useState<PlanActivationEffect | null>(null)
   const [form] = Form.useForm()
+
+  useEffect(() => {
+    if (initialColorVariantId !== undefined) {
+      form.setFieldValue('color_variant_id', initialColorVariantId)
+    }
+  }, [form, initialColorVariantId])
 
   /*
    * 模特候选集。**query key 带上受众** —— 与 `TaskCreateModal` 同一条:

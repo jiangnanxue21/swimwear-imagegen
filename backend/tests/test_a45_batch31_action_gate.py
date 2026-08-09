@@ -28,17 +28,12 @@ AC-05 的判据原文要拦的正是这个差。
 from __future__ import annotations
 
 import ast
-import os
 
 import pytest
 
 from app.api import action_gate
 from app.workbench.flow import ACTION_STEP, NextActionCode
 from tests.pure._helpers import BACKEND_ROOT
-
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql+psycopg://app:app@127.0.0.1:5432/swimwear_test"
-)
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 

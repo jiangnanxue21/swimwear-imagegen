@@ -39,8 +39,6 @@ import itertools
 import random
 from dataclasses import replace
 
-import pytest
-
 from app.workbench import flow as flow_module
 from app.workbench.flow import (
     AttributeFacts,
@@ -239,15 +237,13 @@ def _sample() -> list[ProductFlow]:
     return _focused() + _uniform(random.Random(SEED), SAMPLE_SIZE)
 
 
-@pytest.fixture(scope="module")
-def sample() -> list[ProductFlow]:
-    return _sample()
+SAMPLE = _sample()
 
 
 # ================================================================ I-1
 
 
-def test_no_step_is_ever_done_while_carrying_a_blocking_issue(sample):
+def test_no_step_is_ever_done_while_carrying_a_blocking_issue():
     """完成与阻断不能同时成立。
 
     这是 `_no_done_while_blocking` 的性质,但断言写在 `evaluate()` 的出参上
@@ -255,7 +251,7 @@ def test_no_step_is_ever_done_while_carrying_a_blocking_issue(sample):
     正是"算得对但没人在对的位置调它"。
     """
     bad = []
-    for pf in sample:
+    for pf in SAMPLE:
         for step in evaluate(pf).steps:
             if step.state is not StepState.DONE:
                 continue
@@ -281,7 +277,7 @@ UPSTREAM: dict[FlowStep, tuple[FlowStep, ...]] = {
 }
 
 
-def test_a_downstream_step_is_blocked_whenever_its_upstream_is_not_done(sample):
+def test_a_downstream_step_is_blocked_whenever_its_upstream_is_not_done():
     """上游没就绪 = 下游 BLOCKED,**降级也算没就绪**。
 
     这一条是 R-1 的本体。兜底网把上游从 DONE 降到 IN_PROGRESS 之后,
@@ -289,7 +285,7 @@ def test_a_downstream_step_is_blocked_whenever_its_upstream_is_not_done(sample):
     `detectFlowAnomaly` 把这种组合判成 P0,商品在列表页与详情页都点不动。
     """
     bad = []
-    for pf in sample:
+    for pf in SAMPLE:
         state = {s.step: s.state for s in evaluate(pf).steps}
         for down, ups in UPSTREAM.items():
             if state[down] is StepState.BLOCKED:
@@ -306,7 +302,7 @@ def test_a_downstream_step_is_blocked_whenever_its_upstream_is_not_done(sample):
 # ================================================================ I-3
 
 
-def test_the_current_step_and_the_next_action_never_point_at_different_steps(sample):
+def test_the_current_step_and_the_next_action_never_point_at_different_steps():
     """AC-15 的「唯一下一步」:一个响应里只能有一个下一步。
 
     `current_step` 与 `next_action` 是**两次独立的走查**(前者按 `STEP_ORDER`
@@ -314,7 +310,7 @@ def test_the_current_step_and_the_next_action_never_point_at_different_steps(sam
     看到的是:向导落在 A 步,而按钮说去做 B 步。
     """
     bad = []
-    for pf in sample:
+    for pf in SAMPLE:
         result = evaluate(pf)
         if result.current_step is not result.next_action.step:
             bad.append((result.current_step.name, result.next_action.code.value, pf))
@@ -324,7 +320,7 @@ def test_the_current_step_and_the_next_action_never_point_at_different_steps(sam
     )
 
 
-def test_every_step_in_the_order_can_become_the_next_action(sample):
+def test_every_step_in_the_order_can_become_the_next_action():
     """七步**每一步**都要能成为下一步。
 
     R-3 的形状:`_decide_next` 从 `MATERIAL` 开始,`SETUP` 与 `PLAN` 整个
@@ -334,10 +330,10 @@ def test_every_step_in_the_order_can_become_the_next_action(sample):
     这一条与上面那条互补:只有 I-3 的话,把 `current_step` 改成跟着
     `next_action` 走也能让它绿,而那样两步会一起漏掉。
     """
-    reachable = {evaluate(pf).next_action.step for pf in sample}
+    reachable = {evaluate(pf).next_action.step for pf in SAMPLE}
     missing = [s.name for s in FlowStep if s not in reachable]
     assert not missing, (
-        f"这些步骤在 {len(sample)} 例抽样里从来没有成为过下一步:{missing}。"
+        f"这些步骤在 {len(SAMPLE)} 例抽样里从来没有成为过下一步:{missing}。"
         f"要么 `_decide_next` 漏了它们的分支,要么它们不该在 `STEP_ORDER` 里"
     )
 
@@ -400,9 +396,7 @@ def test_a_row_without_ownership_is_told_to_finish_setup():
     assert result.next_action.reason == "这一行还没挂到SPU上"
 
 
-def test_a_future_step_that_reports_done_while_blocking_still_closes_downstream(
-    monkeypatch,
-):
+def test_a_future_step_that_reports_done_while_blocking_still_closes_downstream():
     """兜底网必须挂在**每一步算完的当场**,不是最后统一过一遍。
 
     ## 为什么这一条要用 monkeypatch
@@ -436,17 +430,20 @@ def test_a_future_step_that_reports_done_while_blocking_still_closes_downstream(
             ),
         )
 
-    monkeypatch.setattr(flow_module, "_evaluate_attribute", sloppy)
-    result = evaluate(_ready())
-    state = {s.step: s.state for s in result.steps}
+    flow_module._evaluate_attribute = sloppy
+    try:
+        result = evaluate(_ready())
+        state = {s.step: s.state for s in result.steps}
 
-    assert state[FlowStep.ATTRIBUTE] is not StepState.DONE, "兜底网没有降级"
-    for down in (FlowStep.PLAN, FlowStep.IMAGE_SET, FlowStep.COPY, FlowStep.DRAFT):
-        assert state[down] is StepState.BLOCKED, (
-            f"{down.name} 仍然开着 —— 降级没有传到 `upstream_ready`,"
-            f"说明兜底网又被挪回了最后"
-        )
-    assert result.current_step is result.next_action.step
+        assert state[FlowStep.ATTRIBUTE] is not StepState.DONE, "兜底网没有降级"
+        for down in (FlowStep.PLAN, FlowStep.IMAGE_SET, FlowStep.COPY, FlowStep.DRAFT):
+            assert state[down] is StepState.BLOCKED, (
+                f"{down.name} 仍然开着 —— 降级没有传到 `upstream_ready`,"
+                f"说明兜底网又被挪回了最后"
+            )
+        assert result.current_step is result.next_action.step
+    finally:
+        flow_module._evaluate_attribute = real
 
 
 def test_a_colour_without_a_generation_plan_is_told_to_choose_one():

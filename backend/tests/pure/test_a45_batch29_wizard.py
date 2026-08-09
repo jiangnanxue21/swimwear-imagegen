@@ -417,7 +417,7 @@ def test_the_http_boundary_enforces_the_gate_on_the_forward_actions():
     `image_sets:approve` / `attributes:extract_attributes` 等五个前进端点
     当时一个都没过闸,而这条测试永远不会红。
 
-    「过闸的是不是全部」现在由 `test_a45_batch31_action_gate.py` 按
+    「过闸的是不是全部」现在由 `tests/test_a45_batch31_action_gate.py` 按
     `GATED_ENDPOINTS` / `UNGATED_ENDPOINTS` 两张表对**全部写路由**穷举。
     这里留下的是本文件那几个的定点断言 —— 它便宜,而且失败时指得更准。
     """
@@ -447,7 +447,7 @@ def test_the_gate_is_shared_and_not_re_implemented_per_router():
     另一个忘了,于是同一件商品在两个端点上得到两种判定。
 
     实现本身与"它读不读判定层"的断言在
-    `test_a45_batch31_action_gate.py` —— 闸搬了家,守卫跟着搬。
+    `tests/test_a45_batch31_action_gate.py` —— 闸搬了家,守卫跟着搬。
     """
     src = API.read_text(encoding="utf-8")
     assert "from app.api import action_gate" in src
@@ -489,7 +489,8 @@ def test_the_wizard_reaches_the_http_response():
     新开 `/wizard` 就是给同一份判定造第二个来源。
     """
     src = API.read_text(encoding="utf-8")
-    assert '"wizard": _wizard_block(' in src, "详情端点没有下发向导块"
+    assert "wizard_block = _wizard_block(" in src, "详情端点没有组装向导块"
+    assert '"wizard": wizard_block' in src, "详情端点没有下发向导块"
     assert '/products/{product_id}/wizard"' not in src, (
         "开了第二个端点 —— 同一份判定会有两个来源"
     )

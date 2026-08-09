@@ -25,13 +25,14 @@ sqlalchemy** —— 于是指纹算法一行都测不到,而指纹算错不报�
 前者只能是存下来的一个值。不存的话,改一次方案就再也无法回答
 "这批图是不是按当前方案出的"——因为旧参数已经被覆盖掉了。
 
-## 一条容易被"顺手修好"的约束
+## 两条容易被"顺手修好"的约束
 
-`UNIQUE(spu_id, COALESCE(color_variant_id,''))` 里的 COALESCE 是必须的。
+两条部分唯一索引里的 `COALESCE(color_variant_id,'')` 都是必须的。
 PostgreSQL 把 NULL 当成互不相等,不套 COALESCE 的话可以插进任意多份
-`color_variant_id IS NULL` 的 SPU 默认方案 —— 而 §4.7 写的是"每层当前
-生效**一份**"。多出来的那几份不会报错,只会让 `resolve_plan()` 每次
-按查询顺序挑一份,于是同一个 SPU 两次创建任务用了不同的参数。
+`color_variant_id IS NULL` 的 SPU 默认方案。ACTIVE 索引守"每层当前生效
+一份",DRAFT 索引守"每层只有一个正在编辑的草稿"。少了后者,双击保存
+会留下两份草稿;把两者合成 `status <> 'ARCHIVED'`,又会让 ACTIVE 挡住
+下一份 DRAFT,方案启用后再也改不了。
 这和 `listing_image_sets` / `listing_image_items` 上那三条表达式索引
 是同一个坑(评审第 7、9 条),那边的注释里记着。
 
@@ -71,17 +72,21 @@ class GenerationPlan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     __tablename__ = "generation_plans"
     __table_args__ = (
-        # 每层当前生效一份。见模块文档最后一段 —— COALESCE 不是可选的。
-        #
-        # `postgresql_where` 把 ARCHIVED 排除在外:归档的方案要留着给指纹
-        # 追溯(图片集过期判定比的正是它),但它们不参与"当前生效"这件事。
-        # 不排除的话,一个 SPU 一辈子只能改一次方案。
+        # ACTIVE 与 DRAFT 各占一个槽。ACTIVE 保留历史语义,DRAFT 可以在
+        # 启用前原地编辑;两者必须能共存,否则启用之后就建不出替代草稿。
         Index(
             "uq_generation_plans_scope",
             "spu_id",
             text("COALESCE(color_variant_id::text, '')"),
             unique=True,
-            postgresql_where=text("status <> 'ARCHIVED'"),
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+        Index(
+            "uq_generation_plans_draft_scope",
+            "spu_id",
+            text("COALESCE(color_variant_id::text, '')"),
+            unique=True,
+            postgresql_where=text("status = 'DRAFT'"),
         ),
         Index("ix_generation_plans_spu", "spu_id"),
         Index("ix_generation_plans_fingerprint", "plan_fingerprint"),

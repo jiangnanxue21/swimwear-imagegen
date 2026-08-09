@@ -708,6 +708,13 @@ export interface ProductFlowDetail {
   flow: ProductFlow
   colors: ColorRollup | null
   wizard: WizardView
+  /** 当前颜色对应的真实操作作用域。默认值由后端 focus_color 决定。 */
+  color_selection: {
+    variant_id: string
+    variant_code: string
+    /** 建了颜色但还没建 SKU 时为 null,颜色级写面板必须停住而不是借别色 SKU */
+    product_id: string | null
+  } | null
   image_set: { id: string; version: number; status: string } | null
   copy: ListingCopy | null
   draft: ListingDraft | null
@@ -874,8 +881,12 @@ export const workbenchApi = {
   list: async (params: WorkbenchQuery) =>
     (await apiClient.get<WorkbenchListResponse>('/workbench/products', { params })).data,
 
-  flow: async (productId: string) =>
-    (await apiClient.get<ProductFlowDetail>(`/workbench/products/${productId}/flow`)).data,
+  flow: async (productId: string, color?: string) =>
+    (
+      await apiClient.get<ProductFlowDetail>(`/workbench/products/${productId}/flow`, {
+        params: color ? { color } : undefined,
+      })
+    ).data,
 
   /** 整篇生成;`onlyFields` 给了就只重生那几个字段(FE-222,其余保留上一版)。 */
   generateCopy: async (productId: string, onlyFields?: string[]) =>

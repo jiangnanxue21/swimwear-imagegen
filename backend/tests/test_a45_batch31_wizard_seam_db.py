@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
+
 from app.attributes import validation
+from app.channels import generic
 from app.core.enums import (
     AttributeSource,
     AttributeStatus,
@@ -40,6 +43,7 @@ from app.core.enums import (
 )
 from app.listings import variants
 from app.models.attribute import ProductAttributeValue
+from app.models.listing_copy import ContentPlan, ListingCopy
 from app.models.listing_image import ListingImageItem, ListingImageSet
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
@@ -208,6 +212,28 @@ def _flow(client, product) -> dict:
     return resp.json()
 
 
+def _copy(session, product: Product, variant: ColorVariant, title: str) -> ListingCopy:
+    """给颜色切换接缝造一版最小当前文案。"""
+    plan = ContentPlan(spu=product.spu, facts={}, attr_snapshot_ids=[])
+    session.add(plan)
+    session.flush()
+    row = ListingCopy(
+        spu=product.spu,
+        channel=generic.CHANNEL,
+        site=generic.SITE,
+        locale=generic.LOCALE,
+        color_variant_id=str(variant.id),
+        version=1,
+        content_plan_id=plan.id,
+        title=title,
+        status="VALIDATED",
+        spec_version="test",
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
 # ================================================================ 一、向导块出得来
 
 
@@ -237,6 +263,59 @@ def test_the_wizard_block_reaches_http_with_all_seven_steps(client, session):
             )
         else:
             assert step["gate_reason"], f"{step['step']} 进不去却说不出是谁挡着"
+
+
+def test_color_query_switches_both_the_copy_and_the_write_target(client, session):
+    """F-4/F-12:显示 BLU 时,文案与后续写请求的 product_id 也必须是 BLU。"""
+    spu, red, blue, red_product = _fixture(session)
+    blue_product = session.scalars(
+        select(Product).where(
+            Product.spu_id == spu.id,
+            Product.color_variant_id == blue.id,
+        )
+    ).one()
+    red_copy = _copy(session, red_product, red, "RED copy")
+    blue_copy = _copy(session, blue_product, blue, "BLU copy")
+
+    response = client.get(
+        f"/api/workbench/products/{red_product.id}/flow", params={"color": "BLU"}
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    assert payload["color_selection"] == {
+        "variant_id": str(blue.id),
+        "variant_code": "BLU",
+        "product_id": str(blue_product.id),
+    }
+    assert payload["copy"]["id"] == str(blue_copy.id)
+    assert payload["copy"]["id"] != str(red_copy.id)
+
+
+def test_missing_color_query_uses_the_backends_focus_color(client, session):
+    """默认值来自 wizard.focus_color,前端不按颜色列表顺序猜。"""
+    spu, _, blue, red_product = _fixture(session)
+    blue_product = session.scalars(
+        select(Product).where(
+            Product.spu_id == spu.id,
+            Product.color_variant_id == blue.id,
+        )
+    ).one()
+
+    payload = _flow(client, red_product)
+
+    assert payload["wizard"]["focus_color"] == "BLU"
+    assert payload["color_selection"]["variant_code"] == "BLU"
+    assert payload["color_selection"]["product_id"] == str(blue_product.id)
+
+
+def test_color_query_cannot_escape_the_products_spu(client, session):
+    """手改 URL 不能借另一个 SPU 的颜色码取数。"""
+    _, _, _, product = _fixture(session)
+    response = client.get(
+        f"/api/workbench/products/{product.id}/flow", params={"color": "NOT-HERE"}
+    )
+    assert response.status_code == 422, response.text
 
 
 def test_the_http_wizard_agrees_with_the_decision_layer_field_by_field(
