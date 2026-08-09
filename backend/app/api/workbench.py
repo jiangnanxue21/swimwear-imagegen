@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.core import audience as audience_rules
 from app.core.clock import iso_utc
@@ -38,10 +39,15 @@ from app.models.audit_log import AuditLog
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
 from app.services.storage import asset_url, build_storage
-from app.workbench import color_rollup
+from app.workbench import color_rollup, cost_rollup
 from app.workbench import flow as flow_rules
+from app.workbench import impact as impact_rules
 from app.workbench import reject as reject_rules
 from app.workbench import service as wb
+from app.workbench import wizard as wizard_rules
+from app.workbench.color_flow import SpuColorRollup
+from app.workbench.stale_matrix import ChangeSource
+from app.workflows import cost_estimate
 
 
 def from_app_error(exc):
@@ -109,6 +115,11 @@ def _product_out(product: Product) -> dict[str, Any]:
     return {
         "id": str(product.id),
         "spu": product.spu,
+        # §4.4 的归属外键。**给向导的方案步用** —— 生成方案面板按 SPU 的
+        # **id** 取数,而 `spu` 是那个会改名的字符串码(§3.39 明令禁止用它
+        # 反查)。`None` 表示这一行还没挂到 SPU 上,那时方案步打不开,
+        # 而向导会如实说是建档没做完,不是"方案页坏了"
+        "spu_id": str(product.spu_id) if product.spu_id else None,
         "sku": product.sku,
         "name": product.name,
         "category": product.category,
@@ -333,8 +344,23 @@ def _draft_out(row) -> dict[str, Any] | None:
     }
 
 
-def _color_rollup(session: Session, product) -> dict[str, Any] | None:
-    """颜色维汇总。**算不出来时返回 None,不返回一个空壳。**
+def _color_axis(session: Session, product):
+    """颜色维的视图与汇总。**算不出来时两个都是 None。**
+
+    一次取数、三个消费者:`colors` 块、`wizard` 块的"先补哪个颜色"、
+    以及费用预估的"还缺几个角度"。各取一次数的后果写在
+    `color_rollup.views_and_rollup` 上。
+    """
+    if product.spu_id is None:
+        return None, None
+    canonical = wb._canonical_with_skus(session, product)
+    return color_rollup.views_and_rollup(session, product, canonical=canonical)
+
+
+def _color_rollup(
+    session: Session, product, *, rollup: SpuColorRollup | None = None
+) -> dict[str, Any] | None:
+    """颜色维汇总的出参。**算不出来时返回 None,不返回一个空壳。**
 
     没有 SPU 归属的存量行给一个"零个颜色、没人拦路"的空壳,会让向导显示
     「颜色都齐了」—— 而真相是没查过。None 在前端是「这一段不显示」,
@@ -342,10 +368,38 @@ def _color_rollup(session: Session, product) -> dict[str, Any] | None:
     """
     if product.spu_id is None:
         return None
-    canonical = wb._canonical_with_skus(session, product)
-    return color_rollup.serialize_rollup(
-        color_rollup.rollup(session, product, canonical=canonical)
+    result = rollup if rollup is not None else _color_axis(session, product)[1]
+    return color_rollup.serialize_rollup(result) if result is not None else None
+
+
+def _wizard_block(
+    ctx, *, rollup: SpuColorRollup | None, views
+) -> dict[str, Any]:
+    """向导块(阶段 6 / AC-01 / AC-05 / AC-15)。
+
+    **挂在详情端点上,不新开一个** —— 与 6-3 的颜色维同一条理由:
+    AC-15 要求"该响应与列表页、详情页读同一份判定结果,三处不得出现互相
+    矛盾的状态",而新开端点就是给同一件事造第二个来源。
+
+    费用预估算不出来(没有颜色维)时传 `None`,不传一个"合计 0"的空壳:
+    「没算」与「不要钱」在预算这件事上差得最远。
+    """
+    cost = cost_estimate.serialize(cost_rollup.build_estimate(views)) if views else None
+    return wizard_rules.serialize(
+        wizard_rules.build(ctx.result, rollup=rollup), cost=cost
     )
+
+
+# AC-05 那道闸的实现搬去了 `api/action_gate.py`。
+#
+# 搬出去的理由是 F-2:上一版它是本文件的私有函数,于是"哪些端点该过闸"
+# 这件事只有本文件的三个调用点知道,而 `image_sets` / `generation_plans` /
+# `attributes` 三个 router 里的前进端点一个都没过。闸下沉之后,那张
+# 「哪些端点属于前进动作」的表由 `action_gate.GATED_ENDPOINTS` 穷举,
+# 并由 `test_a45_batch31_action_gate.py` 的三条守卫钉着。
+#
+# 调用点写成 `action_gate.ensure_allowed(...)` 而不是留一个本地别名:
+# 别名会让守卫的 AST 检查按名字放行,而那正是上一版守卫失效的方式。
 
 
 @router.get("/products/{product_id}/flow")
@@ -357,6 +411,7 @@ def product_flow(
     """单商品详情:判定结论 + 各标签页要展开的对象。"""
     product = _product(session, product_id)
     ctx = wb.collect(session, product, dry_run=True)
+    views, rollup = _color_axis(session, product)
 
     draft_block: dict[str, Any] | None = _draft_out(ctx.draft)
     if ctx.draft is not None:
@@ -375,7 +430,11 @@ def product_flow(
         # 颜色维子态(阶段 6 / AC-15)。**挂在这个端点上,不新开一个** ——
         # AC-15 要求"该响应与列表页、详情页读同一份判定结果,三处不得出现
         # 互相矛盾的状态",而新开端点就是给同一件事造第二个来源
-        "colors": _color_rollup(session, product),
+        "colors": _color_rollup(session, product, rollup=rollup),
+        # 向导块(阶段 6 批次 6-4 / AC-01 / AC-05 / AC-16)。**同一个端点** ——
+        # 向导要的七步状态、颜色子态、阻塞项与费用预估是 AC-15 点名的一次请求;
+        # 而"同一份判定"这件事只有共用一个 `ctx.result` 才是结构保证的
+        "wizard": _wizard_block(ctx, rollup=rollup, views=views),
         "image_set": (
             {
                 "id": str(ctx.image_set.id),
@@ -431,6 +490,7 @@ def generate_copy(
     session: Session = Depends(db_session),
 ) -> dict[str, Any]:
     product = _product(session, product_id)
+    action_gate.ensure_allowed(session, product, flow_rules.NextActionCode.GENERATE_COPY)
     row = wb.generate_copy(
         session,
         product,
@@ -466,6 +526,9 @@ def approve_copy(
     session: Session = Depends(db_session),
 ) -> dict[str, Any]:
     product = _product(session, product_id)
+    # F-2:批准文案是前进动作,而它与已过闸的三个端点在同一个文件里 ——
+    # 上一版漏掉它,是"按名字点名"的守卫看不见的那一类
+    action_gate.ensure_allowed(session, product, flow_rules.NextActionCode.APPROVE_COPY)
     from app.listings import copy_service
 
     # `expect_spu` 是 A1 那条缺陷的同形补丁:两个路径参数以前从不互相印证,
@@ -527,6 +590,87 @@ def reject_reasons(
     return {"target": target, "reasons": reject_rules.describe(target)}
 
 
+# ---------------------------------------------------------------- 上游变化影响(AC-17)
+
+
+@router.get("/change-sources")
+def change_sources() -> dict[str, Any]:
+    """能触发失效的变更源清单(AC-17 的"我要改什么"那个选择器)。
+
+    **在后端而不是前端硬编码**:少一项的表现是运营改那一样东西之前看不到
+    提示,而 AC-17 要的正是"修改之前"。硬规则 4 的同一条。
+    """
+    return {"sources": impact_rules.describe_sources()}
+
+
+@router.get("/products/{product_id}/impact")
+def change_impact(
+    product_id: UUID,
+    source: str = Query(description="变更源,取值见 /workbench/change-sources"),
+    session: Session = Depends(db_session),
+) -> dict[str, Any]:
+    """这次修改会让哪些对象失效(AC-17)。**只读:回答它不该改任何状态。**
+
+    ## 三件事必须一起给
+
+    AC-17 的原话是"对象 / 字段 / 需要执行的动作"。前两样光有枚举回答不了
+    ——「文案会过期」和「**v3 这一版**文案会过期」在运营那里是两句话,
+    后者他知道自己要重做多少。所以矩阵那一半来自 `stale_matrix`(判定),
+    具体对象这一半来自当前这件商品(取数),两者在出参里分开放。
+
+    ## 为什么它是 GET
+
+    "修改之前先看看会影响什么"这件事必须是无副作用的,否则运营为了看一眼
+    影响就先改了一次状态 —— 而他看这一眼恰恰是为了决定要不要改。
+    `session.rollback()` 与详情端点同一个理由(评审第 19 条)。
+    """
+    product = _product(session, product_id)
+    try:
+        change = ChangeSource(source)
+    except ValueError:
+        # 认不出的取值报错而不是"匹配不上给空清单":空清单在界面上是
+        # 「这次修改不影响任何东西」,一句错得很有说服力的话
+        raise ValidationError(
+            f"未知的变更源:{source};可用取值见 /workbench/change-sources",
+            code=ErrorCode.INPUT_INVALID,
+        ) from None
+
+    ctx = wb.collect(session, product, dry_run=True)
+    payload = {
+        **impact_rules.serialize(change, impact_rules.preview(change)),
+        # 具体对象。**`None` 表示今天还没有这个对象**,不是"不受影响" ——
+        # 还没有草稿的商品改属性确实不会让草稿过期,但那是因为它不存在,
+        # 而不是因为这一格判"不过期"
+        "objects": {
+            "image_set": (
+                {
+                    "id": str(ctx.image_set.id),
+                    "version": ctx.image_set.version,
+                    "status": ctx.image_set.status,
+                }
+                if ctx.image_set
+                else None
+            ),
+            "copy": (
+                {
+                    "id": str(ctx.copy.id),
+                    "version": ctx.copy.version,
+                    "status": ctx.copy.status,
+                }
+                if ctx.copy
+                else None
+            ),
+            "draft": (
+                {"id": str(ctx.draft.id), "status": ctx.draft.status}
+                if ctx.draft
+                else None
+            ),
+        },
+    }
+    session.rollback()
+    return payload
+
+
 # ---------------------------------------------------------------- 草稿与导出
 
 
@@ -544,6 +688,7 @@ def build_draft(
     session: Session = Depends(db_session),
 ) -> dict[str, Any]:
     product = _product(session, product_id)
+    action_gate.ensure_allowed(session, product, flow_rules.NextActionCode.BUILD_DRAFT)
     row = wb.build_draft(
         session, product, manual=payload.manual, actor=current_actor(request)
     )
@@ -578,6 +723,7 @@ def export_draft(
 ) -> Response:
     """导出上架文件。过期与校验不过一律 409,不产出文件。"""
     product = _product(session, product_id)
+    action_gate.ensure_allowed(session, product, flow_rules.NextActionCode.EXPORT)
     payload, filename, mime = wb.export_draft(
         session, product, fmt=fmt, actor=current_actor(request)
     )

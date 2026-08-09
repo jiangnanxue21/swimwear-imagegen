@@ -16,6 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
+from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.attributes import run_state
 from app.attributes import service as attr_service
@@ -83,6 +84,11 @@ def extract_attributes(
     现在就异步只会多一层没人能观察的间接。
     """
     product = _product(session, product_id)
+    # AC-05(F-2):识别属于属性步,前置是素材就绪。绕过它直接 POST 的表现是
+    # 一次真实付费调用跑在一个连样品都没有的商品上 —— 而向导上那个按钮是灰的
+    action_gate.ensure_allowed(
+        session, product, action_gate.NextActionCode.RUN_EXTRACTION
+    )
     extraction = attr_service.run_extraction(
         session,
         product=product,
@@ -148,6 +154,11 @@ def confirm_attributes(
 ) -> list[AttributeValueOut]:
     """人工确认。写入 `MANUAL`,**从此不被任何自动流程覆盖**。"""
     product = _product(session, product_id)
+    # AC-05(F-2):确认属性属于属性步。人工填写与解决冲突走的也是这个端点,
+    # 三者同一道闸 —— 它们在 `ACTION_STEP` 里同属 ATTRIBUTE
+    action_gate.ensure_allowed(
+        session, product, action_gate.NextActionCode.CONFIRM_ATTRIBUTES
+    )
     actor = current_actor(request)
     written = []
     for item in payload.items:

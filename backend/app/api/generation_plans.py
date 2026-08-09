@@ -24,6 +24,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
+from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.schemas.generation_plan import (
     GenerationPlanCreate,
@@ -53,6 +54,11 @@ def create_plan(
     session: Session = Depends(db_session),
     actor: str = Depends(current_actor),
 ) -> GenerationPlanOut:
+    # AC-05(F-2):选方案属于方案步,前置是属性确认。方案按 SPU + 颜色存,
+    # 所以按「这个 SPU 下任一行 SKU 可做」判
+    action_gate.ensure_allowed_for_spu(
+        session, action_gate.NextActionCode.CHOOSE_PLAN, spu_id=payload.spu_id
+    )
     row = svc.save_plan(
         session,
         spu_id=payload.spu_id,
@@ -95,6 +101,9 @@ def activate_plan(
     actor: str = Depends(current_actor),
 ) -> GenerationPlanEffectOut:
     row = svc.get_plan(session, plan_id)
+    action_gate.ensure_allowed_for_spu(
+        session, action_gate.NextActionCode.CHOOSE_PLAN, spu_id=row.spu_id
+    )
     # 快照必须在改之前取,而且必须是 `PlanView`(冻结的)——
     # 拿库行当快照的话,`activate()` 原地改 status 会把快照一起改掉,
     # 于是"变了哪些作用域"永远算出空集

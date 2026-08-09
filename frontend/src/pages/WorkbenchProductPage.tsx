@@ -162,6 +162,15 @@ export default function WorkbenchProductPage() {
         >
           刷新状态
         </Button>
+        {/*
+          进向导的入口(阶段 6 / AC-01)。
+          **没有做成侧栏菜单项**:向导是"这一件商品"的视图,菜单项没有
+          商品 id 可带,点进去只能是一个选商品的空页 —— 那等于在主流程
+          中间插一屏。入口放在商品身上,和「商品原始信息」并列。
+        */}
+        <Button size="small" onClick={() => navigate(`/wizard/${id}`)}>
+          用向导做
+        </Button>
         <Button size="small" onClick={() => navigate(`/products/${id}`)}>
           商品原始信息
         </Button>

@@ -16,6 +16,7 @@
  * 硬规则第 4 条。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { App, Button, Empty, Form, InputNumber, Modal, Select, Space, Table, Tag } from 'antd'
 
 import {
@@ -29,6 +30,8 @@ import {
   type ImageAngle,
   type PlanActivationEffect,
 } from '../api/generationPlans'
+import { modelTemplatesApi } from '../api/generation'
+import { AUDIENCE_LABEL, type Audience } from '../api/types'
 import { readError } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 
@@ -36,6 +39,17 @@ interface Props {
   spuId: string
   /** 颜色 id → 显示名。**显示一律用名字,不用 id** */
   variantLabels?: Record<string, string>
+  /**
+   * 这件商品的受众。**只用来收窄模特候选集(§10.5),不用来做别的判断。**
+   *
+   * `null` = 待确认。那一档候选集不收窄,并在表单上如实说一句 ——
+   * 与 `TaskCreateModal` 同一个处理:不收窄和"收窄之后正好是全部"
+   * 在界面上长得一样,而前者选出来的模特可能是错的。
+   *
+   * 可选:SPU 详情页是 SPU 作用域,那里一个 SPU 下可能有多行 SKU,
+   * 没有唯一的商品受众可传。不传就是不收窄,并且界面会说出来。
+   */
+  productAudience?: Audience | null
 }
 
 const ANGLE_OPTIONS = (Object.keys(IMAGE_ANGLE_LABEL) as ImageAngle[]).map((value) => ({
@@ -43,13 +57,30 @@ const ANGLE_OPTIONS = (Object.keys(IMAGE_ANGLE_LABEL) as ImageAngle[]).map((valu
   label: IMAGE_ANGLE_LABEL[value],
 }))
 
-export default function GenerationPlanPanel({ spuId, variantLabels = {} }: Props) {
+export default function GenerationPlanPanel({
+  spuId,
+  variantLabels = {},
+  productAudience = null,
+}: Props) {
   const { message } = App.useApp()
   const [plans, setPlans] = useState<GenerationPlan[]>([])
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [effect, setEffect] = useState<PlanActivationEffect | null>(null)
   const [form] = Form.useForm()
+
+  /*
+   * 模特候选集。**query key 带上受众** —— 与 `TaskCreateModal` 同一条:
+   * 少了它,换一件商品之后列表不会重查,运营会对着上一件商品的候选集
+   * 做选择,而那正是 §10.5 要防的事。
+   */
+  const templates = useQuery({
+    queryKey: ['model-templates', 'enabled', productAudience ?? 'UNCONFIRMED'],
+    queryFn: () =>
+      modelTemplatesApi.list(true, {
+        forProductAudience: productAudience ?? undefined,
+      }),
+  })
 
   /**
    * 重读方案列表。
@@ -182,6 +213,16 @@ export default function GenerationPlanPanel({ spuId, variantLabels = {} }: Props
       await createGenerationPlan({
         spu_id: spuId,
         color_variant_id: values.color_variant_id ?? null,
+        // **这一行以前不在。** 后端 `save_plan` 一直收它、一直跑
+        // `assert_usable` 校验,而这张表单从不填 —— 于是向导里造出来的
+        // 方案 `model_template_id` 恒为 null,`service._plan_facts` 的
+        // `has_model` 恒为假,PRD §14.1 定义的方案步完成条件
+        //(「有一份生效方案,**且方案里选了模特**」)在向导内**永远达不到**:
+        // 第四步卡在 NEEDS_CONFIRM,七步走不完,完成度上限 96%。
+        //
+        // 判定层的用例看不见这件事:`test_a45_batch29_wizard._flow()` 的
+        // 夹具写着 `has_model=True` —— 一个前端一天都造不出来的状态。
+        model_template_id: values.model_template_id ?? null,
         provider: values.provider,
         angles: (values.angles ?? []).map((angle: ImageAngle) => ({
           angle,
@@ -222,6 +263,48 @@ export default function GenerationPlanPanel({ spuId, variantLabels = {} }: Props
             style={{ minWidth: 160 }}
             placeholder="SPU 默认"
             options={Object.entries(variantLabels).map(([value, label]) => ({ value, label }))}
+          />
+        </Form.Item>
+        <Form.Item
+          name="model_template_id"
+          label="模特"
+          // **不设 required。** 没有模特的方案是合法的 DRAFT(后端不拒),
+          // 只是方案步不会判 DONE。设成必填的话,"先把角度存下来、模特
+          // 明天再定"这条真实动线就没了 —— 而那不是 §6.4 的意思。
+          //
+          // 差的那一步由判定层说:方案缺模特 -> NEEDS_CONFIRM +
+          // 「方案里还没有选模特」,向导上那条提示就是它。
+          extra={
+            templates.isError
+              ? // **拉失败与"一个都没有"必须分开说。** 空下拉框在界面上
+                // 是一句业务结论(「没有可用模特」),运营照着它做的下一步
+                // 是去新建一个模特;而照着"没拉到"做的下一步是重试。
+                // 两者相反 —— a28 的 FE-GLOBAL-03 说的就是这一档。
+                `模特列表没有拉到(${readError(templates.error)}),下面是空的不代表没有模特`
+              : productAudience
+                ? `候选集已按商品受众(${AUDIENCE_LABEL[productAudience]})收窄`
+                : '商品受众未确认,候选集没有收窄 —— 选出来的模特可能不匹配'
+          }
+        >
+          <Select
+            allowClear
+            style={{ minWidth: 220 }}
+            placeholder="未选(方案步会停在待确认)"
+            loading={templates.isLoading}
+            status={templates.isError ? 'error' : undefined}
+            notFoundContent={
+              templates.isError
+                ? '没拉到,不是没有'
+                : productAudience
+                  ? `没有受众为「${AUDIENCE_LABEL[productAudience]}」的启用模特`
+                  : undefined
+            }
+            options={(templates.data ?? []).map((t) => ({
+              value: t.id,
+              // §10.3:真正做选择的这一处必须显示受众。看不到它,
+              // §10.5 那条硬约束就只剩后端一道
+              label: `${t.name} · ${AUDIENCE_LABEL[t.audience] ?? t.audience} · ${t.pose}`,
+            }))}
           />
         </Form.Item>
         <Form.Item name="provider" label="Provider" rules={[{ required: true }]}>

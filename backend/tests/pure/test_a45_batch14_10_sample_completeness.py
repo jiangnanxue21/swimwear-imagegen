@@ -44,7 +44,9 @@ from app.workbench.flow import (
     IssueLevel,
     MaterialFacts,
     NextActionCode,
+    PlanFacts,
     ProductFlow,
+    SetupFacts,
     StepState,
 )
 from tests.pure._helpers import BACKEND_ROOT  # noqa: F401
@@ -121,6 +123,12 @@ def _flow(**kwargs) -> ProductFlow:
         sku="SW-001-BLK-S",
         spu="SW-001",
         audience=AudienceFacts(audience="WOMEN"),
+        # 建档与方案默认已完成。docstring 说的是"除素材外**处处就绪**",
+        # 而本夹具写于七步增维(batch27)之前 —— 那两步的空视图分别判
+        # NEEDS_CONFIRM 与 TODO,都排在素材相关的下一步之前,
+        # 于是这一批用例会答"去补全建档"而不是素材那句话。
+        setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
+        plan=PlanFacts(has_active_plan=True, has_model=True),
         material=MaterialFacts(),
         attribute=AttributeFacts(
             required_fields=REQUIRED, confirmed=frozenset(REQUIRED), extraction_count=1

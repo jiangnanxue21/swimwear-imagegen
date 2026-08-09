@@ -319,6 +319,32 @@ def test_the_delivery_required_files_exist_and_pack_verifies_them():
     )
 
 
+def test_packaging_entrypoints_are_pinned_to_lf():
+    """用户级 core.autocrlf 不得再次把 Bash 入口检出成 CRLF/混合换行。"""
+    attributes = _read(PROJECT_ROOT / ".gitattributes")
+    for rule in (
+        "*.sh text eol=lf",
+        "*.ps1 text eol=lf",
+        "Makefile text eol=lf",
+    ):
+        assert rule in attributes, f".gitattributes 缺少跨平台打包规则: {rule}"
+
+    for relative in ("tools/pack.sh", "tools/pack.ps1", "Makefile"):
+        payload = (PROJECT_ROOT / relative).read_bytes()
+        assert b"\r" not in payload, f"{relative} 出现 CRLF/混合换行,Windows 打包会复发"
+
+
+def test_make_pack_uses_the_native_windows_entrypoint():
+    makefile = _read(PROJECT_ROOT / "Makefile")
+    assert "ifeq ($(OS),Windows_NT)" in makefile
+    assert (
+        "PACK_COMMAND = powershell -NoProfile -ExecutionPolicy Bypass "
+        "-File tools/pack.ps1"
+    ) in makefile
+    assert "PACK_COMMAND = tools/pack.sh" in makefile
+    assert "\t$(PACK_COMMAND) $(V)" in makefile
+
+
 def test_smoke_exercises_the_license_gate_instead_of_the_bypass():
     """冒烟以前不传 model_template_id,任务走 MODEL_REFERENCE 那条已知缝:
     §10.5/§11 四道检查在"端到端"脚本里一次都没被执行过 —— 假绿的具体形状。"""

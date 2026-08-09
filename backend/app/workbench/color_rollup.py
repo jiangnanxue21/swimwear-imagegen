@@ -30,6 +30,9 @@
 """
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,10 +40,11 @@ from app.attributes.registry import REGISTRY
 from app.channels import generic
 from app.core.enums import Audience, MediaStatus, OwnerType
 from app.listings import image_set_rules
-from app.models.listing_copy import ListingCopy
+from app.models.listing_copy import ContentPlan, ListingCopy
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
 from app.workbench import color_flow, upstream_collect, upstream_snapshot
+from app.workbench import stale as stale_rules
 from app.workbench.color_flow import ColorView, SpuColorRollup
 
 
@@ -108,20 +112,46 @@ def build_color_views(
         key = str(asset.color_variant_id)
         samples[key] = samples.get(key, 0) + 1
 
-    # 每个颜色有没有文案:0051 之后文案按颜色分槽,所以这是一次按列聚合,
-    # 不是"这个 SPU 有没有文案"
-    copies = {
-        str(row.color_variant_id)
-        for row in session.scalars(
-            select(ListingCopy).where(
-                ListingCopy.spu == product.spu,
-                ListingCopy.channel == generic.CHANNEL,
-                ListingCopy.site == generic.SITE,
-                ListingCopy.locale == generic.LOCALE,
-            )
+    # 每个颜色的**当前版**文案:0051 之后文案按颜色分槽,所以这是一次按列聚合,
+    # 不是"这个 SPU 有没有文案"。
+    #
+    # 一条 SQL 查完整个 SPU 再在内存里分组,不是每个颜色查一次 ——
+    # 九色 SPU 的向导会因此多打九次库,而 `test_workbench_query_budget`
+    # 那条棘轮正是为这种写法立的。
+    #
+    # 「哪一版是当前版」走 `_wb.pick_current_copy`,**不在这里再写一次**:
+    # 两份分叉的表现是向导说"这个颜色还没有文案",而详情页正显示着一版。
+    by_variant: dict[str, list[ListingCopy]] = {}
+    for row in session.scalars(
+        select(ListingCopy).where(
+            ListingCopy.spu == product.spu,
+            ListingCopy.channel == generic.CHANNEL,
+            ListingCopy.site == generic.SITE,
+            ListingCopy.locale == generic.LOCALE,
         )
-        if row.color_variant_id
+    ):
+        if row.color_variant_id:
+            by_variant.setdefault(str(row.color_variant_id), []).append(row)
+    current_copy = {
+        key: _wb.pick_current_copy(rows) for key, rows in by_variant.items()
     }
+
+    # 那些文案各自的内容计划。**一条 SQL**,理由同上
+    plan_ids = {
+        row.content_plan_id
+        for row in current_copy.values()
+        if row is not None and row.content_plan_id is not None
+    }
+    plans = (
+        {
+            plan.id: plan
+            for plan in session.scalars(
+                select(ContentPlan).where(ContentPlan.id.in_(plan_ids))
+            )
+        }
+        if plan_ids
+        else {}
+    )
 
     # 受众取商品行本身,不取 canonical —— `CanonicalProduct` 是**平台无关的
     # 商品事实**(§5.5),它身上没有受众这个字段。向一个不存在的属性取值
@@ -174,16 +204,82 @@ def build_color_views(
                 skus_missing_primary=(
                     missing_primary if (c is not None and skus) else None
                 ),
-                has_copy=colour.variant_id in copies,
-                copy_stale=False,
+                has_copy=current_copy.get(colour.variant_id) is not None,
+                copy_stale=_copy_is_stale(
+                    current_copy.get(colour.variant_id),
+                    plans=plans,
+                    confirmed_ids=(
+                        set(inputs.shared_fact_versions)
+                        | set(colour.fact_versions)
+                    ),
+                ),
             )
         )
     return tuple(views)
 
 
+def _copy_is_stale(
+    row: ListingCopy | None,
+    *,
+    plans: Mapping[uuid.UUID, ContentPlan],
+    confirmed_ids: set[str],
+) -> bool:
+    """这个颜色的当前版文案过期了没有(§4.5 第 1 行的文案列)。
+
+    ## 为什么这一行以前是写死的 `False`
+
+    审阅 F-7:`copy_stale=False` 是一个**常量**,于是 `color_flow._copy()` 里
+    那条 `if view.copy_stale: -> TODO("文案已过期")` 在生产路径上是死代码 ——
+    颜色维永远不会报"文案已过期"。而阶段 5 刚交付了文案的颜色粒度与失效投影,
+    所以真实情况是:颜色维显示 DONE,而那一版文案的事实已经不成立。
+    这与 AC-19 的失效口径直接冲突,也命中 review prompt
+    「不得通过默认值、常量假造状态」那一条。
+
+    ## 判定本体不在这里
+
+    走 `stale.copy_attrs_stale()` —— 与 `service._copy_is_stale`(商品级那一份)
+    **同一个纯函数**。§4.5 矩阵的文案列在 `test_stale_matrix` 里按格穷举过,
+    这里再写一遍判据就是给同一个问题造第二个答案。
+
+    ## 已确认版本集为什么这样取
+
+    `confirmed_ids` = SPU 层 ∪ **这个颜色**的 VARIANT 层,两者都来自
+    `upstream_collect` 已经采好的那一份(`shared_fact_versions` /
+    `colour.fact_versions`),**不额外打库**。
+
+    按颜色取而不是按商品行取是必须的:BLU 那一版文案的快照里记的是
+    SPU 层加 BLU 的颜色事实,拿 RED 的事实去比一定不相等 ——
+    于是每个颜色都会被报成"已过期",而运营每点一次重新生成都要花钱。
+    """
+    if row is None:
+        return False
+    plan = plans.get(row.content_plan_id) if row.content_plan_id else None
+    return stale_rules.copy_attrs_stale(
+        row.status,
+        None if plan is None else plan.attr_snapshot_ids,
+        sorted(confirmed_ids),
+        plan_missing=plan is None,
+    )
+
+
+def views_and_rollup(
+    session: Session, product: Product, *, canonical
+) -> tuple[tuple[ColorView, ...], SpuColorRollup]:
+    """一次取数,两个消费者。
+
+    6-5 的费用预估要按"这个颜色还缺几个角度"算钱,而那正是颜色维矩阵
+    显示的那个数。**各取一次数的表现是两个数字并排显示且不相等** ——
+    向导上写着「BLU 缺 3 个角度」,而下面的预估按 2 张算钱,两边都不报错。
+
+    所以视图只算一次,颜色维与费用预估都从这一份派生。
+    """
+    views = build_color_views(session, product, canonical=canonical)
+    return views, color_flow.evaluate_colors(views)
+
+
 def rollup(session: Session, product: Product, *, canonical) -> SpuColorRollup:
     """向导的颜色维汇总。**`color_flow` 的唯一生产调用点。**"""
-    return color_flow.evaluate_colors(build_color_views(session, product, canonical=canonical))
+    return views_and_rollup(session, product, canonical=canonical)[1]
 
 
 def serialize_rollup(result: SpuColorRollup) -> dict:

@@ -1,5 +1,14 @@
 .PHONY: help init up down logs migrate revision seed test test-pure smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-columns audit-doc-refs fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
 
+# `core.autocrlf=true` used to turn pack.sh into a mixed-CRLF script on Windows.
+# Route the documented make entrypoint to the native packer there; .gitattributes
+# separately keeps both implementations stable when contributors check them out.
+ifeq ($(OS),Windows_NT)
+PACK_COMMAND = powershell -NoProfile -ExecutionPolicy Bypass -File tools/pack.ps1
+else
+PACK_COMMAND = tools/pack.sh
+endif
+
 help:
 # 字符类里带上数字:`p0-gate` 这类带编号的目标原来会被这条 grep 静默滤掉 ——
 # 目标在、`make help` 里看不见,而看不见的入口等于没有。
@@ -189,7 +198,7 @@ p0-gate: ## 阶段 P0 清单:逐条跑,跑不动的点名说缺什么(退出码�
 	cd backend && python3 tools/p0_gate.py $(ARGS)
 
 pack: ## 打交付包 make pack V=a20
-	tools/pack.sh $(V)
+	$(PACK_COMMAND) $(V)
 
 smoke: ## 生成链路冒烟:健康→素材→已授权模特→生成→评分→成品图→导出(不含审核后链路)
 	docker compose exec backend python -m app.scripts.smoke_test

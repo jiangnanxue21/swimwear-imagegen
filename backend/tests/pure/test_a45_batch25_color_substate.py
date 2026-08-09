@@ -154,7 +154,7 @@ def test_unknown_never_becomes_a_block():
     assert not cf.evaluate_color(view).is_blocking
     rollup = cf.evaluate_colors([view])
     assert rollup.blocking_codes == ()
-    assert cf.rollup_step_states(rollup)[FlowStep.MATERIAL] is StepState.TODO
+    assert cf.SUBSTATE_TO_STEP_STATE[rollup.worst_by_step[FlowStep.MATERIAL]] is StepState.TODO
 
 
 def test_missing_facts_block_only_when_the_upstream_cannot_run():
@@ -278,8 +278,146 @@ def test_the_worst_active_colour_decides_the_step():
          _view(variant_id="v-b", variant_code="BBB", owned_image_count=0)]
     )
     assert rollup.worst_by_step[FlowStep.IMAGE_SET] is cf.ColorSubState.BLOCKED
-    assert cf.rollup_step_states(rollup)[FlowStep.IMAGE_SET] is StepState.BLOCKED
+    assert (
+        cf.SUBSTATE_TO_STEP_STATE[rollup.worst_by_step[FlowStep.IMAGE_SET]]
+        is StepState.BLOCKED
+    )
     assert rollup.worst_by_step[FlowStep.MATERIAL] is cf.ColorSubState.DONE
+
+
+def test_the_merge_rule_is_written_down_and_has_exactly_one_answer():
+    """**F-1 的守卫:合并规则必须唯一。**
+
+    上一版这里有两份规格互相矛盾:`rollup_step_states()` 说"要下压",
+    `wizard.worst_color_state()` 说"不下压",而两边都没有生产调用点。
+    AC-15 问的"商品级与颜色级冲突时是否有明确、唯一的合并规则",
+    当时的答案是"规则写了两份,一份都没接"。
+
+    这条钉住裁定后的状态:那个没人调的翻译函数不许回来,而裁定要
+    写在模块文档里能被读到。
+    """
+    assert not hasattr(cf, "rollup_step_states"), (
+        "`rollup_step_states` 回来了 —— 它是那条与 `wizard` 打架的规格。"
+        "要下压请改 `flow`,理由见 color_flow 顶部的「合并规则」一节"
+    )
+    assert "合并规则" in (cf.__doc__ or ""), "裁定没有写在模块文档里"
+
+
+def test_no_step_is_done_while_carrying_a_blocking_issue():
+    """**F-1 的根因守卫:带着阻断问题的一步不许显示 DONE。**
+
+    这一条是跨步骤的结构不变量,所以它穷举 `FlowStep` 而不是点名图片集 ——
+    上一版正是"只有图片集那个分支破了例",而判定层自己的穷举全绿。
+
+    走 `flow.evaluate()` 而不是逐个 `_evaluate_*`:不变量落在装配那一步上,
+    这条断言要问的是**最终出参**里有没有这种组合。
+    """
+    from app.workbench.flow import (
+        AttributeFacts,
+        CopyFacts,
+        DraftFacts,
+        ImageSetFacts,
+        IssueLevel,
+        MaterialFacts,
+        PlanFacts,
+        ProductFlow,
+        SetupFacts,
+        StepState,
+        evaluate,
+    )
+
+    def _base(**kwargs) -> ProductFlow:
+        base = dict(
+            product_id="p",
+            sku="SKU-1",
+            spu="SPU-1",
+            setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
+            material=MaterialFacts(
+                total=3,
+                usable=3,
+                gate_roles=frozenset({"PRODUCT_FRONT"}),
+                usable_roles=frozenset(
+                    {"PRODUCT_FRONT", "PRODUCT_BACK", "DETAIL"}
+                ),
+            ),
+            attribute=AttributeFacts(required_fields=(), extraction_count=1),
+            plan=PlanFacts(
+                has_active_plan=True, plan_is_colour_level=True, has_model=True
+            ),
+            image_set=ImageSetFacts(exists=True, status="APPROVED", version=1),
+            copy=CopyFacts(exists=True, status="APPROVED", version=1),
+        )
+        base.update(kwargs)
+        return ProductFlow(**base)
+
+    #: 每一项都是"这一步本来会判 DONE,但它带着一条阻断问题"。
+    #:
+    #: **F-1 那一条排在第一个** —— 已批准的图片集少了一个颜色的图。
+    cases = [
+        (
+            "已批准图片集缺一个颜色的配图(F-1 原形)",
+            _base(
+                image_set=ImageSetFacts(
+                    exists=True,
+                    status="APPROVED",
+                    version=1,
+                    violation_codes=("MISSING_IMAGE_FOR_VARIANT",),
+                )
+            ),
+        ),
+        (
+            "已批准图片集没有主图",
+            _base(
+                image_set=ImageSetFacts(
+                    exists=True,
+                    status="APPROVED",
+                    version=1,
+                    violation_codes=("MISSING_PRIMARY_FOR_VARIANT",),
+                )
+            ),
+        ),
+        (
+            "已批准图片集引用了被隔离的素材",
+            _base(
+                image_set=ImageSetFacts(
+                    exists=True,
+                    status="APPROVED",
+                    version=1,
+                    violation_codes=("UNUSABLE_ASSET",),
+                )
+            ),
+        ),
+        (
+            "已批准文案有硬失败",
+            _base(
+                copy=CopyFacts(
+                    exists=True,
+                    status="APPROVED",
+                    version=1,
+                    blocking_violations=1,
+                )
+            ),
+        ),
+        (
+            "已导出草稿有校验错误",
+            _base(
+                draft=DraftFacts(
+                    exists=True, status="EXPORTED", exported=True, error_count=1
+                )
+            ),
+        ),
+    ]
+
+    for name, product_flow in cases:
+        result = evaluate(product_flow)
+        for step in result.steps:
+            has_blocking = any(
+                i.level is IssueLevel.BLOCKING for i in step.issues
+            )
+            assert not (has_blocking and step.state is StepState.DONE), (
+                f"[{name}] {step.step} 带着阻断问题却显示 DONE —— "
+                "运营会先信那个绿勾,然后在导出时被门禁拦住"
+            )
 
 
 def test_every_substate_has_a_step_state_and_a_severity():

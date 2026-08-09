@@ -519,6 +519,12 @@ def test_upstream_blocked_step_does_not_inflate_blocking_count():
             product_id="p-new",
             sku="SW-NEW",
             spu="SW-NEW",
+            # 归属显式填齐。"刚建好"指的是没素材、没跑过识别,不是"没挂 SPU"
+            # —— 生产侧建档走 `/spus/new`,那条路径出来的行两个外键都在
+            # (`service._setup_facts` 直接读列,不会是 `None`)。留空的话
+            # 建档步判 NEEDS_CONFIRM 并抢先成为唯一下一步,这条用例就
+            # 不再是在验"素材那 2 条阻断就是全部"了。
+            setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
             attribute=AttributeFacts(required_fields=("color", "fabric", "style")),
         )
     )

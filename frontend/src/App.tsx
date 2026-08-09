@@ -15,6 +15,7 @@ import SpuCreatePage from './pages/SpuCreatePage'
 import SpuDetailPage from './pages/SpuDetailPage'
 import WorkbenchListPage from './pages/WorkbenchListPage'
 import WorkbenchProductPage from './pages/WorkbenchProductPage'
+import WizardPage from './pages/WizardPage'
 import WorkbenchBatchPage from './pages/WorkbenchBatchPage'
 import WorkbenchReviewPage from './pages/WorkbenchReviewPage'
 import WorkbenchExceptionsPage from './pages/WorkbenchExceptionsPage'
@@ -147,6 +148,10 @@ export const router = createBrowserRouter(
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/workbench" element={<WorkbenchListPage />} />
         <Route path="/workbench/:id" element={<WorkbenchProductPage />} />
+        {/* 一体化向导(阶段 6 / AC-01)。**不挂在 `/workbench/:id/wizard` 下** ——
+            那个前缀的下一段已经是商品 id 的子路由空间,而向导是一条与八标签页
+            并列的视图,不是它的下级。`?step=` / `?color=` 承担刷新恢复(AC-16) */}
+        <Route path="/wizard/:id" element={<WizardPage />} />
         {/* 阶段 3。刻意不挂在 /workbench/* 下:那个前缀的下一段是商品 id,
             加一个 /workbench/batches 会和 :id 抢同一个位置 */}
         <Route path="/workbench-review" element={<WorkbenchReviewPage />} />

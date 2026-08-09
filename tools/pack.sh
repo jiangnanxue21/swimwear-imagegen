@@ -222,6 +222,7 @@ done
 REQUIRED=(
   '.env.example'
   'frontend/.env.example'
+  '.gitattributes'
   '.gitignore'
   '.github/workflows/ci.yml'
   'backend/tools/verify_delivery.py'

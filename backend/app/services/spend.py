@@ -299,6 +299,18 @@ def _price_book_or_empty(raw: str) -> dict[str, Any]:
         return {}
 
 
+def price_book() -> dict[str, Any]:
+    """当前生效的价目表。**读它的人只能有这一个入口。**
+
+    加这个公开函数是因为 6-5 的费用预估要用同一份价目表(`workbench/
+    cost_rollup`),而它不该去调私有的 `_price_book_or_empty`,更不该自己
+    `parse_price_book(settings.PROVIDER_PRICE_BOOK)` —— 后者会绕开
+    「解析不了就当没配价、绝不往上抛」那条规矩(理由见 `_price_book_or_empty`),
+    于是 `.env` 里一个 JSON 拼写错误会让向导整页打不开。
+    """
+    return _price_book_or_empty(settings.PROVIDER_PRICE_BOOK)
+
+
 @lru_cache(maxsize=8)
 def _cached_price_book(raw: str) -> dict[str, Any]:
     """解析价目表,按原始字符串缓存。

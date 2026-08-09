@@ -30,7 +30,7 @@ service 负责把库里的行翻译成下面这些 dataclass,判定全在本文�
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -680,6 +680,33 @@ class StepResult:
     summary: str
     issues: tuple[Issue, ...] = ()
 
+    def __post_init__(self) -> None:
+        """第三个位置参数是 `summary`,不是 `issues`。**这一行是被咬出来的。**
+
+        batch27 的 `_evaluate_setup` / `_evaluate_plan` 都写成
+        `StepResult(step, state, tuple(issues))` —— 于是那两步的问题被塞进
+        `summary`,而 `issues` 恒为空。三个后果同时发生,一个都不报错:
+
+            界面     出参里 `summary` 是一个**对象数组**,而前端类型写的是
+                     `string`;React 渲染对象数组直接抛错 —— 归属未挂或
+                     没配方案的商品,总览标签页整块打不开
+            阻断数   `blocking_count` 数的是 `result.issues`,那两步的
+                     BLOCKING 问题一条都没进去。没配方案的商品显示"阻断 0"
+            下游     `gate_reason` 之类按 issue 取因由的判定全部落空
+
+        它活了两批(batch27 → batch28)没有被任何测试看见,因为**没有任何
+        测试读那两步的 summary**,而 `SETUP_*` / `PLAN_*` 五个问题码全仓
+        零引用 —— 算出来从来没有人读过,正是 §3.43 那一族的形状。
+
+        类型检查放在构造期而不是只写一条测试:测试挡的是今天这两处,
+        构造期挡的是**下一个人写第八步**时手滑的同一行。
+        """
+        if not isinstance(self.summary, str):
+            raise TypeError(
+                f"{self.step}: summary 必须是字符串,拿到 {type(self.summary).__name__}"
+                " —— 第三个位置参数是 summary,issues 是第四个"
+            )
+
 
 @dataclass(frozen=True)
 class NextAction:
@@ -756,7 +783,12 @@ def _evaluate_setup(facts: SetupFacts) -> StepResult:
                 hint="在 SPU 页把这个 SKU 挂回它所属的颜色",
             )
         )
-        return StepResult(FlowStep.SETUP, StepState.NEEDS_CONFIRM, tuple(issues))
+        return StepResult(
+            FlowStep.SETUP,
+            StepState.NEEDS_CONFIRM,
+            f"缺{'/'.join(missing)}归属",
+            tuple(issues),
+        )
 
     if facts.has_spu_ref is None or facts.has_colour_ref is None:
         # 没查过归属。判 DONE 会让「建档完成」这件事在没有证据时成立,
@@ -770,9 +802,11 @@ def _evaluate_setup(facts: SetupFacts) -> StepResult:
                 hint="打开 SPU 页确认这个 SKU 的颜色归属",
             )
         )
-        return StepResult(FlowStep.SETUP, StepState.NEEDS_CONFIRM, tuple(issues))
+        return StepResult(
+            FlowStep.SETUP, StepState.NEEDS_CONFIRM, "归属未核对", tuple(issues)
+        )
 
-    return StepResult(FlowStep.SETUP, StepState.DONE, ())
+    return StepResult(FlowStep.SETUP, StepState.DONE, "已挂到 SPU 与颜色")
 
 
 def _evaluate_plan(facts: PlanFacts, *, upstream_ready: bool) -> StepResult:
@@ -783,27 +817,24 @@ def _evaluate_plan(facts: PlanFacts, *, upstream_ready: bool) -> StepResult:
     不靠调用方记得先做哪个。
     """
     if not upstream_ready:
-        return StepResult(
-            FlowStep.PLAN,
-            StepState.BLOCKED,
-            (
-                Issue(
-                    level=IssueLevel.BLOCKING,
-                    code="PLAN_UPSTREAM_NOT_READY",
-                    message="属性还没确认,现在选模特会选错候选集",
-                    target_step=FlowStep.ATTRIBUTE,
-                    hint="先把受众与结构属性确认掉",
-                ),
-            ),
-        )
+        # **等上游不产出 issue**,与 `_evaluate_attribute` / `_evaluate_image_set`
+        # / `_evaluate_copy` 三处同向(`StepState` 的文档明写:除素材步以外
+        # BLOCKED 一律指上游未就绪,且不携带任何 issue)。
+        #
+        # 这里原来带着一条 `PLAN_UPSTREAM_NOT_READY`,而它从来没有被任何人
+        # 看见 —— 它被塞进了 `summary`(见 `StepResult.__post_init__`)。
+        # 修位置参数时顺带把它按本层的规矩收掉:等上游不是待办,
+        # 算进阻断数会让一件刚建档的商品显示"阻断 2",而运营能做的只有一件事。
+        return StepResult(FlowStep.PLAN, StepState.BLOCKED, "等属性确认")
 
     if facts.has_active_plan is None:
-        return StepResult(FlowStep.PLAN, StepState.TODO, ())
+        return StepResult(FlowStep.PLAN, StepState.TODO, "方案未查")
 
     if not facts.has_active_plan:
         return StepResult(
             FlowStep.PLAN,
             StepState.TODO,
+            "未选方案",
             (
                 Issue(
                     level=IssueLevel.BLOCKING,
@@ -820,6 +851,7 @@ def _evaluate_plan(facts: PlanFacts, *, upstream_ready: bool) -> StepResult:
         return StepResult(
             FlowStep.PLAN,
             StepState.NEEDS_CONFIRM,
+            "方案缺模特",
             (
                 Issue(
                     level=IssueLevel.NEEDS_CONFIRM,
@@ -831,7 +863,11 @@ def _evaluate_plan(facts: PlanFacts, *, upstream_ready: bool) -> StepResult:
             ),
         )
 
-    return StepResult(FlowStep.PLAN, StepState.DONE, ())
+    return StepResult(
+        FlowStep.PLAN,
+        StepState.DONE,
+        "颜色级方案" if facts.plan_is_colour_level else "SPU 级方案",
+    )
 
 
 def _evaluate_material(facts: MaterialFacts) -> StepResult:
@@ -1163,6 +1199,19 @@ def _evaluate_attribute(
             if all(m in facts.suggested or m in stale_confirmed for m in missing)
             else StepState.IN_PROGRESS
         )
+    elif audience.invalid:
+        # **这一行以前不在阶梯里。** 上面那条 `AUDIENCE_INVALID` 是 BLOCKING,
+        # 而字段都确认完时这里会落到 `else` 判 DONE —— 一步同时"完成"和
+        # "带着阻断",正是 `_no_done_while_blocking` 要拦的形状。靠兜底网
+        # 拦住的代价是 `attribute_ready` 与 `_decide_next` 都拿不到这次降级
+        # (那是本次修复的 R-1)。判据写回产出它的这一层,兜底网退回兜底。
+        #
+        # 判 `IN_PROGRESS` 而不是 `NEEDS_CONFIRM`:`NEEDS_CONFIRM` 在
+        # `STATE_PROGRESS` 里记 0.6,而受众是个**错值**不是"待填",
+        # 必填字段集本身可能是照着错受众算的 —— 那批确认过的字段不该按
+        # 六成完成度计分。与 `_evaluate_image_set` 的 `violation_codes`
+        # 同一档:东西在,但还不能用。
+        state = StepState.IN_PROGRESS
     else:
         state = StepState.DONE
 
@@ -1224,6 +1273,25 @@ def _evaluate_image_set(
         state = StepState.BLOCKED
     elif not facts.exists:
         state = StepState.TODO
+    elif facts.violation_codes:
+        # **F-1 的根因就在这一行的缺席。**
+        #
+        # 上一版是 `elif facts.status == "APPROVED": state = DONE`,不看
+        # `violation_codes`。于是:一版已批准的图片集,之后新增一个 ACTIVE
+        # 颜色 -> `MISSING_IMAGE_FOR_VARIANT` 进 issues,而这一步照样显示
+        # DONE。同一个响应里 `colors.worst_by_step.IMAGE_SET` 是 BLOCKED ——
+        # 两句话都出自本系统,运营会先信那个绿勾,然后在导出时被门禁拦住。
+        #
+        # 判 `IN_PROGRESS` 而不是 `BLOCKED`,与 `_evaluate_copy` 的
+        # `blocking_violations` 和 `_evaluate_draft` 的 `error_count` 同一档:
+        # 本层的 `BLOCKED`(素材步除外)专指"上游未就绪、不携带 issue",
+        # 用它表示"这一版有硬失败"会破坏 `StepState` 文档写死的那条口径,
+        # 而 `wizard.step_is_open` 正是按那条口径决定这一步能不能进 ——
+        # 判 BLOCKED 会让运营连进去修都进不去。
+        #
+        # 上面那条 issue 的 hint 一直写着"图片集的问题一律阻断批准"。
+        # 意图从来是明确的,只有状态没跟上。
+        state = StepState.IN_PROGRESS
     elif facts.status == "APPROVED":
         state = StepState.DONE
     else:
@@ -1292,10 +1360,18 @@ def _evaluate_copy(facts: CopyFacts, *, upstream_ready: bool) -> StepResult:
         state = StepState.TODO
     elif facts.stale:
         state = StepState.STALE
+    elif facts.blocking_violations:
+        # **这一支以前排在 `APPROVED` 之后**,于是"已批准的文案后来被扫出
+        # 硬失败"判 DONE —— 与 F-1 在图片集上的那个缺陷**同一个形状**
+        # (`elif status == "APPROVED"` 不看 violation),而 F-1 只修了图片集
+        # 那一边。规则包更新、`revalidate` 重扫都会造出这一档:文案没动,
+        # 判据变严了。
+        #
+        # 排在 `stale` 之后:两者都成立时该说的是"属性变了要重新生成",
+        # 修一版马上要作废的文案是白干。
+        state = StepState.IN_PROGRESS
     elif facts.status == "APPROVED":
         state = StepState.DONE
-    elif facts.blocking_violations:
-        state = StepState.IN_PROGRESS
     else:
         state = StepState.IN_PROGRESS
 
@@ -1419,6 +1495,29 @@ def _decide_next(flow: ProductFlow, steps: Mapping[FlowStep, StepResult]) -> Nex
             code=code, label=ACTION_LABELS[code], step=ACTION_STEP[code], reason=reason
         )
 
+    def why(step: StepResult) -> str:
+        """这一步为什么没完。**取它自己产出的第一条 issue 文案,不重拼。**
+
+        与素材步那条 `missing` 同一个理由:重拼出来的话,判定说一句、
+        按钮理由说另一句,而两句都出自本系统。
+        """
+        return next((i.message for i in step.issues), step.summary or step.state.value)
+
+    # ---- 第一步:建档(§14.1 / AC-14 的七步之首) ----
+    #
+    # 这一段以前**不存在** —— `_decide_next` 的 docstring 写着「按 `STEP_ORDER`
+    # 走,第一个没做完的步骤决定动作」,而实现是从 `MATERIAL` 开始的。于是
+    # 一行没挂 SPU/颜色的 SKU 会得到 `current_step=SETUP`(那一份按 STEP_ORDER
+    # 真的从头走)和 `next_action=EXPORT` —— 同一个响应里两个下一步,
+    # 而 AC-15 的原话是「唯一下一步」。
+    #
+    # 判 `COMPLETE_SETUP` 不会误伤存量:归属齐了就是 DONE,而生产路径上
+    # `has_spu_ref` / `has_colour_ref` 由 `service._setup_facts` 直接读列,
+    # 不会是 `None`(那一档是给"没查过"留的防御分支)。
+    setup = steps[FlowStep.SETUP]
+    if setup.state is not StepState.DONE:
+        return action(NextActionCode.COMPLETE_SETUP, why(setup))
+
     material = steps[FlowStep.MATERIAL]
     if material.state is StepState.BLOCKED:
         # ---- 先看有没有「确认一下就能解开」的图 ----
@@ -1505,6 +1604,19 @@ def _decide_next(flow: ProductFlow, steps: Mapping[FlowStep, StepResult]) -> Nex
             )
         return action(NextActionCode.CONFIRM_ATTRIBUTES, "属性尚未全部确认")
 
+    # ---- 第四步:生成方案 ----
+    #
+    # 同上,这一段以前也不存在,而它比建档那一条更贵:`PLAN_MISSING` 是
+    # **BLOCKING**,于是一件没配方案的商品会显示「阻断 1」、`current_step=PLAN`,
+    # 而按钮说「编排图片集」。运营照着按钮走,排出来的图没有模特与参数依据。
+    #
+    # 位置在属性之后、图片集之前,与 `STEP_ORDER` 一致 —— 不是新口径:
+    # `_evaluate_plan` 的 upstream 本来就是属性(§8.2:受众确认之后
+    # 模特候选集才是对的)。
+    plan = steps[FlowStep.PLAN]
+    if plan.state is not StepState.DONE:
+        return action(NextActionCode.CHOOSE_PLAN, why(plan))
+
     image_set = steps[FlowStep.IMAGE_SET]
     if image_set.state is not StepState.DONE:
         if not flow.image_set.exists:
@@ -1571,28 +1683,92 @@ def _decide_next(flow: ProductFlow, steps: Mapping[FlowStep, StepResult]) -> Nex
 # ---------------------------------------------------------------- 入口
 
 
-def evaluate(flow: ProductFlow) -> FlowResult:
-    """判定一件商品。**列表页与详情页都调这一个函数。**"""
-    setup = _evaluate_setup(flow.setup)
+def _no_done_while_blocking(step: StepResult) -> StepResult:
+    """结构不变量:**带着阻断问题的一步不许显示 DONE。**
 
-    material = _evaluate_material(flow.material)
+    ## 为什么要有这一层,而不是只修出问题的那一个分支
+
+    F-1 是这条不变量的第一次破例(图片集 APPROVED 时不看 `violation_codes`),
+    而它活了两批没被任何测试看见。逐个分支去修的问题是:下一个人写第八步时,
+    同一行会再手滑一次,而**判定层自己的穷举照样全绿** —— 那次穷举验的是
+    "给定这组 facts,状态对不对",不是"状态和它自己产出的 issue 一致不一致"。
+
+    放在这里,新增步骤天生就受它管。
+
+    ## 为什么降到 `IN_PROGRESS` 而不是 `BLOCKED`
+
+    `StepState` 的文档写死:除素材步外,`BLOCKED` 一律指**上游未就绪**且
+    不携带任何 issue。而 `wizard.step_is_open` 正是按这条决定"这一步能不能进" ——
+    判 BLOCKED 会让运营连进去修都进不去,而这一步恰恰有活要干。
+
+    `IN_PROGRESS` 与 `_evaluate_copy` 的 `blocking_violations`、
+    `_evaluate_draft` 的 `error_count` 同一档:东西在,但还不能用。
+
+    ## 它与颜色维的关系(F-1 的另一半)
+
+    AC-15 要求"商品级与颜色级冲突时有明确、唯一的合并规则"。这条不变量
+    就是那个规则的一半,而且它落在**三处共用的那一份判定**上 ——
+    列表页、详情页、向导都读 `flow.evaluate()` 的结果,所以修在这里
+    三处同时对。合并规则的另一半(哪些步骤不下压)写在
+    `color_flow` 的模块文档里。
+    """
+    if step.state is not StepState.DONE:
+        return step
+    if not any(i.level is IssueLevel.BLOCKING for i in step.issues):
+        return step
+    return replace(step, state=StepState.IN_PROGRESS)
+
+
+def evaluate(flow: ProductFlow) -> FlowResult:
+    """判定一件商品。**列表页与详情页都调这一个函数。**
+
+    ## 为什么每一步算完**当场**过一次 `_no_done_while_blocking`
+
+    上一版是在最后统一过一遍(`ordered = tuple(_no_done_while_blocking(...))`),
+    而 `attribute_ready` / `image_set_ready` / `copy_ready` 取的是**降级前**
+    那一份,`_decide_next` 收到的也是降级前的 `by_step`。于是降级只改显示,
+    不改下游判定 —— 出参里会出现这种组合:
+
+        ATTRIBUTE=IN_PROGRESS(带 AUDIENCE_INVALID)
+        IMAGE_SET=DONE  COPY=DONE            上游没就绪却已完成
+        current_step=ATTRIBUTE  next_action=EXPORT   同一份结果里两个下一步
+
+    三处后果都不是显示问题:`wizard.step_is_open` 只把 `BLOCKED` 当关,
+    于是那些本该关着的步骤全开,AC-05 那道闸(`api/action_gate`)读的正是
+    这份判定,`EXPORT` 会被放行;前端 `detectFlowAnomaly` 则把这种组合
+    判成 P0,列表页与详情页的 CTA 一起消失,商品点不动。
+
+    放在这里之后,降级会顺着 `*_ready` 往下传:上游被降级 = 下游 `BLOCKED`,
+    与"上游本来就没做完"走同一条路。新增第八步天生受它管。
+    """
+    setup = _no_done_while_blocking(_evaluate_setup(flow.setup))
+
+    material = _no_done_while_blocking(_evaluate_material(flow.material))
     material_ready = material.state in (StepState.DONE, StepState.NEEDS_CONFIRM)
 
-    attribute = _evaluate_attribute(
-        flow.attribute, material_ready=material_ready, audience=flow.audience
+    attribute = _no_done_while_blocking(
+        _evaluate_attribute(
+            flow.attribute, material_ready=material_ready, audience=flow.audience
+        )
     )
     attribute_ready = attribute.state is StepState.DONE
 
-    plan = _evaluate_plan(flow.plan, upstream_ready=attribute_ready)
+    plan = _no_done_while_blocking(
+        _evaluate_plan(flow.plan, upstream_ready=attribute_ready)
+    )
 
-    image_set = _evaluate_image_set(flow.image_set, upstream_ready=attribute_ready)
+    image_set = _no_done_while_blocking(
+        _evaluate_image_set(flow.image_set, upstream_ready=attribute_ready)
+    )
     image_set_ready = image_set.state is StepState.DONE
 
-    copy_step = _evaluate_copy(flow.copy, upstream_ready=attribute_ready)
+    copy_step = _no_done_while_blocking(
+        _evaluate_copy(flow.copy, upstream_ready=attribute_ready)
+    )
     copy_ready = copy_step.state is StepState.DONE
 
-    draft = _evaluate_draft(
-        flow.draft, upstream_ready=image_set_ready and copy_ready
+    draft = _no_done_while_blocking(
+        _evaluate_draft(flow.draft, upstream_ready=image_set_ready and copy_ready)
     )
 
     by_step = {

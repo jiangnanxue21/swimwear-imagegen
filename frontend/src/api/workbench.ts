@@ -296,6 +296,9 @@ export interface ProductFlow {
 export interface WorkbenchProduct {
   id: string
   spu: string
+  /** §4.4 的归属外键。`null` = 这一行还没挂到 SPU 上(向导的方案步据此关着)。
+   *  **不要用 `spu` 那个字符串码去反查** —— 它会因改名而断开(§3.39) */
+  spu_id: string | null
   sku: string
   name: string
   /** §13.2:受众常驻显示。`null` = 待确认,不是 UNISEX */
@@ -602,11 +605,109 @@ export interface ColorRollup {
   colors: ColorFlowRow[]
 }
 
+// ==========================================================
+// 一体化向导(阶段 6 / AC-01 / AC-05 / AC-15 / AC-16 / AC-17)
+// ==========================================================
+
+/**
+ * 向导轨道上的一格。
+ *
+ * `is_open` 与 `gate_reason` **都由后端给**(硬规则 4)。前端不许自己按
+ * `state !== 'BLOCKED'` 推:素材步的 BLOCKED 是「这一步有活要干」,
+ * 别的步的 BLOCKED 是「还没轮到」—— 自己推的那一版会让一件刚建档的商品
+ * 七步全灰,而运营要做的第一件事恰恰在那个灰格子里。
+ */
+export interface WizardStep {
+  step: FlowStep
+  label: string
+  intro: string
+  state: StepState
+  is_open: boolean
+  /** 进不去的原因。`is_open` 为真时是空串 */
+  gate_reason: string
+  is_current: boolean
+  actions: { code: NextActionCode; label: string }[]
+  /** 这一步上还没完成的在售颜色码 */
+  pending_colors: string[]
+  /** 这一步有没有颜色维。**空 `pending_colors` 与"没有颜色维"是两回事** */
+  has_color_axis: boolean
+}
+
+/** 费用预估的一行。`cost_micros === null` 是**未配价**,不是免费。 */
+export interface CostLine {
+  operation: string
+  label: string
+  provider: string
+  units: number
+  basis: string
+  unit_price_micros: number | null
+  currency: string | null
+  cost_micros: number | null
+  cost_display: string | null
+}
+
+export interface CostEstimate {
+  is_estimate: true
+  /** 算全了没有。false 时界面不许只显示一个总数 */
+  is_complete: boolean
+  totals: { currency: string; cost_micros: number; cost_display: string }[]
+  unpriced_operations: { operation: string; label: string }[]
+  unknown: { operation: string; label: string; reason: string; refs: string[] }[]
+  notes: string[]
+  lines: CostLine[]
+  disclaimer: string
+}
+
+export interface WizardView {
+  current_step: FlowStep
+  /** 当前这一步"先补哪个颜色"。null = 这一步没有颜色维待办 */
+  focus_color: string | null
+  allowed_actions: NextActionCode[]
+  blocking: { code: string; message: string; target_step: FlowStep }[]
+  steps: WizardStep[]
+  /** `null` 的含义是**没算**(没有颜色维),不是"不要钱" */
+  cost: CostEstimate | null
+}
+
+/** 变更源(AC-17 的"我要改什么")。取值由后端下发,前端不维护第二份 */
+export interface ChangeSourceOption {
+  source: string
+  label: string
+  trigger: string
+  affects: string[]
+}
+
+export interface ImpactRow {
+  target: string
+  target_label: string
+  /** 效应的中文直接来自后端(`stale_matrix.Effect` 的成员值就是中文) */
+  effect: string
+  affected: boolean
+  mechanism: string
+  note: string
+  action: NextActionCode | null
+  action_label: string | null
+}
+
+export interface ImpactPreview {
+  source: string
+  source_label: string
+  trigger: string
+  rows: ImpactRow[]
+  /** 具体对象。`null` = 今天还没有这个对象,**不是"不受影响"** */
+  objects: {
+    image_set: { id: string; version: number; status: string } | null
+    copy: { id: string; version: number; status: string } | null
+    draft: { id: string; status: string } | null
+  }
+}
+
 export interface ProductFlowDetail {
   product: WorkbenchProduct
   thumbnail_url: string | null
   flow: ProductFlow
   colors: ColorRollup | null
+  wizard: WizardView
   image_set: { id: string; version: number; status: string } | null
   copy: ListingCopy | null
   draft: ListingDraft | null
@@ -701,10 +802,28 @@ export function detectFlowAnomaly(flow: ProductFlow): FlowAnomaly | null {
     }
   }
 
+  // 「这一步显示完成,而它自己带着一条阻断问题」——
+  // 后端有同名的结构不变量(`flow._no_done_while_blocking`),这里是它的
+  // 前端对应物。**两处都要有**:后端那条保证出参不会出现这种组合,
+  // 这一条保证万一出现了,界面说"状态异常"而不是照着那个绿勾往下走。
+  //
+  // 它是审阅 F-1 那条缺陷的形状:已批准的图片集少了一个颜色的配图时,
+  // 上一版会同时给出「图片集 ✅」和一条 MISSING_IMAGE_FOR_VARIANT 阻断。
+  for (const s of flow.steps) {
+    if (s.state !== 'DONE') continue
+    const blocking = s.issues.filter((i) => i.level === 'BLOCKING')
+    if (blocking.length) {
+      return {
+        reason: `${FLOW_STEP_LABEL[s.step]}显示完成,却带着 ${blocking.length} 条阻断`,
+        detail: `${blocking.map((i) => i.code).join('、')};完成与阻断不能同时成立`,
+      }
+    }
+  }
+
   return null
 }
 
-/** 五个子状态的扁平映射。列表页一行五列直接用它。 */
+/** 七步子状态的扁平映射。列表页一行七列直接用它(6-2 增维前是五列)。 */
 export function stepStates(flow: ProductFlow): Record<string, StepState> {
   const out: Record<string, StepState> = {}
   for (const s of flow.steps) out[s.step] = s.state
@@ -797,6 +916,26 @@ export const workbenchApi = {
         payload,
       )
     ).data.copy,
+
+  /**
+   * 变更源清单(AC-17)。**前端不硬编码一份** —— 少一项的表现是运营改
+   * 那一样东西之前看不到提示,而 AC-17 要的正是"修改之前"。
+   */
+  changeSources: async () =>
+    (
+      await apiClient.get<{ sources: ChangeSourceOption[] }>(
+        '/workbench/change-sources',
+      )
+    ).data.sources,
+
+  /** 这次修改会让哪些对象失效(AC-17)。只读,看一眼不改任何状态 */
+  changeImpact: async (productId: string, source: string) =>
+    (
+      await apiClient.get<ImpactPreview>(
+        `/workbench/products/${productId}/impact`,
+        { params: { source } },
+      )
+    ).data,
 
   /** 退回原因清单。`target` 决定给哪一组 —— 用「葡语不自然」退图片集是点错了行 */
   rejectReasons: async (target: 'image_set' | 'copy') =>

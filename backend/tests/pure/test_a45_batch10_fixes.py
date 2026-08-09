@@ -22,6 +22,7 @@ from app.workbench.flow import (
     MaterialFacts,
     NextActionCode,
     ProductFlow,
+    SetupFacts,
     evaluate,
     matches_filters,
 )
@@ -60,6 +61,12 @@ def _flow(**kw) -> ProductFlow:
         product_id="p1",
         sku="SW-1",
         spu="SW",
+        # 建档默认已完成。本夹具写于七步增维(batch27)之前,那时 `SETUP`
+        # 还不是一步;`SetupFacts()` 空视图判 NEEDS_CONFIRM,而建档排在
+        # `STEP_ORDER` 最前 —— 于是这一批本该验受众路径的用例会全部
+        # 答"去补全建档"。与 `test_workbench_flow._flow` 同一个处理,
+        # 建档自己的路径由 `test_a45_batch27_seven_steps.py` 穷举。
+        setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
         material=MaterialFacts(
             total=1,
             usable=1,

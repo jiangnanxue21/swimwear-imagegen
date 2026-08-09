@@ -47,7 +47,9 @@ from app.workbench.flow import (
     IssueLevel,
     MaterialFacts,
     NextActionCode,
+    PlanFacts,
     ProductFlow,
+    SetupFacts,
     StepState,
 )
 from tests.pure._helpers import BACKEND_ROOT  # noqa: F401
@@ -103,6 +105,11 @@ def _flow(**kwargs) -> ProductFlow:
         sku="SW-001-BLK-S",
         spu="SW-001",
         audience=AudienceFacts(audience="WOMEN"),
+        # 见 `test_a45_batch14_10` 里同一处的理由:docstring 说"除属性外
+        # 处处就绪",而建档与方案是七步增维(batch27)之后才有的两步,
+        # 空视图会抢先成为唯一下一步。
+        setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
+        plan=PlanFacts(has_active_plan=True, has_model=True),
         material=MaterialFacts(
             total=1,
             usable=1,

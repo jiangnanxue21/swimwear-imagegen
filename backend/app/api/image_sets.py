@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.listings import image_set_service
 from app.schemas.image_set import (
@@ -73,6 +74,11 @@ def create_set(
     request: Request,
     session: Session = Depends(db_session),
 ) -> ImageSetDetailOut:
+    # AC-05(F-2):编排图片集是前进动作,前置是属性确认。图片集是 SPU 级对象,
+    # 所以按「这个 SPU 下任一行 SKU 可做」判 —— 合并规则的理由写在 action_gate 上
+    action_gate.ensure_allowed_for_spu(
+        session, action_gate.NextActionCode.BUILD_IMAGE_SET, spu=payload.spu
+    )
     row = image_set_service.create_set(
         session,
         spu=payload.spu,
@@ -104,6 +110,11 @@ def derive(
     原地改的话,「平台驳回的是哪一版图」就没法回答 —— 而驳回回流
     第一件要做的事正是定位到具体那一版的具体那一项。
     """
+    action_gate.ensure_allowed_for_spu(
+        session,
+        action_gate.NextActionCode.BUILD_IMAGE_SET,
+        spu=image_set_service.get_set(session, image_set_id).spu,
+    )
     row = image_set_service.derive(
         session,
         image_set_id,
@@ -118,6 +129,14 @@ def derive(
 def approve(
     image_set_id: UUID, request: Request, session: Session = Depends(db_session)
 ) -> ImageSetDetailOut:
+    # AC-05(F-2):**这一条是上一版最大的那个洞** —— 属性一条都没确认时
+    # 直接 `POST /image-sets/{id}/approve`,今天不会被任何东西拒绝,
+    # 而向导上那个按钮是灰的。AC-05 的原话就是这个差
+    action_gate.ensure_allowed_for_spu(
+        session,
+        action_gate.NextActionCode.APPROVE_IMAGE_SET,
+        spu=image_set_service.get_set(session, image_set_id).spu,
+    )
     row = image_set_service.approve(
         session, image_set_id, actor=current_actor(request)
     )

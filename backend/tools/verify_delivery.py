@@ -746,6 +746,34 @@ WIRED_MODULES: dict[str, tuple[str, ...]] = {
         "ready_problems",
     ),
     "app/workbench/upstream_collect.py": ("collect",),
+    # 阶段 6。**这四个模块是本条门禁最典型的适用对象** —— 它们全都是
+    # "判定层先落地、接线排在下一批"的形状,而 6-1 交付 `color_flow` 时
+    # 零调用点这件事整整挂了三批(6-1 -> 6-3)。那次有人明说了,所以不是账;
+    # 没说的那些才是。登记之后这件事由门禁记着,不靠交付说明记着。
+    #
+    # 各自不接线的表现:
+    #
+    #   color_flow      向导上的颜色维退回一个空表,而 §6.7 的范围口径
+    #                   还在别处生效 —— 界面说"没有颜色拦着",门禁说不能导出
+    #   color_rollup    同上,只是断在取数这一跳
+    #   wizard          AC-05 退回成"前端置灰":界面上按钮是灰的,
+    #                   而手搓一个 POST 照样能越过前置把草稿建出来
+    #   cost_rollup     费用预估恒为空,向导上那一格永远显示"未预估",
+    #                   而它和"这次不花钱"在界面上长得一样
+    #   cost_estimate   同上,断在判定这一跳
+    #   impact          AC-17 的"修改之前"没有任何提示,而 `stale_matrix`
+    #                   照常把草稿打成 STALE —— 运营事后才知道
+    #
+    # 只登记有**跨模块**调用点的那些(这条门禁刻意排除模块内互调):
+    # `wizard.build` / `serialize` 的调用点在 `api/workbench.py`,但两个名字
+    # 太常见,字面重名会让门禁假绿 —— 它们由
+    # `tests/pure/test_a45_batch29_wizard.py` 的接线三跳单独钉着。
+    "app/workbench/color_flow.py": ("evaluate_colors", "colors_needing"),
+    "app/workbench/color_rollup.py": ("views_and_rollup", "serialize_rollup"),
+    "app/workbench/wizard.py": ("check_action",),
+    "app/workbench/cost_rollup.py": ("build_estimate",),
+    "app/workflows/cost_estimate.py": ("estimate",),
+    "app/workbench/impact.py": ("preview", "describe_sources"),
 }
 
 

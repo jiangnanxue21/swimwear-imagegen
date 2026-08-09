@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -392,6 +392,28 @@ def _confirmed_version_ids(
     )
 
 
+def pick_current_copy(rows: Iterable[ListingCopy]) -> ListingCopy | None:
+    """一组同 (scope, 颜色) 的文案行里,**当前展示的是哪一版**。
+
+    规则:排除 `ARCHIVED`,取版本号最大的一版。
+
+    ## 为什么抽成函数
+
+    颜色维聚合(`color_rollup`)要对**每个颜色**回答同一个问题,而它是
+    一次查完整个 SPU 再在内存里分组的(一条 SQL,见那边的注释)。
+    在那里就地再写一次 `max(...)` + 状态过滤,就是同一条规则的第二份实现 ——
+    而两份分叉的表现是向导说"这个颜色还没有文案",详情页显示着一版文案,
+    两边都不报错。
+
+    `is_current` 之类的列不存在,所以"当前"这件事只能由这条规则回答;
+    它必须只有一个落点。
+    """
+    live = [r for r in rows if r.status != CopyStatus.ARCHIVED.value]
+    if not live:
+        return None
+    return max(live, key=lambda r: r.version)
+
+
 def _current_copy(
     session: Session, spu: str, color_variant_id: str
 ) -> ListingCopy | None:
@@ -400,22 +422,20 @@ def _current_copy(
     颜色是等值过滤,不做回落(迁移 0051):存量行的哨兵 `""` 永远不命中,
     于是每个颜色在升级后的第一个答案是「还没有文案」—— 宁可多生成一次,
     也不把 SPU 槽时代那篇可能写着别的颜色的旧文案顶上来。
+
+    「哪一版是当前版」的规则在 `pick_current_copy`,不在这里 ——
+    颜色维聚合要对每个颜色问同一个问题,而它走的是另一条取数路径。
     """
-    rows = list(
-        session.scalars(
-            select(ListingCopy).where(
-                ListingCopy.spu == spu,
-                ListingCopy.channel == generic.CHANNEL,
-                ListingCopy.site == generic.SITE,
-                ListingCopy.locale == generic.LOCALE,
-                ListingCopy.color_variant_id == color_variant_id,
-                ListingCopy.status != CopyStatus.ARCHIVED.value,
-            )
+    rows = session.scalars(
+        select(ListingCopy).where(
+            ListingCopy.spu == spu,
+            ListingCopy.channel == generic.CHANNEL,
+            ListingCopy.site == generic.SITE,
+            ListingCopy.locale == generic.LOCALE,
+            ListingCopy.color_variant_id == color_variant_id,
         )
     )
-    if not rows:
-        return None
-    return max(rows, key=lambda r: r.version)
+    return pick_current_copy(rows)
 
 
 def _copy_is_stale(
