@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""A45-batch23(阶段 5 批次 5-4)变异验证:颜色结构化字段的确认流与投影。
+"""A45-batch24 变异验证:阶段 5 三处接缝的守卫会不会咬。
 
-用法:python3 tools/mutate_batch23.py
+用法:python3 tools/mutate_batch24.py
 
 ## 这一批在防什么
 
-`ColorVariant.display_name` 恒空躲了几批,而它躲过去的方式是**一个不存在的
-字段名**(`standard_color_name`)。接上之后的失效方式分两类:
+三条缺口的共同形状是**接了一半**:每一条都有真库用例覆盖着接上的那一半,
+于是套件全绿而另一半在生产里持续出错(证据链见 `docs/DECISIONS.md` §3.54)。
+所以这里的变异不是"把功能改坏",而是**把它改回缺口当时的样子** ——
+每一条都对应一个真实发生过、且三位外部评审各自独立复现过的形态。
 
-    不写   触发字段写错、投影被摘掉(调用点自 batch24 起在 `set_value`
-           写入边界里,人工与自动确认共用)、赋值那一行被删
-           —— 表现是那一列重新变回恒空,而后端 5 处读、前端 7 处显示照旧
-    乱写   空值擦掉已有名字、owner_id 算错把同 SPU 每个颜色写成同一个名字、
-           同值也写导致 updated_at 每次都动
-           —— 第二种最贵:界面上"都有名字了",而每个颜色的名字都是错的
+    F-1    投影搬回 `confirm()`(只有人工确认那条路投影)
+           状态门拓宽(SUGGESTED 的猜测也写进正式颜色名)
+    F-6    存储回到 SPU 一个槽(颜色轴上来回点每次都付费)
+           版本序列不按颜色分(两个颜色共用一条递增序列)
+           批量去重键回到 `spu`(三颜色 SPU 只出一稿)
+    AC-19  行级图片自己按 sort_order 挑(预览与导出分叉)
+           `image_map` 给个默认值(漏传的调用点静默走老路)
+           `build_draft` 里映射排在映射字段之后(拿不到映射)
 
 ## 两个运行器
 
-    pure  投影口径、触发口径、写入点唯一性、台账已还
-    db    那一列真的有值了,而且只有该写的那一行被写
+    pure  接线形状、粒度一致性、签名不给后门
+    db    行为:自动确认真的写了显示名、来回点只花两次钱、两边取到同一张图
 
 ## 锚点基准
 
-路径基准 `backend/`,表名 `RUNNER_MUTATIONS`(6 列),与 batch20/21/22 同形状。
+路径基准 `backend/`,表名 `RUNNER_MUTATIONS`(6 列),与 batch20~23 同形状。
 """
 from __future__ import annotations
 
@@ -39,104 +43,122 @@ from uuid import uuid4
 BACKEND = Path(__file__).resolve().parent.parent
 PROJECT = BACKEND.parent
 
-LAYER = "app/attributes/colour_projection.py"
-SERVICE = "app/attributes/service.py"
-LEDGER = "tools/audit_column_writers.py"
+ATTR = "app/attributes/service.py"
+WB = "app/workbench/service.py"
+COPY = "app/listings/copy_service.py"
+CHANNEL = "app/channels/generic/__init__.py"
+BATCH = "app/workbench/batch.py"
 
-PURE_SUITE = "test_a45_batch23_colour_projection.py"
-DB_SUITE = "tests/test_a45_batch23_colour_projection_db.py"
+PURE_SUITE = "test_a45_batch24_stage5_seams.py"
+DB_SUITE = "tests/test_a45_batch24_stage5_seams_db.py"
 
 #: (编号, 一句话, 相对 backend/ 的路径, 原文, 替换成, 运行器)
 RUNNER_MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
-    # ------------------------------------------------ A 组:不写(这一列重新恒空)
+    # ---- F-1:投影的触发边界 ----
     (
         "A1",
-        "投影调用被摘掉(display_name 重新恒空,而 5 处读、7 处显示照旧)",
-        SERVICE,
+        "投影搬回 confirm(自动确认出来的颜色又恒空)",
+        ATTR,
         "        _project_colour_name(session, field_name=field_name, owner_id=owner_id, value=value)",
         "        pass",
         "db",
     ),
     (
         "A2",
-        "触发字段写回那个不存在的名字(投影永远不触发)",
-        LAYER,
-        'SOURCE_FIELD = "primary_color"',
-        'SOURCE_FIELD = "standard_color_name"',
+        "状态门被拓宽(SUGGESTED 的模型猜测也写进正式颜色名)",
+        ATTR,
+        "    if status is AttributeStatus.CONFIRMED:",
+        "    if status is not None:",
         "pure",
     ),
     (
         "A3",
-        "赋值那一行被删掉(算了但不写)",
-        SERVICE,
-        "        row.display_name = wanted\n        session.flush()",
-        "        pass",
-        "db",
+        "apply_evidence 不再经过写入边界(自动确认那条路自己写行)",
+        ATTR,
+        "def apply_evidence(",
+        "def apply_evidence_unused(",
+        "pure",
     ),
-    # ------------------------------------------------ B 组:乱写(名字错了而界面正常)
+    # ---- F-6:文案的颜色粒度 ----
     (
         "B1",
-        "空值写成空串(把界面上正在显示的颜色名静默擦掉)",
-        LAYER,
-        "    text = _text_of(value)\n    if not text:\n        return None\n    return text[:MAX_LENGTH]",
-        "    return str(_text_of(value))[:MAX_LENGTH]",
-        "pure",
+        "当前文案不按颜色查(颜色轴上来回点,每次都重新付费)",
+        WB,
+        "                ListingCopy.color_variant_id == color_variant_id,",
+        "",
+        "db",
     ),
     (
         "B2",
-        "状态门被拓宽(SUGGESTED 的模型猜测也被写进正式颜色名)",
-        SERVICE,
-        "    if status is AttributeStatus.CONFIRMED:",
-        "    if status is not None:",
-        "pure:test_a45_batch24_stage5_seams.py",
+        "版本序列不按颜色分槽(两个颜色共用一条递增序列)",
+        COPY,
+        "            ListingCopy.color_variant_id == color_variant_id,\n        )\n    ).scalar_one_or_none()",
+        "        )\n    ).scalar_one_or_none()",
+        "db",
     ),
-    # **这里原来有一条 B3,验不出来,已删。** 值得记一句,因为它是被这份
-    # 脚本证伪的一个说法:`needs_update` 的 `wanted is None` 分支
-    # **从唯一调用点到不了** —— `_project_colour_name` 在更前面已经早返回了。
-    # 于是任何只动其中一道的变异都是行为等价的,任何"两道一起动"的写法
-    # 也只是把等价换个位置。
-    #
-    # 空值这条动线真正承重的那一道是 `projected_name` 返回 None,
-    # 而 B1 正是它,验红。再补一条只会让"10 条全红"这个数字多一位而已。
+    (
+        "B3",
+        "幂等单元的颜色轴又恒为 None(留位置当成接线)",
+        WB,
+        "        fact_versions=_confirmed_version_ids(session, product, attr_values),\n        color_variant_id=variants.variant_id_for(product),",
+        "        fact_versions=_confirmed_version_ids(session, product, attr_values),\n        color_variant_id=None,",
+        "pure",
+    ),
     (
         "B4",
-        "包装形状认不出来(把 {'value': 'black'} 原样显示给运营)",
-        LAYER,
-        '    if isinstance(value, Mapping):\n        inner = value.get("value")\n        if isinstance(inner, str):\n            return inner.strip()',
-        "    if isinstance(value, Mapping):\n        return str(value)",
+        "批量去重回到 SPU 粒度(三颜色 SPU 只出一稿文案)",
+        BATCH,
+        'BatchAction.GENERATE_COPY: "spu_colour",',
+        'BatchAction.GENERATE_COPY: "spu",',
         "pure",
     ),
-    # ------------------------------------------------ C 组:边界与台账
+    (
+        "B5",
+        "按颜色查时回落到哨兵槽(把 0051 之前那版顶给某个颜色)",
+        WB,
+        "                ListingCopy.color_variant_id == color_variant_id,\n                ListingCopy.status != CopyStatus.ARCHIVED.value,",
+        "                ListingCopy.color_variant_id.in_((color_variant_id, \"\")),\n                ListingCopy.status != CopyStatus.ARCHIVED.value,",
+        "db",
+    ),
+    # ---- AC-19:预览与导出同源 ----
     (
         "C1",
-        "投影里抛错(一列显示副本让事实写入回滚,运营点确认收到 500)",
-        SERVICE,
-        "    row = session.get(ColorVariant, variant_pk)\n    if row is None:\n        return",
-        "    row = session.get(ColorVariant, variant_pk)\n    if row is None:\n        raise ValueError(owner_id)",
-        "pure",
+        "行级图片自己按 sort_order 挑(预览显示 A 图、Excel 用 B 图)",
+        CHANNEL,
+        "            images=_row_image_bucket(\n                draft, image_map, variant_id=sku.variant_id, sku=sku.sku\n            ),",
+        "            images=_header_image_bucket(draft),",
+        "db",
     ),
     (
         "C2",
-        "投影上限与校验层脱钩(界面上的颜色名与事实值不是同一个字符串)",
-        LAYER,
-        "MAX_LENGTH = 128",
-        "MAX_LENGTH = 64",
+        "image_map 给个默认值(漏传的调用点静默走老路)",
+        CHANNEL,
+        "    spec: ChannelFieldSpec,\n    *,\n    image_map: Mapping[str, Any],",
+        "    spec: ChannelFieldSpec,\n    *,\n    image_map: Mapping[str, Any] = {},",
         "pure",
     ),
     (
         "C3",
-        "台账留着已还的那一条(下一个人以为缺口还开着,重做一遍)",
-        LEDGER,
-        "    # `ColorVariant.display_name` **曾经在这里**(还款日:阶段 5)。",
-        '    "ColorVariant.display_name": "还款日:阶段 5",\n'
-        "    # `ColorVariant.display_name` **曾经在这里**(还款日:阶段 5)。",
+        "映射算在 map_fields 之后(它拿不到映射,只能自己挑)",
+        WB,
+        "    mapped = generic.map_fields(data, spec, image_map=color_sku_image_map)",
+        "    mapped = generic.map_fields(data, spec, image_map={})",
+        "db",
+    ),
+    (
+        "C4",
+        "预览重新推断(读当前上游而不是落库那一列)",
+        WB,
+        'preview["images"] = export_preview.image_preview(row.color_sku_image_map)',
+        'preview["images"] = export_preview.image_preview(row.color_sku_image_map or {})\n    _ = upstream_collect',
         "pure",
     ),
 ]
 
+
 @contextmanager
 def _temporary_directory():
-    path = Path(tempfile.gettempdir()) / f"batch21-{uuid4().hex}"
+    path = Path(tempfile.gettempdir()) / f"batch24-{uuid4().hex}"
     path.mkdir(parents=False)
     try:
         yield path

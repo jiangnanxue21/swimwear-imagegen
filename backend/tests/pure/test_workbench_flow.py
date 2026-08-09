@@ -26,7 +26,9 @@ from app.workbench.flow import (
     IssueLevel,
     MaterialFacts,
     NextActionCode,
+    PlanFacts,
     ProductFlow,
+    SetupFacts,
     StepState,
 )
 from tests.pure._helpers import BACKEND_ROOT  # noqa: F401  (装 sys.path)
@@ -44,6 +46,17 @@ def _flow(**kwargs) -> ProductFlow:
         # 受众未确认会抢先成为唯一下一步(§8.2:它排在待选模特之前),
         # 那条路径由 test_a45_batch10_fixes.py 专门穷举,不在这里顺带测。
         audience=AudienceFacts(audience="WOMEN"),
+        # 建档与方案默认**已完成**(阶段 6 七步增维,batch27)。理由与受众
+        # 那一条相同:这一层的用例问的是"素材缺一张时下一步是什么",
+        # 而建档未核对会抢先成为唯一下一步(它排在最前),
+        # 于是每一条用例都会答"去补全建档" —— 那不是它们要验的东西。
+        #
+        # **默认值只在测试这一侧给。** 生产侧的 `SetupFacts()` 空视图判
+        # NEEDS_CONFIRM,与受众的空视图同一个处理:存量数据的未知要人来
+        # 解决,而不是系统替他猜。两条各自专门的路径由
+        # `test_a45_batch27_seven_steps.py` 穷举。
+        setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
+        plan=PlanFacts(has_active_plan=True, plan_is_colour_level=True, has_model=True),
         # `usable_roles` 与 `gate_roles` **不是一回事**,两份都要填(§6.2):
         #   usable_roles  素材库里有哪些角色的图 —— 提醒类问题读它
         #   gate_roles    门禁认哪些角色 —— 要求那张图是本商品的证据、
@@ -411,8 +424,13 @@ def test_completion_is_monotonic_along_the_pipeline():
     ]
     values = [flow.evaluate(s).completion for s in stages]
     assert values == sorted(values), values
-    assert values[0] == 0
+    # 起点从 0 变成 5(batch27 的口径迁移):建档是第一步,而这批夹具的
+    # 归属是挂好的 —— 归属挂好本身就是一件**已经做完的事**,给 0 分等于
+    # 说它没做。这不是把分数调松:归属没挂好的商品(`SetupFacts()` 空视图)
+    # 仍然拿不到这 5 分,那条路径由 batch27 的守卫穷举。
+    assert values[0] == 5
     assert values[-1] == 100
+
 
 
 # ---------------------------------------------------------------- 筛选
@@ -447,7 +465,8 @@ def _five_products() -> list[tuple[str, object]]:
     ]
 
 
-def test_five_products_land_on_five_different_next_steps():
+def test_each_step_can_be_the_unique_next_step():
+
     """验收脚本第 1 步:五件商品要能一眼看出五种不同卡点。"""
     results = [flow.evaluate(f) for _, f in _five_products()]
     codes = [r.next_action.code for r in results]
@@ -534,11 +553,17 @@ def test_summary_counts_line_up_with_individual_results():
     assert counts["done"] == 0
 
 
-def test_step_states_covers_all_five_steps():
-    """列表页一行五列直接用它,少一个键就会渲染出一个空单元格。"""
+def test_step_states_covers_every_step():
+    """列表页一行一列直接用它,少一个键就会渲染出一个空单元格。
+
+    列数在 batch27 从五变成七(建档 / 方案两步)。这条断言写成
+    「与 `STEP_ORDER` 等长」而不是写死数字,是因为写死的那一版在
+    batch26 实测里正是**加了两步而不红**的那一类。
+    """
+
     states = flow.step_states(flow.evaluate(_flow()))
     assert set(states) == {s.value for s in flow.STEP_ORDER}
-    assert len(flow.STEP_ORDER) == 5
+    assert len(flow.STEP_ORDER) == 7
 
 
 def test_state_progress_matches_the_taskbook_scoring_table():
@@ -548,7 +573,7 @@ def test_state_progress_matches_the_taskbook_scoring_table():
     是一回事;给部分分,草稿过期的商品会显示 90%+ 并沉到列表底部,
     而它此刻恰恰导不出去。数值曾经漂移过(STALE=0.6),所以钉死。
     """
-    from app.workbench.flow import STATE_PROGRESS, STEP_WEIGHT, StepState
+    from app.workbench.flow import STATE_PROGRESS, STEP_WEIGHTS, StepState
 
     assert STATE_PROGRESS == {
         StepState.BLOCKED: 0.0,
@@ -558,9 +583,12 @@ def test_state_progress_matches_the_taskbook_scoring_table():
         StepState.STALE: 0.0,
         StepState.DONE: 1.0,
     }
-    assert STEP_WEIGHT == 20.0  # 五步等权
+    # 七步不等权(batch27 的口径迁移)。分配理由写在 `STEP_WEIGHTS` 上,
+    # 这里只钉两件事:每一步都有分,合计正好 100
+    assert set(STEP_WEIGHTS) == set(flow.STEP_ORDER)
     # 五步全 DONE 恰好 100,不多不少 —— 计分表怎么改都不许溢出
-    assert STEP_WEIGHT * STATE_PROGRESS[StepState.DONE] * 5 == 100.0
+    assert sum(STEP_WEIGHTS.values()) * STATE_PROGRESS[StepState.DONE] == 100.0
+
 
 
 # ---------------------------------------------------------------- 快审退回(A10)

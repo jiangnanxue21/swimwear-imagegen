@@ -21,7 +21,8 @@
 
     投影口径   None 与空串不是一回事(后者会擦掉界面上正在显示的颜色名)
     触发口径   只有 VARIANT 层的那一个字段触发,而且它真的在注册表里
-    接线       写入点在确认的**同一个事务**里,且只有一个
+    接线       调用点在事实写入边界 `set_value` 里(同一个事务、两条
+               确认路径共用一跳,batch24 挪的),列的写入点只有一个
 """
 from __future__ import annotations
 
@@ -44,7 +45,7 @@ LEDGER = BACKEND_ROOT / "tools" / "audit_column_writers.py"
 def test_a_blank_fact_does_not_wipe_the_displayed_name():
     """**本文件的第一条。** 空值判「不写」,不是「写空串」。
 
-    `str(value or "")` 一行就能"работать",而它在值为空时会**静默清空**
+    `str(value or "")` 一行就能"跑通",而它在值为空时会**静默清空**
     一个正在被七个前端位置显示的字段 —— 运营看到的是所有颜色名同时消失,
     而他刚才做的只是确认了一条别的属性。
     """
@@ -191,19 +192,33 @@ def _confirm_projection_fn() -> ast.FunctionDef:
     return _named_fn("_project_colour_name")
 
 
-def test_the_projection_runs_inside_the_confirm_transaction():
-    """写入点在 `confirm` 里,且**不自己提交**。
+def test_the_projection_runs_inside_the_fact_write_boundary():
+    """投影调用点在 `set_value`(事实的唯一写入边界)里,且**不自己提交**。
 
-    分成两步(先确认、稍后同步)的话,中间那个窗口里界面显示的是旧名字,
-    而没有任何东西说明为什么。
+    batch23 把它挂在 `confirm()` 上 —— 只覆盖人工确认。而 CONFIRMED 不只
+    由 confirm 产生:`apply_evidence` 走 `decide_status` 的自动确认档写出的
+    同样是 CONFIRMED,那条路当时不投影(§3.54 / F-1)。挂在写入边界上,
+    「所有产生 CONFIRMED 颜色事实的路径都触发投影」才是结构保证,
+    不再依赖每个调用方记得调一次。
+
+    同时钉住**只有这一处调用**:confirm / apply_evidence 各自再挂一份的话,
+    下一次挪动边界时会只剩其中一份被挪 —— 两条路又分叉回 batch23 之前。
     """
-    assert "_project_colour_name" in _code_of(_named_fn("confirm")), (
-        "`confirm` 没有调用投影 —— `display_name` 会继续恒为空"
+    set_value_body = _code_of(_named_fn("set_value"))
+    assert "_project_colour_name" in set_value_body, (
+        "`set_value` 没有调用投影 —— 自动确认出的颜色 `display_name` 会恒为空"
     )
+    assert "AttributeStatus.CONFIRMED" in set_value_body, (
+        "投影没有按 CONFIRMED 状态触发 —— SUGGESTED/CANDIDATE 也会写显示名"
+    )
+    for path_owner in ("confirm", "apply_evidence"):
+        assert "_project_colour_name" not in _code_of(_named_fn(path_owner)), (
+            f"`{path_owner}` 里又出现了一份投影调用 —— 调用点必须只在写入边界一处"
+        )
 
     body = _code_of(_confirm_projection_fn())
     assert "commit" not in body, (
-        "投影自己提交了 —— 它必须跟着 confirm 的事务走"
+        "投影自己提交了 —— 它必须跟着 set_value 所在的事务走"
     )
 
 

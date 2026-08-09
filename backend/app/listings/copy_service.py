@@ -80,13 +80,24 @@ def build_content_plan(
 
 
 def _next_version(
-    session: Session, *, spu: str, channel: str, site: str, locale: str
+    session: Session,
+    *,
+    spu: str,
+    channel: str,
+    site: str,
+    locale: str,
+    color_variant_id: str,
 ) -> int:
     """下一个版本号。**必须在拿到 advisory lock 之后调用。**
 
     上一版是"把这个 scope 的所有行查出来取 max + 1",没有任何锁。两个
     并发请求会算出同一个版本号,后提交的那个撞 `uq_listing_copies_version`,
     用户看到的是一个 500 —— 而他做的事情完全正当,只是同事恰好也点了生成。
+
+    版本序列按 (scope, 颜色) 分槽(迁移 0051):红色的第 3 版和蓝色的
+    第 3 版是两条互不相干的历史。不带颜色过滤的话两个颜色共用一条递增
+    序列 —— 数字仍然唯一,但「这个颜色改到第几版了」再也答不出来,
+    且蓝色第一次生成会把红色那一版「挤成历史」的旧病换个形状回来。
     """
     current = session.execute(
         select(func.max(ListingCopy.version)).where(
@@ -94,6 +105,7 @@ def _next_version(
             ListingCopy.channel == channel,
             ListingCopy.site == site,
             ListingCopy.locale == locale,
+            ListingCopy.color_variant_id == color_variant_id,
         )
     ).scalar_one_or_none()
     return (current or 0) + 1
@@ -124,6 +136,7 @@ def save_copy(
     repair_rounds: int = 0,
     synonyms: dict[str, str] | None = None,
     idempotency_key: str | None = None,
+    color_variant_id: str = "",
     actor: str = "system",
 ) -> ListingCopy:
     """落一版文案并**立刻校验**。
@@ -140,6 +153,11 @@ def save_copy(
     两者的分工是:列如实记录"这一版是为哪个单元生成的",
     判定层决定"哪些状态可以拿来复用"。合成一件事的写法(失败就不写键)
     会让"这个单元试过没有"查不出来。
+
+    `color_variant_id`(AC-11 第二句,迁移 0051):这一版属于哪个颜色,
+    取值是变体身份串(`variants.variant_id_for()` 的产出)。默认 `""`
+    只是迁移前形状的镜像,**生产入口一律显式传** —— batch24 的守卫钉着
+    `generate_copy` / `save_copy_manual` 两处都把它接到了商品的变体身份上。
     """
     violations = copy_rules.validate_copy(
         copy,
@@ -154,8 +172,12 @@ def save_copy(
     safe_copy = copy_rules.sanitize_copy(copy)
     safe_claims = copy_rules.sanitize_claims(claims)
 
-    # 锁 -> 算版本号 -> 插入,整段对同一个 (spu, channel, site, locale) 串行
-    locks.advisory_xact_lock(session, "listing_copy", plan.spu, channel, site, locale)
+    # 锁 -> 算版本号 -> 插入,整段对同一个 (spu, channel, site, locale, 颜色)
+    # 串行。颜色进锁键(迁移 0051):版本序列按颜色分槽之后,红蓝两个颜色
+    # 各自的插入互不相干,让它们互相排队只是白等
+    locks.advisory_xact_lock(
+        session, "listing_copy", plan.spu, channel, site, locale, color_variant_id
+    )
 
     row: ListingCopy | None = None
     last_error: IntegrityError | None = None
@@ -171,8 +193,14 @@ def save_copy(
                     channel=channel,
                     site=site,
                     locale=locale,
+                    color_variant_id=color_variant_id,
                     version=_next_version(
-                        session, spu=plan.spu, channel=channel, site=site, locale=locale
+                        session,
+                        spu=plan.spu,
+                        channel=channel,
+                        site=site,
+                        locale=locale,
+                        color_variant_id=color_variant_id,
                     ),
                     content_plan_id=plan.id,
                     title=safe_copy["title"],
@@ -231,6 +259,7 @@ def save_copy(
             "channel": channel,
             "site": site,
             "locale": locale,
+            "color_variant_id": color_variant_id,
             "version": row.version,
             "status": row.status,
             "model_name": model_name,
@@ -487,18 +516,32 @@ def reject_copy(
 
 
 def latest_approved(
-    session: Session, *, spu: str, channel: str, site: str, locale: str
+    session: Session,
+    *,
+    spu: str,
+    channel: str,
+    site: str,
+    locale: str,
+    color_variant_id: str,
 ) -> ListingCopy | None:
-    """发布时用哪一版。**只返回已批准的。**"""
+    """发布时用哪一版。**只返回已批准的、且属于这个颜色的。**
+
+    颜色过滤是等值,不做回落:存量行的哨兵 `""` 因此永远不命中 ——
+    「这个颜色还没有已批准文案」正是它该给的答案。把 SPU 槽时代的旧文案
+    (可能写着另一个颜色的名字)顶给这个颜色,才是要防的那件事
+    (0051 文件头的回填一节)。
+    """
     rows = session.scalars(
         select(ListingCopy).where(
             ListingCopy.spu == spu,
             ListingCopy.channel == channel,
             ListingCopy.site == site,
             ListingCopy.locale == locale,
+            ListingCopy.color_variant_id == color_variant_id,
             ListingCopy.status == CopyStatus.APPROVED.value,
         )
     )
+
     ordered = sorted(rows, key=lambda r: r.version, reverse=True)
     return ordered[0] if ordered else None
 

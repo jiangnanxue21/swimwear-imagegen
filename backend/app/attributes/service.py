@@ -979,6 +979,21 @@ def set_value(
     session.flush()
 
     _project_to_legacy_column(session, owner_id=owner_id, field_name=field_name, value=value)
+    if status is AttributeStatus.CONFIRMED:
+        # 颜色投影挂在**写入边界**上,不挂在某一条调用路径上(A45-batch24 / F-1)。
+        #
+        # 它原来只挂在 `confirm()` 里,而 CONFIRMED 不只由 confirm 产生:
+        # `apply_evidence` 走 `decide_status` 的自动确认档(置信度 ≥ 组阈值且
+        # 库里为空)写出来的同样是 CONFIRMED —— 那条路当时不投影,于是
+        # 校准之后第一次识别出的颜色,`display_name` 仍是空串,而前后端
+        # 十二处读写它的地方没有一处会报错。
+        #
+        # 挂在这里的含义是结构性的:本函数是 `product_attribute_values` 的
+        # 唯一写入口(上面那句自述由 batch24 的 AST 守卫钉着),所以
+        # 「所有产生 CONFIRMED 颜色事实的路径都触发投影」不再依赖每个
+        # 调用方记得调一次。字段与层的判断在 `_project_colour_name` 自己
+        # 身上(SOURCE_FIELD + owner 必须是颜色行的 UUID),这里只看状态。
+        _project_colour_name(session, field_name=field_name, owner_id=owner_id, value=value)
 
     audit.record(
         session,
@@ -1297,7 +1312,10 @@ def confirm(
             prints, owner_type=owner_type, owner_id=owner_id
         ),
     )
-    _project_colour_name(session, field_name=field_name, owner_id=owner_id, value=value)
+    # 颜色投影在 `set_value` 内部(写入边界)完成,这里不再调第二次。
+    # batch23 时它挂在这里,而自动确认那条路(`apply_evidence` →
+    # `decide_status` → CONFIRMED)不经过本函数 —— 缺口与修法见
+    # `set_value` 里那段注释与 §3.54。
     return row
 
 
@@ -1308,12 +1326,16 @@ def _project_colour_name(
 
     **这一列的唯一写入点。** 列注释从落列那天就这么写着,而写入点一直不存在:
     后端 5 处读、前端 7 处显示,值恒为空串。`audit_column_writers.LEDGER`
-    上那一条的还款日是阶段 5,本批(5-4)还它。
+    上那一条的还款日是阶段 5,batch23(5-4)还了它 —— 但只接了人工确认那条路。
+    batch24 把调用点挪进 `set_value`(状态为 CONFIRMED 时触发):自动确认
+    (`apply_evidence` 经 `decide_status` 判 CONFIRMED)从此走同一跳,
+    缺口的证据链与决定见 §3.54。
 
     ## 三条边界
 
     1. **同一个事务。** 分成两步的话,中间那个窗口里界面显示的是旧名字,
-       而没有任何东西说明为什么。这里不 commit,跟着 `confirm` 的事务走。
+       而没有任何东西说明为什么。这里不 commit,跟着 `set_value`
+       所在的事务走 —— 人工确认与识别合并两条路因此天然同一口径。
     2. **只在 VARIANT 层的颜色字段上触发**,判据是 `colour_projection.SOURCE_FIELD`
        —— 不是"字段名里有 color"。后者会让 `secondary_colors` 也写进来,
        而那是一个列表,投影出来是一串逗号。

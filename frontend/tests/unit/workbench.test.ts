@@ -18,13 +18,27 @@ import {
   type StepState,
 } from '../../src/api/workbench'
 
-const ORDER: FlowStep[] = ['MATERIAL', 'ATTRIBUTE', 'IMAGE_SET', 'COPY', 'DRAFT']
+//: 七步(A45-batch27 的增维)。这里原来是五步,而 `detectFlowAnomaly` 检查
+//: 响应有没有覆盖 `FLOW_STEP_ORDER` 的每一步 —— 于是增维当天这份夹具
+//: 让 8 条用例一起红。红的是夹具,不是被测逻辑:那条检查正是要防
+//: 「聚合接口少返回了子状态」,它做对了自己的事。
+const ORDER: FlowStep[] = [
+  'SETUP',
+  'MATERIAL',
+  'ATTRIBUTE',
+  'PLAN',
+  'IMAGE_SET',
+  'COPY',
+  'DRAFT',
+]
+
 
 function step(name: FlowStep, state: StepState): FlowStepResult {
   return { step: name, label: name, state, summary: '', issues: [] }
 }
 
-/** 五步全 DONE、下一步 DONE 的健康流程。每条用例只改它关心的那一处。 */
+/** 七步全 DONE、下一步 DONE 的健康流程。每条用例只改它关心的那一处。 */
+
 function flow(
   overrides: Partial<Record<FlowStep, StepState>> = {},
   nextCode: NextActionCode = 'DONE',
@@ -118,12 +132,15 @@ describe('detectFlowAnomaly', () => {
 describe('stepStates', () => {
   it('摊平成 step -> state', () => {
     expect(stepStates(flow({ COPY: 'TODO' }))).toEqual({
+      SETUP: 'DONE',
       MATERIAL: 'DONE',
       ATTRIBUTE: 'DONE',
+      PLAN: 'DONE',
       IMAGE_SET: 'DONE',
       COPY: 'TODO',
       DRAFT: 'DONE',
     })
+
   })
 
   it('接口少给了子状态时,键就少 —— 不补默认值', () => {

@@ -178,33 +178,15 @@ def _role_of(item: ImageItemSnapshot) -> str:
     return item.role.value if hasattr(item.role, "value") else str(item.role)
 
 
-def _image_bucket(
-    draft: ListingDraftData, *, variant_id: str | None = None
-) -> dict[str, Any]:
-    """角色 -> 图片路径。**只取 enabled 的项,按 sort_order 取第一张。**
+def _header_image_bucket(draft: ListingDraftData) -> dict[str, Any]:
+    """SPU 级表头的角色 -> 图片路径。**只取 enabled 的项。**
 
-    同一角色有多张时取排序最靠前的,而不是「随便一张」:排序是运营的
-    编辑决定,导出的主图必须和他在图片集页面上看到的第一张是同一张。
+    表头不在颜色→SKU→图片映射里(那份映射按颜色铺开,而表头是 SPU 级的),
+    所以这一段仍然从图片集快照里取:通用图 -> 编辑序最靠前的任意图。
 
-    ## 为什么要按变体分别构造(评审第 9 条)
-
-    `ImageItemSnapshot.variant_id` 是颜色绑定,`NULL` 表示 SPU 通用
-    (见 `listing_image_items` 上那两个 COALESCE 唯一索引)。原来这个桶
-    整个 SPU 只算一次,于是 spec 里的 `variant_image: images.PRODUCT_FRONT`
-    在每一行 SKU 上都取到同一个值 —— 一个五色 SPU 导出去,五种颜色的
-    变体图全是第一种颜色。这类错误在 Excel 里几乎看不出来(每一格都
-    有值、格式也对),要等平台上架后由消费者发现。
-
-    取值优先级:
-
-        该变体自己的图  ->  SPU 通用图
-
-    **不回落到别的变体。** 藏青色那一行宁可空着,也不能填珊瑚红的图:
-    空格会被 `CHANNEL_FIELD_MISSING` 拦下来,填错的图不会。
-
-    SPU 级表头(`variant_id=None`)多一层兜底:通用图 -> 编辑序最靠前的
-    任意图。表头的主图是必填的,而一个所有图都绑了颜色的图片集
-    并不是配置错误 —— 这时候取编辑序第一张,和改动前的行为一致。
+    表头的主图是必填的,而一个所有图都绑了颜色的图片集并不是配置错误 ——
+    这时候取编辑序第一张,和 A45-batch24 之前的行为一致。**行级不再走
+    这条路**,理由见 `_row_image_bucket`。
     """
     items = sorted(draft.image_set.enabled_items(), key=lambda i: i.sort_order)
     bucket: dict[str, Any] = {}
@@ -213,14 +195,62 @@ def _image_bucket(
         for item in candidates:
             bucket.setdefault(_role_of(item), item.storage_path)
 
-    if variant_id is not None:
-        fill(i for i in items if i.variant_id == variant_id)
-        fill(i for i in items if i.variant_id is None)
-        return bucket
-
     fill(i for i in items if i.variant_id is None)
     fill(items)
     return bucket
+
+
+def _row_image_bucket(
+    draft: ListingDraftData,
+    image_map: Mapping[str, Any],
+    *,
+    variant_id: str,
+    sku: str,
+) -> dict[str, Any]:
+    """一行 SKU 的角色 -> 图片路径。**成员与顺序全部来自已存映射。**
+
+    ## 这里改过一次行为,而且它是 AC-19 的后半句(A45-batch24)
+
+    原来这个桶自己从图片集快照里挑:该变体的图按 `sort_order` 取第一张,
+    取不到就回落到 SPU 通用图。而**同一份草稿的另一半**
+    (`color_sku_image_map`,预览读的那一份)是按另一套规则挑的:
+    主图取显式 `is_primary` 的那一项,通用图只有勾了「可混入」才进附图位,
+    而且**缺图就是缺图,不回落**(§6.5 / BLOCK-02)。
+
+    两套规则各自都合理,合在一起就不成立:一个合法且 READY 的图片集里,
+    只要显式主图不是排序第一张(两张正面图是最常见的形状),
+    **预览显示 A 图、Excel 与 API 报文用 B 图**,而两边都不报错 ——
+    这正是 AC-19 那句「导出预览与最终导出读取同一份已存映射」要防的结局。
+
+    现在行级只做一件事:把映射里点名的素材 id 翻译成路径。挑哪些图、
+    按什么顺序,答案只有一个来源。`primary` 排在 `extras` 之前,
+    于是它先占住自己的角色位 —— 显式主图是正面图时(绝大多数情况),
+    `variant_image: images.PRODUCT_FRONT` 拿到的就是预览里显示的那一张。
+
+    ## 映射里没有这个 (颜色, SKU) 时返回空桶
+
+    不回落到图片集、不借别的颜色的图。空桶的表现是那几个图片字段为空,
+    被 `CHANNEL_FIELD_MISSING` 或颜色维 READY 门禁拦下来;而"补一张看起来
+    合理的图"会让一行错图安静地进平台。§6.5 已经为同一件事定过调。
+    """
+    by_id = {i.media_asset_id: i for i in draft.image_set.enabled_items()}
+    colour = (image_map.get("colors") or {}).get(variant_id) or {}
+    cell = (colour.get("skus") or {}).get(sku) or {}
+
+    bucket: dict[str, Any] = {}
+    ordered = [cell.get("primary"), *(cell.get("extras") or [])]
+    for asset_id in ordered:
+        item = by_id.get(str(asset_id)) if asset_id else None
+        if item is None:
+            # 映射点名了一张这一版图片集里不存在(或已停用)的素材。
+            # **跳过而不是报错**:映射是草稿生成那一刻的快照,而这里正在
+            # 用它构造同一次草稿的字段 —— 两者不同步只可能是有人手改过库。
+            # 少一张图会被必填校验与 READY 门禁看见,抛异常只会让整份草稿
+            # 建不出来,而运营完全指不到原因
+            continue
+        bucket.setdefault(_role_of(item), item.storage_path)
+    return bucket
+
 
 
 def _confirmed_values(attrs: Mapping[str, AttrValue]) -> dict[str, Any]:
@@ -264,14 +294,33 @@ def _variant_attr_bucket(draft: ListingDraftData, variant_id: str) -> dict[str, 
     return {}
 
 
-def map_fields(draft: ListingDraftData, spec: ChannelFieldSpec) -> MappedListing:
+def map_fields(
+    draft: ListingDraftData,
+    spec: ChannelFieldSpec,
+    *,
+    image_map: Mapping[str, Any],
+) -> MappedListing:
     """把草稿映射成平台字段。**纯函数。**
 
     `header` 是 SPU 级字段,`rows` 是 SKU 行。Excel 与将来的 API 提交
     共用同一个结构 —— 这是「不允许表格里对、接口里错」那条目标的落点。
+
+    ## `image_map` 是必需的关键字参数(AC-19,A45-batch24)
+
+    它就是 `listing_drafts.color_sku_image_map` 的内容(形状见
+    `workbench/upstream_snapshot.build_color_sku_image_map`)。行级图片字段
+    **只能**从它翻译,不再自己从图片集里挑 —— 理由见 `_row_image_bucket`。
+
+    做成必需而不是"给个默认值,不传就照旧":不传就照旧的写法会让这次
+    修复只在记得传的调用点上生效,而漏传的地方**继续静默走老路**,
+    表现和修复前一模一样。这与 `export_preview` 的签名里只有 `mapping`
+    是同一手法 —— 把"重新推断"变成一件做不到的事,而不是一件不该做的事。
+
+    传 `{}` 是合法的,含义是"这份草稿没有颜色维映射":行级图片字段全空,
+    由必填校验与颜色维 READY 门禁去说明缺什么。
     """
     attrs = _attr_bucket(draft)
-    images = _image_bucket(draft)
+    images = _header_image_bucket(draft)
     copies = {loc: _copy_bucket(draft, loc) for loc in draft.copies}
     product = {
         "spu": draft.product.spu,
@@ -319,11 +368,15 @@ def map_fields(draft: ListingDraftData, spec: ChannelFieldSpec) -> MappedListing
             attrs=attrs,
             manual=draft.manual,
             consts=spec.consts,
-            # 图片按变体单独取,不共用表头那一份(见 `_image_bucket`)
-            images=_image_bucket(draft, variant_id=sku.variant_id),
+            # 图片逐 SKU 从**已存映射**翻译,不共用表头那一份、也不重新挑
+            # (见 `_row_image_bucket`:AC-19 的「预览与导出读同一份」)
+            images=_row_image_bucket(
+                draft, image_map, variant_id=sku.variant_id, sku=sku.sku
+            ),
             copies=copies,
             variant=variant,
         )
+
         row: dict[str, Any] = {}
         for field in spec.row_fields:
             value = _resolve_field(field, row_ctx)

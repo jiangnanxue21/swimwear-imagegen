@@ -159,16 +159,49 @@ def _spec():
     return generic.field_spec()
 
 
-def _rows(draft: ListingDraftData):
-    return generic.map_fields(draft, _spec()).rows
+def _map(**by_variant) -> dict:
+    """构造一份 `color_sku_image_map`(A45-batch24 起行级图片只从它翻译)。
+
+    `_map(NVY=("m1", ["m2"]))` → 颜色 NVY 下的那一个 SKU 主图 m1、附图 m2。
+
+    这份映射在生产里由 `upstream_snapshot.build_color_sku_image_map` 按
+    §6.5 的规则算出来(主图取显式 `is_primary`、通用图只有勾了「可混入」
+    才进附图位、缺图就是缺图)。测试里显式写出来而不是重算一遍:
+    这个文件验的是**映射之后那一跳**(id 怎么翻译成字段),
+    挑图规则本身由 `image_set_rules` 那边的用例与 batch24 的接缝守卫管。
+    """
+    skus = {"NVY": "SW-001-NVY-S", "CRL": "SW-001-CRL-S"}
+    colors = {}
+    for variant_id, cell in by_variant.items():
+        primary, extras = cell if isinstance(cell, tuple) else (cell, [])
+        colors[variant_id] = {
+            "variant_code": variant_id,
+            "skus": {
+                skus[variant_id]: {"primary": primary, "extras": list(extras)}
+            },
+        }
+    return {"schema": "1", "colors": colors}
+
+
+#: 默认映射:两个颜色各拿默认图片集里那一张主图。
+#:
+#: 大多数用例验的是属性分层与字段类型,图片只要"有一份合理的映射"即可。
+_DEFAULT_MAP = _map(NVY=("m1", []), CRL=("m1", []))
+
+
+def _rows(draft: ListingDraftData, image_map: dict | None = None):
+    return generic.map_fields(
+        draft, _spec(), image_map=_DEFAULT_MAP if image_map is None else image_map
+    ).rows
 
 
 def _codes(draft: ListingDraftData, field_key: str) -> set[str]:
     spec = _spec()
-    mapped = generic.map_fields(draft, spec)
+    mapped = generic.map_fields(draft, spec, image_map=_DEFAULT_MAP)
     return {
         p.code for p in generic.validate(mapped, spec) if p.field_key == field_key
     }
+
 
 
 # ---------------------------------------------------------------- 8 属性分层
@@ -296,21 +329,60 @@ def test_each_sku_gets_the_image_bound_to_its_own_colour():
             _image("m2", MediaRole.PRODUCT_FRONT, 1, "media/coral.jpg", variant_id="CRL"),
         )
     )
-    rows = _rows(draft)
+    rows = _rows(draft, _map(NVY=("m1", []), CRL=("m2", [])))
     assert rows[0]["variant_image"] == "media/navy.jpg"
     assert rows[1]["variant_image"] == "media/coral.jpg"
 
 
-def test_a_variant_without_its_own_image_falls_back_to_the_spu_generic_one():
+def test_a_variant_absent_from_the_map_gets_no_image_at_all():
+    """**这条断言换过方向(A45-batch24)。**
+
+    原来它叫「没有专属图的变体回落到 SPU 通用图」,断言 NVY 那一行拿到
+    `media/generic.jpg`。那个回落是**导出这一侧自己长出来的**:
+    §6.5 / BLOCK-02 明写「不得回退使用其他颜色的图片,缺图就是缺图」,
+    而 `image_set_rules.coverage()` 与 `color_sku_image_map` 从来就没有
+    把通用图算进主图位 —— 通用图只有勾了「可混入」才进附图位。
+
+    于是同一份草稿有两个答案:预览(读映射)说 NVY 缺主图、READY 门禁
+    据此拦下这份草稿,而 Excel 里 NVY 那一行填着通用图。两边都不报错。
+    行级图片改为只从映射翻译之后,这个分叉在结构上没有了 ——
+    代价是这条用例的期望值要跟着换,而换的方向是**规则原本就写着的**那个。
+    """
     draft = _draft(
         image_set=_image_set(
             _image("m0", MediaRole.PRODUCT_FRONT, 0, "media/generic.jpg"),
             _image("m2", MediaRole.PRODUCT_FRONT, 1, "media/coral.jpg", variant_id="CRL"),
         )
     )
-    rows = _rows(draft)
-    assert rows[0]["variant_image"] == "media/generic.jpg"   # NVY 没有专属图
+    rows = _rows(draft, _map(CRL=("m2", [])))
+    assert rows[0]["variant_image"] is None, (
+        "NVY 在映射里没有主图,而导出仍然给它填了一张 —— 通用图回落又回来了"
+    )
     assert rows[1]["variant_image"] == "media/coral.jpg"
+
+
+def test_an_extra_never_takes_the_slot_the_primary_already_holds():
+    """附图不顶替主图,哪怕它的编辑序更靠前。
+
+    `extras` 里排第一的恰恰常常是"排序最靠前的那张自有图"(见
+    `upstream_snapshot._extra_ids`),也就是修复前会被导出选中的那一张。
+    主图先填自己的角色位,所以顺序这件事在这里是**承重的**,不是美观。
+    """
+    draft = _draft(
+        image_set=_image_set(
+            _image(
+                "m-first", MediaRole.PRODUCT_FRONT, 0, "media/other-front.jpg",
+                variant_id="CRL",
+            ),
+            _image(
+                "m-primary", MediaRole.PRODUCT_FRONT, 5, "media/coral.jpg",
+                variant_id="CRL", is_primary=True,
+            ),
+        )
+    )
+    rows = _rows(draft, _map(CRL=("m-primary", ["m-first"])))
+    assert rows[1]["variant_image"] == "media/coral.jpg"
+
 
 
 def test_a_row_never_borrows_another_variants_image():
@@ -324,9 +396,37 @@ def test_a_row_never_borrows_another_variants_image():
             _image("m2", MediaRole.PRODUCT_FRONT, 0, "media/coral.jpg", variant_id="CRL"),
         )
     )
-    rows = _rows(draft)
+    rows = _rows(draft, _map(CRL=("m2", [])))
     assert rows[0]["variant_image"] is None
     assert rows[1]["variant_image"] == "media/coral.jpg"
+
+
+def test_the_explicit_primary_wins_over_the_editorial_first():
+
+    """**AC-19 的核心场景**:两张合法正面图,显式主图不是排序第一张。
+
+    这是老师们在真库上复现的那一条:预览显示 `is_primary` 的那张,
+    而导出按 `sort_order` 取第一张 —— 一份合法且 READY 的图片集,
+    两边给出不同的图,都不报错。行级从映射翻译之后,答案只有一个。
+    """
+    draft = _draft(
+        image_set=_image_set(
+            _image(
+                "m-first", MediaRole.PRODUCT_FRONT, 0, "media/secondary-front.jpg",
+                variant_id="CRL",
+            ),
+            _image(
+                "m-primary", MediaRole.PRODUCT_FRONT, 5, "media/marked-primary.jpg",
+                variant_id="CRL", is_primary=True,
+            ),
+        )
+    )
+    # 映射里的主图是显式标记的那一张(`coverage().primary` 的口径)
+    rows = _rows(draft, _map(CRL=("m-primary", ["m-first"])))
+    assert rows[1]["variant_image"] == "media/marked-primary.jpg", (
+        "导出没有用映射里那张主图 —— 预览与导出又分叉了(AC-19)"
+    )
+
 
 
 def test_the_spu_header_prefers_the_generic_image_over_a_variant_bound_one():
@@ -337,7 +437,8 @@ def test_the_spu_header_prefers_the_generic_image_over_a_variant_bound_one():
             _image("m0", MediaRole.PRODUCT_FRONT, 1, "media/generic.jpg"),
         )
     )
-    assert generic.map_fields(draft, _spec()).header["main_image"] == "media/generic.jpg"
+    header = generic.map_fields(draft, _spec(), image_map=_DEFAULT_MAP).header
+    assert header["main_image"] == "media/generic.jpg"
 
 
 def test_the_header_still_falls_back_when_every_image_is_variant_bound():
@@ -352,7 +453,8 @@ def test_the_header_still_falls_back_when_every_image_is_variant_bound():
             _image("m1", MediaRole.PRODUCT_FRONT, 1, "media/navy.jpg", variant_id="NVY"),
         )
     )
-    assert generic.map_fields(draft, _spec()).header["main_image"] == "media/coral.jpg"
+    header = generic.map_fields(draft, _spec(), image_map=_DEFAULT_MAP).header
+    assert header["main_image"] == "media/coral.jpg"
 
 
 def test_disabled_variant_images_are_still_excluded():
@@ -388,7 +490,7 @@ def test_operator_typed_numeric_strings_are_accepted():
     `int`/`float` 的话,真实数据会被整批判成「不是数字」。
     """
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_DEFAULT_MAP)
     blocking = [p for p in generic.validate(mapped, spec) if p.is_blocking]
     assert blocking == [], [p.message for p in blocking]
 
@@ -443,7 +545,7 @@ def test_every_sku_row_reports_its_own_numeric_problem():
     """两行 SKU 都要各报一次,否则「哪一行错」无法回答。"""
     spec = _spec()
     manual = {**_DEFAULT_MANUAL, "price": "39.905"}
-    mapped = generic.map_fields(_draft(manual=manual), spec)
+    mapped = generic.map_fields(_draft(manual=manual), spec, image_map=_DEFAULT_MAP)
     rows = [
         p.row_index
         for p in generic.validate(mapped, spec)

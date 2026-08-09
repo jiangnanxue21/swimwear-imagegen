@@ -24,20 +24,36 @@ import type { Audience } from './types'
 // 枚举与文案(对齐 app/workbench/flow.py)
 // ==========================================================
 
-export type FlowStep = 'MATERIAL' | 'ATTRIBUTE' | 'IMAGE_SET' | 'COPY' | 'DRAFT'
+export type FlowStep =
+  | 'SETUP'
+  | 'MATERIAL'
+  | 'ATTRIBUTE'
+  | 'PLAN'
+  | 'IMAGE_SET'
+  | 'COPY'
+  | 'DRAFT'
 
-/** 流程顺序。与后端 `STEP_ORDER` 同序 —— 列表页五列、详情页进度区都按它排。 */
+/**
+ * 流程顺序。与后端 `STEP_ORDER` 同序 —— 列表页每步一列、详情页进度区都按它排。
+ *
+ * 七步(A45-batch27):`SETUP` 与 `PLAN` 是阶段 6 加的。列数从五变七,
+ * 列表页那一行会变窄 —— 这是**预期**的,不是布局出了问题。
+ */
 export const FLOW_STEP_ORDER: FlowStep[] = [
+  'SETUP',
   'MATERIAL',
   'ATTRIBUTE',
+  'PLAN',
   'IMAGE_SET',
   'COPY',
   'DRAFT',
 ]
 
 export const FLOW_STEP_LABEL: Record<FlowStep, string> = {
+  SETUP: '建档',
   MATERIAL: '素材',
   ATTRIBUTE: '属性',
+  PLAN: '方案',
   IMAGE_SET: '图片集',
   COPY: '文案',
   DRAFT: '草稿',
@@ -108,6 +124,8 @@ export const ISSUE_LEVEL_LABEL: Record<
 }
 
 export type NextActionCode =
+  | 'COMPLETE_SETUP'
+  | 'CHOOSE_PLAN'
   | 'UPLOAD_MATERIAL'
   | 'RELEASE_QUARANTINE'
   | 'CONFIRM_ASSET_ROLE'
@@ -142,6 +160,8 @@ export type NextActionCode =
  * 这正是我们要的提醒方式,所以现在不预留一个没人产出的 WAIT。
  */
 export const NEXT_ACTION_LABEL: Record<NextActionCode, string> = {
+  COMPLETE_SETUP: '补全建档归属',
+  CHOOSE_PLAN: '选择模特与生成方案',
   UPLOAD_MATERIAL: '补充素材',
   RELEASE_QUARANTINE: '处理隔离素材',
   CONFIRM_ASSET_ROLE: '确认素材角色',
@@ -183,7 +203,13 @@ export type WorkbenchTab =
  * 而它们的 step 都是 DRAFT。
  */
 export const ACTION_TAB: Record<NextActionCode, WorkbenchTab> = {
+  // 建档归属与方案都还没有自己的标签页(方案页在 6-4 的向导里建)。
+  // 落总览而不是落素材页:去素材页会让运营开始传图,而归属没挂好之前
+  // 传的图会绑到错的作用域上 —— 传得越多错得越多
+  COMPLETE_SETUP: 'overview',
+  CHOOSE_PLAN: 'overview',
   UPLOAD_MATERIAL: 'material',
+
   RELEASE_QUARANTINE: 'material',
   // §6.2:素材有了,但角色不是人工确认的。落在素材页 —— 运营要做的是
   // 打开那几张图看一眼再点确认,不是去补图(补图会落在同一页,但按钮
@@ -215,7 +241,12 @@ export const ACTION_TAB: Record<NextActionCode, WorkbenchTab> = {
 
 /** 问题的 `target_step` -> 标签页。徽标点击后按这个跳(§3.3.2)。 */
 export const STEP_TAB: Record<FlowStep, WorkbenchTab> = {
+  // 建档归属改在 SPU 页,而工作台没有那个标签页 —— 落到总览,
+  // 由总览上那条问题带链接跳过去。硬塞一个不存在的标签页会白屏
+  SETUP: 'overview',
   MATERIAL: 'material',
+  // 方案页今天还没有(6-4 的向导才建)。落到总览,与 SETUP 同一个理由
+  PLAN: 'overview',
   ATTRIBUTE: 'attribute',
   IMAGE_SET: 'imageset',
   COPY: 'copy',
@@ -422,6 +453,7 @@ export interface DraftField {
  * 跳过的话运营会读成"这个尺码不在这次导出里",而它在,只是没有图。
  */
 export interface DraftImageRow {
+
   sku: string
   primary: string | null
   extras: string[]
@@ -527,14 +559,59 @@ export interface ListingDraft {
   audience_warnings?: string[]
 }
 
+/** 一个颜色在某一步上的状态(后端 `color_flow.ColorSubState`)。 */
+export type ColorSubState = 'UNKNOWN' | 'TODO' | 'BLOCKED' | 'NEEDS_CONFIRM' | 'DONE'
+
+export const COLOR_SUBSTATE_LABEL: Record<ColorSubState, string> = {
+  // UNKNOWN 与 TODO **分开显示**:前者是"没算过"(重新生成一次草稿就有了),
+  // 后者是"还没做"。合并的表现是运营去重做一批其实已经做完的东西
+  UNKNOWN: '未查',
+  TODO: '待办',
+  BLOCKED: '受阻',
+  NEEDS_CONFIRM: '待确认',
+  DONE: '完成',
+}
+
+export interface ColorStepState {
+  step: FlowStep
+  state: ColorSubState
+  detail: string
+}
+
+export interface ColorFlowRow {
+  variant_id: string
+  variant_code: string
+  is_active: boolean
+  current_step: FlowStep | null
+  is_blocking: boolean
+  steps: ColorStepState[]
+}
+
+/**
+ * 颜色维汇总(阶段 6 / AC-15)。
+ *
+ * `null` 的含义是**没查过**(没有 SPU 归属的存量行),不是"颜色都齐了" ——
+ * 所以这一段在 null 时整块不显示,而不是显示一个空表。
+ */
+export interface ColorRollup {
+  active_count: number
+  blocking_codes: string[]
+  /** 后端拼好的一句话。三个地方要显示同一句,前端不各拼一次 */
+  blocking_summary: string
+  worst_by_step: Record<string, ColorSubState>
+  colors: ColorFlowRow[]
+}
+
 export interface ProductFlowDetail {
   product: WorkbenchProduct
   thumbnail_url: string | null
   flow: ProductFlow
+  colors: ColorRollup | null
   image_set: { id: string; version: number; status: string } | null
   copy: ListingCopy | null
   draft: ListingDraft | null
 }
+
 
 export interface ExportHistoryEntry {
   actor: string | null

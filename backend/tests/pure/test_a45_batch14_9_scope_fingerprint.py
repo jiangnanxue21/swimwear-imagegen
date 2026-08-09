@@ -389,11 +389,31 @@ def test_modifying_a_confirmed_fact_is_a_new_version_not_a_stale_flag():
 
 
 def test_the_six_change_sources_still_owed_to_section_8_1_are_listed():
-    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+    """**这条守卫记的是欠账,不是成绩。还款日:阶段 6(A45-batch24 重新认领)。**
 
-    清单里剩的四行,机制多半要等阶段 5 的颜色结构化字段(见下面那段
-    关于「修改素材颜色归属」为什么补不了的注释)。所以死线定在阶段 5 之前
-    —— 到那时要么补上,要么把补不上的理由重写一遍。
+    ## 到期时发生了什么
+
+    原还款日是阶段 5。阶段 5 交付完毕时,四行里**还清了一行**
+    (「新增/停用 ACTIVE 颜色」,由 batch20 用快照比对那条路还的,见下面
+    `settled_elsewhere`),另外三行没有还,也没有人来重新认领 ——
+    这正是 §3.34「欠账守卫是有还款日的」与 §3.37「还款日要有人替它盯」
+    两条要防的形态,而它在 batch23 与 batch24 之间被外部评审点了出来。
+
+    ## 为什么剩下三行改判到阶段 6,而不是继续挂在阶段 5
+
+    三行都要求矩阵新增一个 `ChangeSource`,而
+    `test_every_effective_cell_names_a_mechanism_that_exists_in_code`
+    要求每个有效应的格子点名一个**真实存在**的函数:
+
+        修改素材颜色归属(A→B)   要素材侧的颜色归属变更事件 —— 今天没有入口
+        修改人工材质/卖点         `manual` 字段今天不进指纹(§4.5 的口径未定)
+        修改价格或库存            同上,且它牵涉「价格改了要不要重出草稿」的产品决定
+
+    三条都不是「接一下就好」,而是各自缺一个上游决定。定在阶段 6 不是
+    再拖一次:阶段 6 是渠道适配层落地的批次,前两条的入口在那时才存在。
+
+    **到期时如果仍然还不了,请再写一次为什么,而不是再把日期往后挪一格。**
+
 
     §8.1 除了 FACTS 列还要求新增六个变更源。它们没进矩阵,因为
     `test_every_effective_cell_names_a_mechanism_that_exists_in_code`
@@ -418,12 +438,28 @@ def test_the_six_change_sources_still_owed_to_section_8_1_are_listed():
         "修改素材颜色归属(A→B)",
         "修改人工材质/卖点",
         "修改价格或库存",
-        "新增/停用 ACTIVE 颜色",
     }
     settled = {
         "更换生成方案(plan_fingerprint 变化)": sm.ChangeSource.GENERATION_PLAN_CHANGED,
         "替换批准图片集": sm.ChangeSource.APPROVED_IMAGE_SET_REPLACED,
     }
+    #: **不经 `ChangeSource` 还清的那些。**
+    #:
+    #: 「新增/停用 ACTIVE 颜色」原来记在 `owed` 里,等的是矩阵加一行。
+    #: 而 A45-batch20(5-2B)用另一条路还了它:`listing_drafts.upstream_versions`
+    #: 存下建草稿那一刻的颜色集,`refresh_draft` 比对当前颜色集,不一致就判
+    #: STALE。真库用例 `test_a_new_active_colour_makes_the_draft_stale` 与
+    #: `test_deactivating_a_colour_says_deactivated_not_deleted` 两条各钉一头。
+    #:
+    #: 划掉它而不是留着:留着的话这条守卫会一直说"还欠 4 笔",而其中一笔
+    #: 已经还了 —— 一份**报出来的欠账比实际多**的清单,下一个人核对两轮
+    #: 发现对不上之后,会开始怀疑整张清单(§3.37 记的正是这种损耗)。
+    #: 换成矩阵那条路才算"重复还款",所以这里记的是**已还,经由另一条路**。
+    settled_elsewhere = {
+        "新增/停用 ACTIVE 颜色": "A45-batch20:upstream_versions 快照比对(§4.10)",
+    }
+    assert settled_elsewhere, "另一条路还清的那些也要留名,否则下次会被当成新缺口"
+
     #: §4.5 原有六行 + §8.1 已补的那几行。清单空了,这条守卫就该删掉。
     baseline = 6
     for source in settled.values():
@@ -433,7 +469,8 @@ def test_the_six_change_sources_still_owed_to_section_8_1_are_listed():
         f"变更源变成了 {len(present)} 个 —— 有人动了矩阵的行。"
         f"如果是在补 §8.1 剩下那几行,请同时从本清单里划掉对应项:{sorted(owed)}"
     )
-    assert len(owed) == 4, "欠账清单和上面那句解释对不上了"
+    assert len(owed) == 3, "欠账清单和上面那句解释对不上了"
+
 
 
 # ------------------------------------------------- 接线(欠账已还)

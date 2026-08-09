@@ -38,6 +38,7 @@ from app.models.audit_log import AuditLog
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
 from app.services.storage import asset_url, build_storage
+from app.workbench import color_rollup
 from app.workbench import flow as flow_rules
 from app.workbench import reject as reject_rules
 from app.workbench import service as wb
@@ -332,6 +333,21 @@ def _draft_out(row) -> dict[str, Any] | None:
     }
 
 
+def _color_rollup(session: Session, product) -> dict[str, Any] | None:
+    """颜色维汇总。**算不出来时返回 None,不返回一个空壳。**
+
+    没有 SPU 归属的存量行给一个"零个颜色、没人拦路"的空壳,会让向导显示
+    「颜色都齐了」—— 而真相是没查过。None 在前端是「这一段不显示」,
+    不是「都好了」。这与 `color_flow` 的 UNKNOWN 是同一条道理。
+    """
+    if product.spu_id is None:
+        return None
+    canonical = wb._canonical_with_skus(session, product)
+    return color_rollup.serialize_rollup(
+        color_rollup.rollup(session, product, canonical=canonical)
+    )
+
+
 @router.get("/products/{product_id}/flow")
 def product_flow(
     product_id: UUID,
@@ -356,6 +372,10 @@ def product_flow(
         "product": _product_out(product),
         "thumbnail_url": _thumbnails(session, [product], storage).get(product.id),
         "flow": wb.serialize_flow(ctx.result),
+        # 颜色维子态(阶段 6 / AC-15)。**挂在这个端点上,不新开一个** ——
+        # AC-15 要求"该响应与列表页、详情页读同一份判定结果,三处不得出现
+        # 互相矛盾的状态",而新开端点就是给同一件事造第二个来源
+        "colors": _color_rollup(session, product),
         "image_set": (
             {
                 "id": str(ctx.image_set.id),

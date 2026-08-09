@@ -44,7 +44,7 @@ from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db.locks import try_advisory_xact_lock
 from app.extractors.registry import get_extractor
-from app.listings import export_writer
+from app.listings import export_writer, variants
 from app.models.batch_job import BatchActionReceipt, BatchJob, BatchJobItem
 from app.models.product import Product
 from app.services import audit
@@ -162,7 +162,12 @@ def _fingerprint(session: Session, action: BatchAction, ctx) -> str:
         )
 
     if action is BatchAction.GENERATE_COPY:
-        # 已确认属性的版本 id 集合:属性一改,文案就该重生
+        # 已确认属性的版本 id 集合:属性一改,文案就该重生。
+        #
+        # **颜色不进这里**:它已经在 `scope_key` 里(0051 之后文案按
+        # (SPU, 颜色) 分槽),而指纹回答的是"这个作用域的上游变没变"。
+        # 两处都放的话,回执键会因为同一件事变两次 —— 不影响正确性,
+        # 但"为什么这次没命中回执"会多出一个要排除的原因
         return "|".join(
             [
                 "|".join(wb._confirmed_version_ids(session, ctx.product)),
@@ -170,6 +175,7 @@ def _fingerprint(session: Session, action: BatchAction, ctx) -> str:
                 f"locale:{generic.LOCALE}",
             ]
         )
+
 
     if action is BatchAction.VALIDATE_DRAFT:
         parts = [
@@ -260,9 +266,14 @@ def candidates(
                 pending_count=result.pending_count,
                 first_blocking_ref=_first_blocking_ref(result),
                 fingerprint=_fingerprint(session, action, ctx),
+                # 文案的作用域键要用它(迁移 0051 / AC-11 第二句)。
+                # 口径与属性 owner、图片映射键同源 —— `variant_id_for()`
+                # 是「变体身份只有一份定义」的那一份,这里不重算
+                variant_id=variants.variant_id_for(product),
             )
         )
     return out, contexts
+
 
 
 def plan(

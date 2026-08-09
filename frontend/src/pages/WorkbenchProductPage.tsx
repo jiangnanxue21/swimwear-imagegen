@@ -123,7 +123,7 @@ export default function WorkbenchProductPage() {
   const { flow, product } = data
 
   const content: Record<WorkbenchTab, ReactNode> = {
-    overview: <OverviewTab flow={flow} onJump={goTab} />,
+    overview: <OverviewTab flow={flow} colors={query.data?.colors ?? null} onJump={goTab} />,
     material: <MaterialTab productId={id} step={stepOf.get('MATERIAL')} />,
     attribute: (
       <AttributeTab productId={id} step={stepOf.get('ATTRIBUTE')} product={product} />

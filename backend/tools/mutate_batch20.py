@@ -40,6 +40,7 @@ db 那一半需要 `TEST_DATABASE_URL` 与 `ALLOW_DESTRUCTIVE_TEST_DB=1`。
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -279,7 +280,17 @@ def run_db(cwd: Path) -> tuple[int, str]:
         timeout=1800,
         env=env,
     )
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # **空结果不能读作通过**(A45-batch24)。
+    #
+    # `requires_db` 在库连不上时**跳过**整份用例,pytest 于是退出 0 ——
+    # 而本脚本把 0 读成 GREEN,也就是"这条变异没被守卫咬住"。真实发生过:
+    # 容器里的 PostgreSQL 中途挂掉,一轮变异从 13/13 变成 6/13,报告上
+    # 是七条守卫失效,实际是七条根本没跑。**失效与没跑必须分开报**,
+    # 否则这个脚本会在最需要它的时候给出最让人放心的数字。
+    if " no tests ran" in out or re.search(r"\b\d+ skipped\b", out) and " passed" not in out:
+        return None, out
+    return proc.returncode, out
 
 
 def main() -> int:
@@ -317,6 +328,10 @@ def main() -> int:
                 # 在本批的套件里再抄一份守卫,等于给同一条规矩造第二个判定点。
                 _, _, suite = runner.partition(":")
                 code, _ = run_pure(root / "backend", suite or PURE_SUITE)
+            if code is None:
+                print(f"{ident:4} {description}  没跑(真库不可用)—— 不计入")
+                skipped += 1
+                continue
             verdict = "RED" if code != 0 else "GREEN"
             if code != 0:
                 red += 1

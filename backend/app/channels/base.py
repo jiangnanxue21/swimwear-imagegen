@@ -222,7 +222,10 @@ class ChannelAdapter(Protocol):
 
     def field_spec(self, *, category_id: str, site: str) -> ChannelFieldSpec: ...
 
-    def map_fields(self, draft: ListingDraftData) -> MappedListing: ...
+    def map_fields(
+        self, draft: ListingDraftData, *, image_map: Mapping[str, Any]
+    ) -> MappedListing: ...
+
 
     def validate(
         self, mapped: MappedListing, spec: ChannelFieldSpec

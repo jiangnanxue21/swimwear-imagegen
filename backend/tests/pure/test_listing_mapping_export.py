@@ -39,6 +39,26 @@ def _attr(name: str, value, *, status=AttributeStatus.CONFIRMED) -> AttrValue:
     )
 
 
+#: 这份夹具的两行 SKU 同属一个颜色(NVY),图片在 SPU 通用位上。
+#:
+#: A45-batch24 起行级图片只从 `color_sku_image_map` 翻译,所以这里给一份
+#: 显式映射:两行都指向那张主图。本文件验的是表头映射、变换、校验与导出
+#: 写盘,行级图片的挑选口径由 `test_export_variant_and_field_types.py`
+#: 与 batch24 的接缝守卫管。
+_MAP = {
+    "schema": "1",
+    "colors": {
+        "NVY": {
+            "variant_code": "NVY",
+            "skus": {
+                "SW-001-NVY-S": {"primary": "m1", "extras": ["m2"]},
+                "SW-001-NVY-M": {"primary": "m1", "extras": ["m2"]},
+            },
+        }
+    },
+}
+
+
 def _draft(**overrides) -> ListingDraftData:
     attrs = {
         "primary_color": _attr("primary_color", "NAVY_BLUE"),
@@ -184,7 +204,7 @@ def test_spec_rejects_duplicate_field_keys():
 
 
 def test_mapping_fills_header_and_one_row_per_sku():
-    mapped = generic.map_fields(_draft(), _spec())
+    mapped = generic.map_fields(_draft(), _spec(), image_map=_MAP)
     assert mapped.header["spu_code"] == "SW-001"
     assert mapped.header["product_title"] == "Navy Blue One Piece Swimsuit"
     assert mapped.header["garment_type"] == "ONE_PIECE"
@@ -196,7 +216,7 @@ def test_mapping_fills_header_and_one_row_per_sku():
 
 
 def test_bullet_points_are_joined_by_the_declared_separator():
-    mapped = generic.map_fields(_draft(), _spec())
+    mapped = generic.map_fields(_draft(), _spec(), image_map=_MAP)
     assert mapped.header["selling_points"] == (
         "Soft stretch fabric | V neckline | Full back"
     )
@@ -214,7 +234,7 @@ def test_unconfirmed_attributes_never_reach_platform_fields():
             )
         }
     )
-    mapped = generic.map_fields(draft, _spec())
+    mapped = generic.map_fields(draft, _spec(), image_map=_MAP)
     assert mapped.header["material"] is None
 
     problems = generic.validate(mapped, _spec())
@@ -234,7 +254,7 @@ def test_title_is_truncated_to_the_declared_limit():
             )
         }
     )
-    mapped = generic.map_fields(draft, _spec())
+    mapped = generic.map_fields(draft, _spec(), image_map=_MAP)
     assert len(mapped.header["product_title"]) == 120
 
 
@@ -256,7 +276,7 @@ def test_primary_image_follows_the_editorial_sort_order():
         status=draft.image_set.status,
         items=(extra, *draft.image_set.items),
     )
-    mapped = generic.map_fields(_draft(image_set=swapped), _spec())
+    mapped = generic.map_fields(_draft(image_set=swapped), _spec(), image_map=_MAP)
     assert mapped.header["main_image"] == "media/front.jpg"
 
 
@@ -280,7 +300,7 @@ def test_disabled_images_are_not_exported():
             for i in draft.image_set.items
         ),
     )
-    mapped = generic.map_fields(_draft(image_set=disabled), _spec())
+    mapped = generic.map_fields(_draft(image_set=disabled), _spec(), image_map=_MAP)
     assert mapped.header["main_image"] is None
 
 
@@ -288,7 +308,7 @@ def test_disabled_images_are_not_exported():
 
 
 def test_a_clean_draft_has_no_blocking_violations():
-    mapped = generic.map_fields(_draft(), _spec())
+    mapped = generic.map_fields(_draft(), _spec(), image_map=_MAP)
     problems = generic.validate(mapped, _spec())
     blocking = [p for p in problems if p.is_blocking]
     assert blocking == [], [p.message for p in blocking]
@@ -297,7 +317,7 @@ def test_a_clean_draft_has_no_blocking_violations():
 def test_missing_manual_price_blocks_export():
     """验收脚本第 10 步:制造必填字段缺失 -> 草稿不能正式导出。"""
     draft = _draft(manual={"brand": "Marine", "currency": "USD", "stock": "1"})
-    mapped = generic.map_fields(draft, _spec())
+    mapped = generic.map_fields(draft, _spec(), image_map=_MAP)
     problems = generic.validate(mapped, _spec())
     missing = [p for p in problems if p.code == "CHANNEL_FIELD_MISSING"]
     assert {p.field_key for p in missing} == {"price"}
@@ -312,20 +332,20 @@ def MappedIsValid(mapped, problems) -> bool:
 
 def test_enum_value_outside_the_allowed_list_is_rejected():
     draft = _draft(attrs={"garment_type": _attr("garment_type", "SPACESUIT")})
-    mapped = generic.map_fields(draft, _spec())
+    mapped = generic.map_fields(draft, _spec(), image_map=_MAP)
     problems = generic.validate(mapped, _spec())
     assert any(p.code == "CHANNEL_FIELD_NOT_ALLOWED" for p in problems)
 
 
 def test_a_draft_without_any_sku_row_is_rejected():
     product = CanonicalProduct(spu="SW-001", spu_attrs={}, skus=())
-    mapped = generic.map_fields(_draft(product=product), _spec())
+    mapped = generic.map_fields(_draft(product=product), _spec(), image_map=_MAP)
     problems = generic.validate(mapped, _spec())
     assert any(p.code == "CHANNEL_NO_ROWS" for p in problems)
 
 
 def test_image_count_check_is_separate_from_the_spec():
-    mapped = generic.map_fields(_draft(), _spec())
+    mapped = generic.map_fields(_draft(), _spec(), image_map=_MAP)
     assert generic.image_count_check(mapped, minimum=2) == []
     assert generic.image_count_check(mapped, minimum=4)
 
@@ -350,7 +370,7 @@ def test_csv_cells_match_the_preview_cell_for_cell():
     每次改映射都会重跑。
     """
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_MAP)
     preview = export_writer.preview_tables(mapped, spec)
 
     import csv as _csv
@@ -372,7 +392,7 @@ def test_csv_cells_match_the_preview_cell_for_cell():
 
 def test_json_export_matches_the_preview_values():
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_MAP)
     preview = export_writer.preview_tables(mapped, spec)
     payload = export_writer.to_json(mapped, spec, _meta())
 
@@ -386,7 +406,7 @@ def test_preview_marks_the_offending_field_not_the_whole_draft():
     """FE-233 的验收结果:阻断错误要落到具体字段上。"""
     spec = _spec()
     draft = _draft(manual={"brand": "Marine", "currency": "USD", "stock": "1"})
-    mapped = generic.map_fields(draft, spec)
+    mapped = generic.map_fields(draft, spec, image_map=_MAP)
     problems = generic.validate(mapped, spec)
     preview = export_writer.preview_tables(mapped, spec, violations=problems)
 
@@ -398,7 +418,7 @@ def test_preview_marks_the_offending_field_not_the_whole_draft():
 def test_preview_explains_where_every_field_comes_from():
     """FE-232 的验收结果:每个字段来源清楚。"""
     spec = _spec()
-    preview = export_writer.preview_tables(generic.map_fields(_draft(), spec), spec)
+    preview = export_writer.preview_tables(generic.map_fields(_draft(), spec, image_map=_MAP), spec)
     labels = {f["key"]: f["source_label"] for f in preview["header"]}
     assert labels["product_title"] == "文案"
     assert labels["garment_type"] == "已确认属性"
@@ -416,7 +436,7 @@ def test_csv_escapes_formula_injection():
         "currency": "USD",
         "stock": "1",
     })
-    text = export_writer.to_csv(generic.map_fields(draft, spec), spec)
+    text = export_writer.to_csv(generic.map_fields(draft, spec, image_map=_MAP), spec)
     assert "'=cmd" in text
     assert ",=cmd" not in text
 
@@ -425,14 +445,15 @@ def test_csv_still_writes_the_spu_row_when_there_are_no_skus():
     """只有表头的空表会让运营以为导出失败了。"""
     spec = _spec()
     product = CanonicalProduct(spu="SW-001", spu_attrs={}, skus=())
-    text = export_writer.to_csv(generic.map_fields(_draft(product=product), spec), spec)
+    mapped = generic.map_fields(_draft(product=product), spec, image_map=_MAP)
+    text = export_writer.to_csv(mapped, spec)
     assert len(text.strip().splitlines()) == 2
 
 
 def test_error_report_carries_row_numbers():
     spec = _spec()
     draft = _draft(manual={"brand": "Marine", "currency": "USD", "stock": "1"})
-    mapped = generic.map_fields(draft, spec)
+    mapped = generic.map_fields(draft, spec, image_map=_MAP)
     report = export_writer.errors_to_csv(generic.validate(mapped, spec))
     assert "价格" in report
     # 行号对人显示从 1 开始
@@ -442,7 +463,7 @@ def test_error_report_carries_row_numbers():
 def test_xlsx_has_exactly_the_two_data_sheets():
     """校验报告不进工作簿 —— 多一个 sheet 就可能让解析器整份拒收。"""
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_MAP)
     try:
         from openpyxl import load_workbook
     except ImportError:
@@ -458,7 +479,7 @@ def test_xlsx_has_exactly_the_two_data_sheets():
 
 def test_xlsx_cells_match_the_csv_cells():
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_MAP)
     try:
         from openpyxl import load_workbook
     except ImportError:

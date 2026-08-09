@@ -22,14 +22,20 @@
 运营看到这句话就知道该去哪儿——§6.3.1 的第三个条件(运营无需开发协助
 即可判断下一步动作)因此是结构保证的。
 
-## 一个 SPU 只做一次
+## 一个作用域只做一次
 
-图片集、文案、草稿三个对象都按 SPU 存(见 service.py 的 `_current_*`)。
-选中同一 SPU 下 3 个 SKU 去批量生成文案,朴素实现会调三次文案模型、
-写三个版本、最后两次覆盖前一次——**付费三次,结果一份**。
+图片集与草稿按 SPU 存,文案按 (SPU, 颜色) 存(见 service.py 的
+`_current_*` 与迁移 0051)。选中同一 SPU 下 3 个同色 SKU 去批量生成文案,
+朴素实现会调三次文案模型、写三个版本、最后两次覆盖前一次——
+**付费三次,结果一份**。
 
-所以计划阶段按 `scope_key` 去重:SPU 级动作在一个批次里只留一件执行,
+所以计划阶段按 `scope_key` 去重:同作用域在一个批次里只留一件执行,
 其余标记 `SAME_SPU_DEDUPED` 跳过。跳过不是失败,它在界面上单独一列。
+
+**去重键必须和存储的槽位一样细。** 文案原来按 SPU 去重,而它的槽位
+自 0051 起带颜色 —— 三颜色 SPU 的批量生成只给第一个颜色出稿,另外两个
+被跳过,界面上读起来完全正常。粗一档漏做、细一档白花钱,两侧都不报错,
+所以这两个粒度是**同一个决定**,改一处必须改另一处(§3.54)。
 """
 from __future__ import annotations
 
@@ -69,13 +75,21 @@ PAID_ACTIONS: frozenset[BatchAction] = frozenset(
     {BatchAction.EXTRACT, BatchAction.GENERATE_COPY}
 )
 
-#: 动作作用在哪一级对象上。SPU 级动作在同一批次里只执行一次。
+#: 动作作用在哪一级对象上。同一批次里,同一作用域只执行一次。
 #:
 #: 属性识别是逐图跑的,而素材挂在 SKU 上,所以它按 SKU;
-#: 图片集 / 文案 / 草稿三张表都以 spu 为 scope(见 service.py),所以按 SPU。
+#: 图片集 / 草稿两张表以 spu 为 scope(见 service.py),所以按 SPU。
+#:
+#: **文案按 (SPU, 颜色) —— 不是按 SPU**(迁移 0051 / AC-11 第二句,
+#: A45-batch24)。`listing_copies` 的槽位从 0051 起带颜色维,而文案内容
+#: 本来就是颜色相关的(标题模板第一段是颜色)。仍按 SPU 去重的话,
+#: 一个三颜色 SPU 的批量生成只会给**第一个**颜色出稿,另外两个颜色
+#: 被记成 `SAME_SPU_DEDUPED` 跳过 —— 界面显示"已跳过 2 件、成功 1 件",
+#: 读起来完全正常,而那两个颜色在导出时才发现没有文案。
+#: 这是"去重键比存储粗一档"的反向形态,与 §3.54 记的那笔是同一件事。
 ACTION_SCOPE: Mapping[BatchAction, str] = {
     BatchAction.EXTRACT: "product",
-    BatchAction.GENERATE_COPY: "spu",
+    BatchAction.GENERATE_COPY: "spu_colour",
     BatchAction.VALIDATE_DRAFT: "spu",
     BatchAction.EXPORT: "spu",
 }
@@ -176,6 +190,16 @@ class BatchErrorCode(StrEnum):
     ALREADY_EXPORTED = "ALREADY_EXPORTED"
 
     # ---- 素材 ----
+    #: 这一行 SKU 说不出自己属于哪个 SPU / 哪个颜色(§4.4,阶段 6 的建档步)。
+    #:
+    #: **不复用 `NO_USABLE_MATERIAL`**:那个类别会把运营带到素材页去传图,
+    #: 而归属没挂好之前传的图会绑到错的作用域上 —— 传得越多错得越多。
+    OWNERSHIP_MISSING = "OWNERSHIP_MISSING"
+    #: 这个颜色还没有生效的生成方案(阶段 6 的方案步)。
+    #:
+    #: 与图片集类别分开:图片集没批准是"图有了没过审",没有方案是"还没决定
+    #: 用哪个模特、什么参数" —— 前者去审图,后者去选方案,两个页面。
+    NO_ACTIVE_PLAN = "NO_ACTIVE_PLAN"
     NO_USABLE_MATERIAL = "NO_USABLE_MATERIAL"
 
     #: 素材角色未经人工确认,§6.2 的完整度门禁不认(A45-batch14-10)。
@@ -287,9 +311,12 @@ ERROR_REGISTRY: Mapping[BatchErrorCode, ErrorMeta] = {
         skip=True,
     ),
     BatchErrorCode.SAME_SPU_DEDUPED: ErrorMeta(
-        label="同 SPU 已有一件在执行",
+        label="同作用域已有一件在执行",
         category=FlowStep.DRAFT,
-        advice="图片集/文案/草稿按 SPU 共享,同一 SPU 执行一次即覆盖全部 SKU",
+        advice=(
+            "图片集/草稿按 SPU 共享,文案按 SPU + 颜色共享;"
+            "同一作用域执行一次即覆盖它下面的全部 SKU"
+        ),
         retryable=False,
         needs_human=False,
         skip=True,
@@ -302,7 +329,22 @@ ERROR_REGISTRY: Mapping[BatchErrorCode, ErrorMeta] = {
         needs_human=False,
         skip=True,
     ),
+    BatchErrorCode.OWNERSHIP_MISSING: ErrorMeta(
+        label="没挂到 SPU / 颜色上",
+        category=FlowStep.SETUP,
+        advice="在 SPU 页把这个 SKU 挂回它所属的颜色,再重试这一批",
+        retryable=False,
+        needs_human=True,
+    ),
+    BatchErrorCode.NO_ACTIVE_PLAN: ErrorMeta(
+        label="还没选生成方案",
+        category=FlowStep.PLAN,
+        advice="在方案页给这个颜色(或整个 SPU)选一次模特与参数",
+        retryable=False,
+        needs_human=True,
+    ),
     BatchErrorCode.NO_USABLE_MATERIAL: ErrorMeta(
+
         label="没有可用素材",
         category=FlowStep.MATERIAL,
         advice="到素材标签页补图,或放行被隔离的素材",
@@ -549,7 +591,10 @@ ACTION_PRECONDITION: Mapping[BatchAction, frozenset[NextActionCode]] = {
 #: 前置不满足时,类别取**当前唯一下一步所在的步骤**,而不是批量动作所在的步骤:
 #: 运营要去的地方是卡点,不是他刚才点的那个按钮。
 PRECHECK_CODE_BY_ACTION: Mapping[NextActionCode, BatchErrorCode] = {
+    NextActionCode.COMPLETE_SETUP: BatchErrorCode.OWNERSHIP_MISSING,
+    NextActionCode.CHOOSE_PLAN: BatchErrorCode.NO_ACTIVE_PLAN,
     NextActionCode.UPLOAD_MATERIAL: BatchErrorCode.NO_USABLE_MATERIAL,
+
     NextActionCode.RELEASE_QUARANTINE: BatchErrorCode.NO_USABLE_MATERIAL,
     NextActionCode.CONFIRM_ASSET_ROLE: BatchErrorCode.ASSET_ROLE_UNCONFIRMED,
     NextActionCode.CONFIRM_AUDIENCE: BatchErrorCode.AUDIENCE_UNCONFIRMED,
@@ -592,6 +637,13 @@ class Candidate:
     first_blocking_ref: str | None = None
     #: 决定输出的上游指纹。同一指纹重复执行 = 白花钱,见 `idempotency_key`
     fingerprint: str = ""
+    #: 这一行商品属于哪个颜色(变体身份串)。文案的作用域键要用它。
+    #:
+    #: 默认空串**只服务于旧的构造形状**(测试里手搓 Candidate 的地方),
+    #: 生产接线由 `batch_service.candidates()` 填 —— 那一处有守卫。
+    #: 恒空的后果很具体:三个颜色算出同一个作用域键,批量生成只出一稿。
+    variant_id: str = ""
+
 
 
 @dataclass(frozen=True)
@@ -646,13 +698,37 @@ class BatchPlan:
 
 
 def scope_key(action: BatchAction, candidate: Candidate) -> str:
-    """动作的作用域键。SPU 级动作靠它去重(见模块注释)。"""
-    if ACTION_SCOPE[action] == "spu":
+    """动作的作用域键。同作用域的多件商品靠它去重(见模块注释)。
+
+    三档:`spu` / `spu_colour` / `product`。文案走中间那档 ——
+    键必须和 `listing_copies` 的槽位一样细,不然同 SPU 的其它颜色会被
+    当成重复跳过(迁移 0051)。
+    """
+    scope = ACTION_SCOPE[action]
+    if scope == "spu":
         return f"spu:{candidate.spu}"
+    if scope == "spu_colour":
+        return f"spu:{candidate.spu}|colour:{candidate.variant_id}"
     return f"product:{candidate.product_id}"
 
 
+def _deduped_reason(action: BatchAction, candidate: Candidate) -> str:
+    """跳过理由要说出**是哪个作用域**重了,不是笼统一句"同 SPU"。
+
+    文案按颜色分槽之后,"同 SPU 已有一件在执行"会让运营以为另一个颜色
+    也被覆盖了 —— 而它没有,它是另一件在执行。理由文案是运营判断
+    「跳过的这几件要不要另开一批」的唯一依据,含糊等于让他自己去猜。
+    """
+    if ACTION_SCOPE[action] == "spu_colour":
+        return (
+            f"同 SPU({candidate.spu})的同一颜色"
+            f"({candidate.variant_id or '未分配'})已有一件在本批次执行"
+        )
+    return f"同 SPU({candidate.spu})已有一件在本批次执行"
+
+
 def idempotency_key(action: BatchAction, candidate: Candidate) -> str:
+
     """幂等键 = 动作 + 作用域 + 上游指纹。
 
     判据和 `workflows/idempotency.py` 一致:**改了它,结果会不一样吗?**
@@ -770,7 +846,8 @@ def plan(
                     scope_key=key,
                     executable=False,
                     code=BatchErrorCode.SAME_SPU_DEDUPED,
-                    reason=f"同 SPU({candidate.spu})已有一件在本批次执行",
+                    reason=_deduped_reason(action, candidate),
+
                     target_step=candidate.current_step,
                     idempotency_key=idem,
                 )

@@ -169,9 +169,12 @@ def test_serialize_is_json_shaped():
     )
     payload = ex.serialize(ex.group(entries))
     assert isinstance(payload, list) and len(payload) == len(STEP_ORDER)
-    material = payload[0]
-    assert material["step"] == FlowStep.MATERIAL.value
+    # `payload[0]` 是 `STEP_ORDER` 的第一项 —— 七步增维之后那是建档,
+    # 不再是素材(batch27)。按名字取而不是按下标写死:下标那一版
+    # 在增维时红得莫名其妙,而它其实只是想说"素材那一组里有 p1"
+    material = next(g for g in payload if g["step"] == FlowStep.MATERIAL.value)
     assert material["groups"][0]["entries"][0]["product_id"] == "p1"
+
     summary = ex.summarize(ex.group(entries))
     assert summary["total"] == 1 and summary["blocking"] == 1
 

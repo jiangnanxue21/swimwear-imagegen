@@ -50,8 +50,10 @@ class FlowStep(StrEnum):
     顺序有意义:`STEP_ORDER` 依赖它推出「唯一下一步」。
     """
 
+    SETUP = "SETUP"            # 建档(SPU / 颜色 / SKU 的归属)
     MATERIAL = "MATERIAL"      # 素材
     ATTRIBUTE = "ATTRIBUTE"    # 属性
+    PLAN = "PLAN"              # 模特与生成方案
     IMAGE_SET = "IMAGE_SET"    # 图片集
     COPY = "COPY"              # 文案
     DRAFT = "DRAFT"            # 上架草稿
@@ -62,16 +64,20 @@ class FlowStep(StrEnum):
 #: 写成常量而不是靠字典顺序:下一步的正确性完全依赖这个顺序,
 #: 它必须是一个能被测试直接断言的对象。
 STEP_ORDER: tuple[FlowStep, ...] = (
+    FlowStep.SETUP,
     FlowStep.MATERIAL,
     FlowStep.ATTRIBUTE,
+    FlowStep.PLAN,
     FlowStep.IMAGE_SET,
     FlowStep.COPY,
     FlowStep.DRAFT,
 )
 
 STEP_LABELS: Mapping[FlowStep, str] = {
+    FlowStep.SETUP: "建档",
     FlowStep.MATERIAL: "素材",
     FlowStep.ATTRIBUTE: "属性",
+    FlowStep.PLAN: "方案",
     FlowStep.IMAGE_SET: "图片集",
     FlowStep.COPY: "文案",
     FlowStep.DRAFT: "草稿",
@@ -119,7 +125,44 @@ STATE_PROGRESS: Mapping[StepState, float] = {
     StepState.DONE: 1.0,
 }
 
-STEP_WEIGHT = 20.0  # 5 步 × 20 = 100
+#: 每一步在完成度里占几分。**合计必须是 100**,由 batch26 的守卫钉着。
+#:
+#: 原来这里是一个常量 `STEP_WEIGHT = 20.0`,注释写着「5 步 × 20 = 100」——
+#: 而那句话是**算术,不是断言**:往 `STEP_ORDER` 里加一步,合计就变成 120,
+#: 而没有任何地方会红(batch26 实测:给 `FlowStep` 加两个成员,后端一条不红)。
+#:
+#: 换成表还有第二个作用:七步增维(阶段 6 批次 6-2)时,完成度口径的变化会
+#: **集中在这一张表上**,而不是散在一个常量和一句注释里。改口径的人能指着
+#: 它说「我把哪一步的分挪到了哪里」。
+#:
+#: ## 七步的分配(A45-batch27,阶段 6 批次 6-2)——**这是一次口径变更**
+#:
+#: 五步等权(每步 20)变成下面这张表。同一件商品的完成度会变:
+#: 素材与属性都做完的那一件,从 40% 变成 45%。
+#:
+#: **这不是显示细节。** 完成度驱动列表排序、批量筛选与审阅队列的顺序,
+#: 运营按它找"快好了的那些" —— 口径一变,他昨天记住的那批商品今天不在
+#: 原来的位置。口径变更公告见 `docs/STATUS.md` 的 batch27 一节。
+#:
+#: 分配理由(权重是"这一步有多少人要做的事",不是算术):
+#:
+#:     SETUP      5   建一次,几乎不出错;它在流程里的作用是**排除**
+#:                    (归属没建好,后面每一步的作用域都是错的)
+#:     MATERIAL  15   要人去拍/传,但一个颜色几张图就够
+#:     ATTRIBUTE 25   本条链路上人工工作量最大的一步:确认、改冲突、补缺失
+#:     PLAN      10   选一次模特与方案,之后整个 SPU 复用
+#:     IMAGE_SET 20   生成要等、要挑、要批准,而且按颜色重复
+#:     COPY      15   多数情况一次生成通过,改的是措辞
+#:     DRAFT     10   基本自动(build_draft),人只在字段不合格时介入
+STEP_WEIGHTS: Mapping[FlowStep, float] = {
+    FlowStep.SETUP: 5.0,
+    FlowStep.MATERIAL: 15.0,
+    FlowStep.ATTRIBUTE: 25.0,
+    FlowStep.PLAN: 10.0,
+    FlowStep.IMAGE_SET: 20.0,
+    FlowStep.COPY: 15.0,
+    FlowStep.DRAFT: 10.0,
+}
 
 
 class IssueLevel(StrEnum):
@@ -143,6 +186,11 @@ class NextActionCode(StrEnum):
     要不要禁用,而这三件事不能靠解析中文文案来决定。
     """
 
+    #: §4.4 的归属外键没回填:这一行 SKU 说不出自己属于哪个 SPU / 哪个颜色。
+    #:
+    #: **不复用任何素材类动作**:运营要做的是把这一行挂回它的颜色,
+    #: 而不是去传图。挂错之前传的图会绑到错的作用域上,后面每一步跟着错。
+    COMPLETE_SETUP = "COMPLETE_SETUP"            # 补全建档归属
     UPLOAD_MATERIAL = "UPLOAD_MATERIAL"          # 补充素材
     RELEASE_QUARANTINE = "RELEASE_QUARANTINE"    # 处理被隔离的素材
     #: §6.2:素材有了,但角色不是人工确认的,门禁不认。
@@ -175,6 +223,11 @@ class NextActionCode(StrEnum):
     #: **也不复用 `RUN_EXTRACTION`**:那句话直接把他送去花那笔钱。
     #: 与 `CONFIRM_ASSET_ROLE` 同一条理由 —— **说错话比不说话更难查。**
     FILL_ATTRIBUTES = "FILL_ATTRIBUTES"          # 人工填写属性
+    #: 这个颜色还没有生效的生成方案(模特 / 参数)。
+    #:
+    #: **不复用 `BUILD_IMAGE_SET`**:那个按钮会把运营送去编排图片集,
+    #: 而这时候一张生成图都还没有 —— 他会看到一个空列表,然后以为坏了。
+    CHOOSE_PLAN = "CHOOSE_PLAN"                  # 选择模特与生成方案
     BUILD_IMAGE_SET = "BUILD_IMAGE_SET"          # 编排图片集
     FIX_IMAGE_SET = "FIX_IMAGE_SET"              # 修复图片集问题
     APPROVE_IMAGE_SET = "APPROVE_IMAGE_SET"      # 批准图片集
@@ -191,6 +244,7 @@ class NextActionCode(StrEnum):
 
 #: 动作 -> 它属于哪个步骤。前端据此跳标签页。
 ACTION_STEP: Mapping[NextActionCode, FlowStep] = {
+    NextActionCode.COMPLETE_SETUP: FlowStep.SETUP,
     NextActionCode.UPLOAD_MATERIAL: FlowStep.MATERIAL,
     NextActionCode.RELEASE_QUARANTINE: FlowStep.MATERIAL,
     NextActionCode.CONFIRM_ASSET_ROLE: FlowStep.MATERIAL,
@@ -199,6 +253,7 @@ ACTION_STEP: Mapping[NextActionCode, FlowStep] = {
     NextActionCode.RESOLVE_CONFLICT: FlowStep.ATTRIBUTE,
     NextActionCode.CONFIRM_ATTRIBUTES: FlowStep.ATTRIBUTE,
     NextActionCode.FILL_ATTRIBUTES: FlowStep.ATTRIBUTE,
+    NextActionCode.CHOOSE_PLAN: FlowStep.PLAN,
     NextActionCode.BUILD_IMAGE_SET: FlowStep.IMAGE_SET,
     NextActionCode.FIX_IMAGE_SET: FlowStep.IMAGE_SET,
     NextActionCode.APPROVE_IMAGE_SET: FlowStep.IMAGE_SET,
@@ -214,6 +269,7 @@ ACTION_STEP: Mapping[NextActionCode, FlowStep] = {
 }
 
 ACTION_LABELS: Mapping[NextActionCode, str] = {
+    NextActionCode.COMPLETE_SETUP: "补全建档归属",
     NextActionCode.UPLOAD_MATERIAL: "补充素材",
     NextActionCode.RELEASE_QUARANTINE: "处理隔离素材",
     NextActionCode.CONFIRM_ASSET_ROLE: "确认素材角色",
@@ -222,6 +278,7 @@ ACTION_LABELS: Mapping[NextActionCode, str] = {
     NextActionCode.RESOLVE_CONFLICT: "处理属性冲突",
     NextActionCode.CONFIRM_ATTRIBUTES: "确认属性",
     NextActionCode.FILL_ATTRIBUTES: "人工填写属性",
+    NextActionCode.CHOOSE_PLAN: "选择模特与生成方案",
     NextActionCode.BUILD_IMAGE_SET: "编排图片集",
     NextActionCode.FIX_IMAGE_SET: "修复图片集",
     NextActionCode.APPROVE_IMAGE_SET: "批准图片集",
@@ -529,6 +586,53 @@ class DraftFacts:
 
 
 @dataclass(frozen=True)
+class SetupFacts:
+    """建档层事实(§4.4 的归属外键,阶段 6 批次 6-2)。
+
+    「这一行 SKU 说不说得出自己属于哪个 SPU、哪个颜色」。
+
+    ## 为什么它是一步,而不是别处的一个前置检查
+
+    归属决定**后面每一步的作用域**:素材挂到哪个颜色、事实写在哪一层、
+    图片映射按哪个颜色铺、文案写进哪个槽(0051 之后)。归属没建好而继续
+    往下走,每一步都会算出一个"看起来正常但作用域错了"的结果 ——
+    这正是本仓反复付账的那一类。写成第一步,后面的步骤就有资格说
+    「上一步没完成,我做不了」。
+
+    ## 存量行判 NEEDS_CONFIRM,不判 BLOCKED
+
+    §4.4 的归属外键是阶段 1 的交付,库里仍有没回填的行。判阻断会让一批
+    老商品在向导里一起变红,而运营对着它们能做的事(挂回颜色)恰恰要人来
+    做决定 —— 系统按 `spu` 字符串码反查是 §3.39 明令禁掉的形状(那个码
+    可能已因改名而断开,反查出来的是另一个款)。
+    """
+
+    #: 商品行有没有 `spu_id`。None = 没查
+    has_spu_ref: bool | None = None
+    #: 商品行有没有 `color_variant_id`
+    has_colour_ref: bool | None = None
+    #: 这个 SPU 下已建的颜色数。0 = 只建了 SPU,颜色还没建
+    colour_count: int = 0
+
+
+@dataclass(frozen=True)
+class PlanFacts:
+    """生成方案层事实(§13 阶段 6 的第四步)。
+
+    「这个颜色用什么参数出图」。方案按颜色存,颜色没有自己的那一份时
+    **回落到 SPU 级** —— 这不是这里发明的回落,是 `generation_plans` 上
+    那条 `COALESCE(color_variant_id::text, '')` 唯一索引本来的形状。
+    """
+
+    #: 有没有一份**当前生效**(非 ARCHIVED)的方案。None = 没查
+    has_active_plan: bool | None = None
+    #: 生效的那一份是颜色级还是 SPU 级回落来的。回落不是问题,只是要说清楚
+    plan_is_colour_level: bool = False
+    #: 方案选了模特没有。选了参数没选模特的方案跑不出图
+    has_model: bool = False
+
+
+@dataclass(frozen=True)
 class ProductFlow:
     """一件商品的全部流程事实。service 负责组装,本文件负责判定。"""
 
@@ -538,8 +642,10 @@ class ProductFlow:
     #: 受众。默认空 = 待确认 —— 存量商品(迁移 0030 不回填)全部落在这一档,
     #: 所以它产出的是 NEEDS_CONFIRM 而不是 BLOCKING,理由见 `_evaluate_attribute`
     audience: AudienceFacts = field(default_factory=AudienceFacts)
+    setup: SetupFacts = field(default_factory=SetupFacts)
     material: MaterialFacts = field(default_factory=MaterialFacts)
     attribute: AttributeFacts = field(default_factory=AttributeFacts)
+    plan: PlanFacts = field(default_factory=PlanFacts)
     image_set: ImageSetFacts = field(default_factory=ImageSetFacts)
     copy: CopyFacts = field(default_factory=CopyFacts)
     draft: DraftFacts = field(default_factory=DraftFacts)
@@ -621,6 +727,111 @@ RECOMMENDED_ROLES: tuple[str, ...] = ("PRODUCT_BACK", "DETAIL")
 #: 改了一处之后判定说「平铺图」、按钮说 `FLAT_LAY`,两处都不报错。
 ROLE_LABELS: Mapping[str, str] = gate.ROLE_LABELS
 _role_label = gate.role_label
+
+
+def _evaluate_setup(facts: SetupFacts) -> StepResult:
+    """建档:这一行 SKU 说不说得出自己属于哪个 SPU、哪个颜色(§4.4)。
+
+    三种结果,没有第四种:
+
+        没查        UNKNOWN 在本层不存在(那是颜色子态的取值)—— 这里
+                    `None` 判 NEEDS_CONFIRM,与受众那一档同一个处理:
+                    存量数据的未知要人来解决,而不是系统替他猜
+        缺归属      NEEDS_CONFIRM。**不是 BLOCKED** —— 理由在 `SetupFacts`
+        齐了        DONE
+    """
+    issues: list[Issue] = []
+    if facts.has_spu_ref is False or facts.has_colour_ref is False:
+        missing = []
+        if facts.has_spu_ref is False:
+            missing.append("SPU")
+        if facts.has_colour_ref is False:
+            missing.append("颜色")
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="SETUP_OWNERSHIP_MISSING",
+                message=f"这一行还没挂到{'/'.join(missing)}上",
+                target_step=FlowStep.SETUP,
+                hint="在 SPU 页把这个 SKU 挂回它所属的颜色",
+            )
+        )
+        return StepResult(FlowStep.SETUP, StepState.NEEDS_CONFIRM, tuple(issues))
+
+    if facts.has_spu_ref is None or facts.has_colour_ref is None:
+        # 没查过归属。判 DONE 会让「建档完成」这件事在没有证据时成立,
+        # 而它是后面每一步作用域的前提
+        issues.append(
+            Issue(
+                level=IssueLevel.NEEDS_CONFIRM,
+                code="SETUP_UNVERIFIED",
+                message="建档归属未核对",
+                target_step=FlowStep.SETUP,
+                hint="打开 SPU 页确认这个 SKU 的颜色归属",
+            )
+        )
+        return StepResult(FlowStep.SETUP, StepState.NEEDS_CONFIRM, tuple(issues))
+
+    return StepResult(FlowStep.SETUP, StepState.DONE, ())
+
+
+def _evaluate_plan(facts: PlanFacts, *, upstream_ready: bool) -> StepResult:
+    """生成方案:这个颜色用什么参数、哪个模特出图(§13 阶段 6 第四步)。
+
+    排在属性之后是 §8.2 的顺序要求(受众确认之后模特候选集才是对的),
+    而受众属于属性步 —— 所以这个顺序在步骤序里是结构保证的,
+    不靠调用方记得先做哪个。
+    """
+    if not upstream_ready:
+        return StepResult(
+            FlowStep.PLAN,
+            StepState.BLOCKED,
+            (
+                Issue(
+                    level=IssueLevel.BLOCKING,
+                    code="PLAN_UPSTREAM_NOT_READY",
+                    message="属性还没确认,现在选模特会选错候选集",
+                    target_step=FlowStep.ATTRIBUTE,
+                    hint="先把受众与结构属性确认掉",
+                ),
+            ),
+        )
+
+    if facts.has_active_plan is None:
+        return StepResult(FlowStep.PLAN, StepState.TODO, ())
+
+    if not facts.has_active_plan:
+        return StepResult(
+            FlowStep.PLAN,
+            StepState.TODO,
+            (
+                Issue(
+                    level=IssueLevel.BLOCKING,
+                    code="PLAN_MISSING",
+                    message="这个颜色还没有生成方案",
+                    target_step=FlowStep.PLAN,
+                    hint="选择模特与生成参数",
+                ),
+            ),
+        )
+
+    if not facts.has_model:
+        # 有方案没模特:参数齐了也跑不出图,而任务会一直排在那里
+        return StepResult(
+            FlowStep.PLAN,
+            StepState.NEEDS_CONFIRM,
+            (
+                Issue(
+                    level=IssueLevel.NEEDS_CONFIRM,
+                    code="PLAN_WITHOUT_MODEL",
+                    message="方案里还没有选模特",
+                    target_step=FlowStep.PLAN,
+                    hint="给这个方案指定一个已授权的模特",
+                ),
+            ),
+        )
+
+    return StepResult(FlowStep.PLAN, StepState.DONE, ())
 
 
 def _evaluate_material(facts: MaterialFacts) -> StepResult:
@@ -1362,6 +1573,8 @@ def _decide_next(flow: ProductFlow, steps: Mapping[FlowStep, StepResult]) -> Nex
 
 def evaluate(flow: ProductFlow) -> FlowResult:
     """判定一件商品。**列表页与详情页都调这一个函数。**"""
+    setup = _evaluate_setup(flow.setup)
+
     material = _evaluate_material(flow.material)
     material_ready = material.state in (StepState.DONE, StepState.NEEDS_CONFIRM)
 
@@ -1369,6 +1582,8 @@ def evaluate(flow: ProductFlow) -> FlowResult:
         flow.attribute, material_ready=material_ready, audience=flow.audience
     )
     attribute_ready = attribute.state is StepState.DONE
+
+    plan = _evaluate_plan(flow.plan, upstream_ready=attribute_ready)
 
     image_set = _evaluate_image_set(flow.image_set, upstream_ready=attribute_ready)
     image_set_ready = image_set.state is StepState.DONE
@@ -1381,8 +1596,10 @@ def evaluate(flow: ProductFlow) -> FlowResult:
     )
 
     by_step = {
+        FlowStep.SETUP: setup,
         FlowStep.MATERIAL: material,
         FlowStep.ATTRIBUTE: attribute,
+        FlowStep.PLAN: plan,
         FlowStep.IMAGE_SET: image_set,
         FlowStep.COPY: copy_step,
         FlowStep.DRAFT: draft,
@@ -1391,7 +1608,7 @@ def evaluate(flow: ProductFlow) -> FlowResult:
 
     issues = tuple(i for s in ordered for i in s.issues)
     completion = round(
-        sum(STATE_PROGRESS[s.state] * STEP_WEIGHT for s in ordered)
+        sum(STATE_PROGRESS[s.state] * STEP_WEIGHTS[s.step] for s in ordered)
     )
 
     current = next(

@@ -205,7 +205,7 @@ def _batch_book():
     """两个 SPU 的批量工作簿。openpyxl 缺席时返回 None,由调用方跳过。"""
     from app.channels import generic
     from app.listings import export_writer
-    from tests.pure.test_listing_mapping_export import _draft, _meta, _spec
+    from tests.pure.test_listing_mapping_export import _MAP, _draft, _meta, _spec
 
     try:
         from openpyxl import load_workbook
@@ -214,8 +214,8 @@ def _batch_book():
     import io
 
     spec = _spec()
-    first = generic.map_fields(_draft(), spec)
-    second = generic.map_fields(_draft(spu="SW-002"), spec)
+    first = generic.map_fields(_draft(), spec, image_map=_MAP)
+    second = generic.map_fields(_draft(spu="SW-002"), spec, image_map=_MAP)
     blob = export_writer.to_batch_xlsx(
         [
             export_writer.BatchEntry(spu="SW-001", mapped=first, sku_count=len(first.rows)),
@@ -272,7 +272,7 @@ def test_single_export_shape_is_untouched():
     """单件导出不许因为批量的修法而多出一列 —— 它没有这个问题。"""
     from app.channels import generic
     from app.listings import export_writer
-    from tests.pure.test_listing_mapping_export import _draft, _meta, _spec
+    from tests.pure.test_listing_mapping_export import _MAP, _draft, _meta, _spec
 
     try:
         from openpyxl import load_workbook
@@ -281,7 +281,7 @@ def test_single_export_shape_is_untouched():
     import io
 
     spec = _spec()
-    mapped = generic.map_fields(_draft(), spec)
+    mapped = generic.map_fields(_draft(), spec, image_map=_MAP)
     book = load_workbook(io.BytesIO(export_writer.to_xlsx(mapped, spec, _meta())))
     headers = [c.value for c in book[export_writer.SHEET_SKU][1]]
     assert headers == [f.column_header or f.key for f in spec.row_fields]

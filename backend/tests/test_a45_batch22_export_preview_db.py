@@ -207,7 +207,7 @@ def test_a_single_colour_spu_previews_normally(session):
     product = _product(session, spu, only, "S")
     asset = _asset(session, product, spu, only)
     _approved_image_set(session, spu, [(only, asset)])
-    _approved_copy(session, spu)
+    _approved_copy(session, spu, only)
     session.flush()
 
     wb.build_draft(session, product, actor="batch22")

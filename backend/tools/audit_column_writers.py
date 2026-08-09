@@ -141,8 +141,15 @@ LEDGER: dict[str, str] = {
         "而恒定的版本号让那次改版无法分辨"
     ),
     "ListingDraft.template_checksum": (
-        "还款日:阶段 5。恒为 NULL,于是「模板改过了、草稿要重出」判不出来"
+        "还款日:阶段 6(A45-batch24 重新认领)。恒为 NULL,于是「模板改过了、"
+        "草稿要重出」判不出来。原还款日是阶段 5,到期时**没有还** —— "
+        "理由不是没接线,是没有东西可以校验:这一列存的是 TemplateRef.checksum,"
+        "也就是**平台官方 Excel 模板文件**的指纹,而今天只有我们自己的 generic "
+        "spec(它的版本已经由 spec_version 落着),第一个真实渠道适配器在阶段 6。"
+        "把 YAML 的哈希写进这一列会让它变成另一件东西 —— 列注释仍写着"
+        "「出事时和平台对账」,而值来自我们自己的文件,对不上账的时候没人知道"
     ),
+
     # 迁移 0049 的两列(`ListingDraft.upstream_versions` /
     # `.color_sku_image_map`)**曾经在这里**,是本仓第一次在落列的同一批
     # 就记账的欠账(5-1)。A45-batch20 把 `build_draft` 的写入点接上之后

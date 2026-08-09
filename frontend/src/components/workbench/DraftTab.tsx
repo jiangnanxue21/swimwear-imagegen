@@ -15,7 +15,19 @@
  *
  * 「哪个上游变了、变了哪些字段、需要执行什么动作」。只显示「已过期」三个字
  * 按任务书算未完成,所以 `stale.changes` 逐条展开,旧值新值都摆出来。
+ *
+ * ## 图片预览:这一段在 A45-batch24 才接上(AC-19)
+ *
+ * 后端 5-5 把 `preview.images` 算出来了,类型也在 `api/workbench.ts` 里齐了,
+ * 而**没有任何组件读它** —— 界面上不存在。5-5 的存在理由是运营侧的
+ * (「运营在预览里看到红色有主图、蓝色缺一张」),那一半当时不存在。
+ * 这与 §3.43 点名的那一类同型:算好了,没人看。
+ *
+ * 三档状态分开显示,不合并成「没有图片信息」:UNPROVEN 重新生成草稿就好,
+ * INCOMPATIBLE 是有人换过快照形状 —— 重新生成一百次也不会变好。
+ * 合并成一句话会让运营做错动作。
  */
+
 import { useCallback, useEffect, useState } from 'react'
 import {
   Alert, App, Button, Card, Empty, Input, Space, Table, Tag, Tooltip,
@@ -29,6 +41,8 @@ import {
   STALE_COMPONENT_LABEL,
   workbenchApi,
   type DraftField,
+  type DraftImagePreview,
+  type DraftImageRow,
   type FlowStepResult,
   type ListingDraft,
   type StaleChange,
@@ -39,7 +53,96 @@ import UnsavedGuard from '../UnsavedGuard'
 import { brandVars, fontScale } from '../../theme'
 import BrandTag from '../BrandTag'
 
+/** 图片映射的三档状态。文案由后端给(`note`),这里只给标签与颜色。 */
+const IMAGE_MAP_STATUS: Record<
+  DraftImagePreview['status'],
+  { text: string; color: string }
+> = {
+  READY: { text: '已存映射', color: 'success' },
+  UNPROVEN: { text: '未算过', color: 'warning' },
+  INCOMPATIBLE: { text: '形状不兼容', color: 'error' },
+}
+
+/**
+ * 颜色→SKU→图片。**读的是草稿落库的那一份,不是当前上游。**
+ *
+ * 缺图的行留在表里并标红,不过滤掉:过滤的话运营会读成「这个尺码不在这次
+ * 导出里」,而它在,只是没有图 —— 而没有图的那一行导出后就是一行没有主图
+ * 的商品。这与后端 `DraftImageRow` 的注释是同一条理由,两边都写着是因为
+ * 两边都能单方面改坏它。
+ */
+function ImagePreview({ images }: { images: DraftImagePreview }) {
+  if (images.status !== 'READY') {
+    const meta = IMAGE_MAP_STATUS[images.status]
+    return (
+      <Alert
+        type={images.status === 'INCOMPATIBLE' ? 'error' : 'warning'}
+        showIcon
+        message={
+          <Space size={8}>
+            <span>图片映射{meta.text}</span>
+            <Tag color={meta.color}>{images.status}</Tag>
+          </Space>
+        }
+        description={images.note}
+      />
+    )
+  }
+
+  const columns: ColumnsType<DraftImageRow> = [
+    { title: 'SKU', dataIndex: 'sku', width: 220, render: (v: string) => <span className="mono">{v}</span> },
+    {
+      title: '主图',
+      dataIndex: 'primary',
+      render: (primary: string | null) =>
+        primary ? (
+          <span className="mono" style={{ fontSize: fontScale.meta }}>{primary}</span>
+        ) : (
+          <span style={{ color: brandVars.danger }}>缺主图</span>
+        ),
+    },
+    {
+      title: '附图',
+      dataIndex: 'extras',
+      width: 90,
+      render: (extras: string[]) => <Tag>{extras.length}</Tag>,
+    },
+  ]
+
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      {images.colors.map((colour) => (
+        <div key={colour.variant_id}>
+          <div className="section-label" style={{ marginTop: 4 }}>
+            <Space size={8}>
+              <span>颜色 {colour.variant_code}</span>
+              {colour.missing_count > 0 ? (
+                <Tag color="error">{colour.missing_count} 个 SKU 缺图</Tag>
+              ) : (
+                <Tag color="success">图片齐全</Tag>
+              )}
+            </Space>
+          </div>
+          <Table<DraftImageRow>
+            rowKey="sku"
+            size="small"
+            bordered
+            pagination={false}
+            columns={columns}
+            dataSource={colour.rows}
+            rowClassName={(row) => (row.status === 'MISSING' ? 'attr-conflict-row' : '')}
+          />
+        </div>
+      ))}
+      {images.colors.length === 0 && (
+        <Empty description="这个 SPU 在颜色轴上没有东西要查(没有归属外键的存量行)" />
+      )}
+    </Space>
+  )
+}
+
 const FIELD_STATUS_TAG: Record<DraftField['status'], { text: string; color: string }> = {
+
   OK: { text: '通过', color: 'success' },
   WARNING: { text: '提醒', color: 'warning' },
   ERROR: { text: '不合格', color: 'error' },
@@ -382,6 +485,33 @@ export default function DraftTab({
           <Empty description="这次返回没带预览。点「重新生成」再看一次。" />
         )}
       </Card>
+
+      <Card
+        size="small"
+        title={
+          <Space size={8}>
+            <span>图片预览</span>
+            {preview?.images && (
+              <Tag color={IMAGE_MAP_STATUS[preview.images.status].color}>
+                {IMAGE_MAP_STATUS[preview.images.status].text}
+              </Tag>
+            )}
+          </Space>
+        }
+      >
+        {preview?.images ? (
+          <>
+            <ImagePreview images={preview.images} />
+            <div style={{ color: brandVars.slate, fontSize: fontScale.body, marginTop: 8 }}>
+              这里显示的是**草稿生成那一刻存下来的**那一份映射,导出文件用的就是它。
+              上游换过图而这里没变,说明草稿该重新生成了。
+            </div>
+          </>
+        ) : (
+          <Empty description="这次返回没带图片预览。点「重新生成」再看一次。" />
+        )}
+      </Card>
+
     </Space>
   )
 }

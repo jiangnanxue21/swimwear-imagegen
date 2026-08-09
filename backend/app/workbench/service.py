@@ -31,6 +31,7 @@ from app.core.enums import (
     AuditAction,
     CopyStatus,
     DraftStatus,
+    GenerationPlanStatus,
     ImageSetStatus,
     MediaStatus,
 )
@@ -57,6 +58,7 @@ from app.listings.contracts import (
 )
 from app.media import sample_completeness
 from app.models.attribute import ProductAttributeExtraction
+from app.models.generation_plan import GenerationPlan
 from app.models.listing_copy import ContentPlan, ListingCopy, ListingDraft
 from app.models.listing_image import ListingImageItem, ListingImageSet
 from app.models.media_asset import MediaAsset
@@ -76,7 +78,9 @@ from app.workbench.flow import (
     FlowResult,
     ImageSetFacts,
     MaterialFacts,
+    PlanFacts,
     ProductFlow,
+    SetupFacts,
 )
 from app.workflows import copy_idempotency
 
@@ -135,6 +139,59 @@ def _audience_facts(product: Product) -> AudienceFacts:
     except ValueError:
         return AudienceFacts(audience=None, invalid=True)
     return AudienceFacts(audience=audience.value if audience else None)
+
+
+def _setup_facts(product: Product) -> SetupFacts:
+    """建档:这一行 SKU 说不说得出自己属于哪个 SPU、哪个颜色(§4.4)。
+
+    读的是两个归属外键本身,**不做任何回落**。`variants.variant_id_for()`
+    那条三级回落(外键 → variant_key → 种子)是给"要一个稳定的作用域键"
+    用的,而这一步问的是另一件事:归属**建好了没有**。用回落来回答的话,
+    每一行都答"建好了" —— 而回落到种子的那些恰恰是没建好的那些。
+    """
+    return SetupFacts(
+        has_spu_ref=product.spu_id is not None,
+        has_colour_ref=product.color_variant_id is not None,
+    )
+
+
+def _plan_facts(session: Session, product: Product) -> PlanFacts:
+    """生成方案:这个颜色用什么参数、哪个模特出图。
+
+    颜色级优先、SPU 级回落 —— **这不是这里发明的回落**,是
+    `generation_plans` 上那条 `COALESCE(color_variant_id::text, '')`
+    唯一索引本来的形状(每层当前生效一份)。ARCHIVED 不算生效,
+    与那条索引的 `postgresql_where` 同一条口径。
+    """
+    if product.spu_id is None:
+        # 连 SPU 都没挂上,方案查不了 —— 判"没查"而不是"没有":
+        # 前者让运营去建档步(那是真正卡住的地方),后者会让他去选方案,
+        # 而选了也挂不上
+        return PlanFacts()
+
+    rows = list(
+        session.scalars(
+            select(GenerationPlan).where(
+                GenerationPlan.spu_id == product.spu_id,
+                GenerationPlan.status != GenerationPlanStatus.ARCHIVED.value,
+            )
+        )
+    )
+    colour_level = [
+        r
+        for r in rows
+        if product.color_variant_id is not None
+        and str(r.color_variant_id) == str(product.color_variant_id)
+    ]
+    spu_level = [r for r in rows if r.color_variant_id is None]
+    active = (colour_level or spu_level or [None])[0]
+    if active is None:
+        return PlanFacts(has_active_plan=False)
+    return PlanFacts(
+        has_active_plan=True,
+        plan_is_colour_level=bool(colour_level),
+        has_model=active.model_template_id is not None,
+    )
 
 
 def _material_facts(session: Session, product: Product) -> MaterialFacts:
@@ -335,8 +392,15 @@ def _confirmed_version_ids(
     )
 
 
-def _current_copy(session: Session, spu: str) -> ListingCopy | None:
-    """工作台展示用哪一版文案:同 scope 下版本号最大的一版。"""
+def _current_copy(
+    session: Session, spu: str, color_variant_id: str
+) -> ListingCopy | None:
+    """工作台展示用哪一版文案:同 (scope, 颜色) 下版本号最大的一版。
+
+    颜色是等值过滤,不做回落(迁移 0051):存量行的哨兵 `""` 永远不命中,
+    于是每个颜色在升级后的第一个答案是「还没有文案」—— 宁可多生成一次,
+    也不把 SPU 槽时代那篇可能写着别的颜色的旧文案顶上来。
+    """
     rows = list(
         session.scalars(
             select(ListingCopy).where(
@@ -344,6 +408,7 @@ def _current_copy(session: Session, spu: str) -> ListingCopy | None:
                 ListingCopy.channel == generic.CHANNEL,
                 ListingCopy.site == generic.SITE,
                 ListingCopy.locale == generic.LOCALE,
+                ListingCopy.color_variant_id == color_variant_id,
                 ListingCopy.status != CopyStatus.ARCHIVED.value,
             )
         )
@@ -541,7 +606,14 @@ def _current_draft_data(
         channel=generic.CHANNEL,
         site=generic.SITE,
         locale=generic.LOCALE,
+        # 草稿从**本商品所属颜色**的已批准文案取稿(迁移 0051)。draft 是
+        # SPU 一行、标题却带颜色词 —— 这是文案模板既有的形状;0051 之前
+        # 这里取到的是"全 SPU 最近批准的任何颜色那一版",从哪个 SKU 生成
+        # 草稿都可能拿到别的颜色的标题。现在至少是确定的:草稿构建自哪件
+        # 商品,标题就是那件商品颜色的
+        color_variant_id=variants.variant_id_for(product),
     )
+
     if copy_row is None:
         problems.append(f"没有已批准的 {generic.LOCALE} 文案")
 
@@ -775,15 +847,21 @@ def collect(
 
     confirmed_ids = _confirmed_version_ids(session, product, attr_values)
     image_set = _current_image_set(session, product.spu)
-    copy_row = _current_copy(session, product.spu)
+    # 文案按 (SPU, 颜色) 取(迁移 0051)。列表页与详情页因此对「这一行商品
+    # 的文案」给出同一个答案:它自己颜色的那一版,而不是全 SPU 最近生成的
+    # 任何一版 —— 后者正是多颜色摆动在界面上的样子
+    copy_row = _current_copy(session, product.spu, variants.variant_id_for(product))
     draft_row = _current_draft(session, product.spu)
 
     product_flow = ProductFlow(
         product_id=str(product.id),
         sku=product.sku,
         spu=product.spu,
+        setup=_setup_facts(product),
         audience=_audience_facts(product),
         material=_material_facts(session, product),
+        plan=_plan_facts(session, product),
+
         attribute=_attribute_facts(session, product, attr_values),
         image_set=_image_set_facts(session, image_set),
         copy=_copy_facts(session, copy_row, confirmed_ids),
@@ -884,9 +962,13 @@ def _copy_unit(
     事实版本集走 `_confirmed_version_ids`,与草稿指纹、内容计划读的是
     **同一份取数** —— 另查一次就等于给「这次用的是哪些事实」造第二个答案。
 
-    `color_variant_id` 今天恒为 None:颜色维文案要等 5-4 的颜色结构化字段。
-    留着这个位置而不是等到那天再加,是因为它进的是**哈希**:
-    那天补上去会让全部存量键失效,而失效表现为一次全量重新生成(全是付费调用)。
+    `color_variant_id` 传商品的变体身份(AC-11 第二句的「SPU + 颜色 +
+    语言」,A45-batch24 启用)。这里原来恒传 None,注释写着「要等 5-4」——
+    5-4 交付之后没人回来接,而事实版本集里**本来就带着**该颜色的
+    `primary_color` 版本:键随颜色变、存储却是 SPU 一个槽,于是多颜色
+    SPU 在颜色轴上来回点生成,每次都判「不命中 → 付费」,两个颜色的
+    文案还互相把对方挤成历史(§3.54 / F-6)。显式轴与事实集从此**双源
+    同向**:哪一个被单独改坏,键仍随颜色变,守卫各钉一头。
     """
     return copy_idempotency.unit_for(
         spu=product.spu,
@@ -894,8 +976,9 @@ def _copy_unit(
         site=generic.SITE,
         locale=generic.LOCALE,
         fact_versions=_confirmed_version_ids(session, product, attr_values),
-        color_variant_id=None,
+        color_variant_id=variants.variant_id_for(product),
     )
+
 
 
 def generate_copy(
@@ -925,7 +1008,8 @@ def generate_copy(
     一次调用,不随尺码数量翻倍 —— AC-11 要收口的是"翻倍"那一项。
     """
     unit = _copy_unit(session, product)
-    previous_for_reuse = _current_copy(session, product.spu)
+    colour = variants.variant_id_for(product)
+    previous_for_reuse = _current_copy(session, product.spu, colour)
     verdict = copy_idempotency.decide(
         existing_key=getattr(previous_for_reuse, "idempotency_key", None),
         existing_status=getattr(previous_for_reuse, "status", None),
@@ -952,7 +1036,7 @@ def generate_copy(
     rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
     generator = copy_generator.get_generator()
 
-    previous_row = _current_copy(session, product.spu)
+    previous_row = _current_copy(session, product.spu, colour)
     previous: dict[str, Any] | None = None
     if previous_row is not None:
         previous = {
@@ -991,6 +1075,7 @@ def generate_copy(
         model_name=merged.generator,
         prompt_version=merged.prompt_version,
         idempotency_key=unit.key(),
+        color_variant_id=colour,
         actor=actor,
     )
 
@@ -1040,7 +1125,8 @@ def save_copy_manual(
     plan = _content_plan_or_raise(session, product, actor=actor)
     rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
 
-    previous_row = _current_copy(session, product.spu)
+    colour = variants.variant_id_for(product)
+    previous_row = _current_copy(session, product.spu, colour)
     base = {
         "title": previous_row.title if previous_row else "",
         "bullet_points": list(previous_row.bullet_points or []) if previous_row else [],
@@ -1063,6 +1149,7 @@ def save_copy_manual(
         rules=rules,
         model_name="manual-edit",
         prompt_version=None,
+        color_variant_id=colour,
         actor=actor,
     )
 
@@ -1110,15 +1197,16 @@ def build_draft(
             http_status=409,
         )
 
-    # data.category_id 刚在 _current_draft_data 里从商品派生(阶段 0 修复);
-    # spec 与草稿行必须用**同一个**派生结果,不再各取一次常量
-    spec = generic.field_spec(category_id=data.category_id)
-    mapped = generic.map_fields(data, spec)
-
     # ---- 颜色维快照与 READY 门禁(§4.10 / §6.7 / AC-18,A45-batch20)----
     #
     # 两列与门禁**共用同一次取数**:检查用的颜色集和构建用的颜色集只要
     # 有一次不同源,就会凭空造出「这个 SKU 不在映射里」,而两边都不报错。
+    #
+    # **这一段必须排在 `map_fields` 之前**(A45-batch24 / AC-19):行级图片
+    # 字段现在从这份映射翻译,而不是自己去图片集里挑。顺序反过来的话
+    # 映射还没算出来,于是又要给映射层留一个"没有映射时照旧自己挑"的
+    # 后门 —— 那正是这次要拆掉的东西。一次计算、两个消费者(落库那一列
+    # 给预览,`mapped_payload` 给导出),两边追溯到的是同一次挑选。
     inputs = upstream_collect.collect(
         session, product, canonical=data.product, image_set_row=image_set_row
     )
@@ -1130,7 +1218,14 @@ def build_draft(
             required_angles=inputs.required_angles,
         ),
     )
+
+    # data.category_id 刚在 _current_draft_data 里从商品派生(阶段 0 修复);
+    # spec 与草稿行必须用**同一个**派生结果,不再各取一次常量
+    spec = generic.field_spec(category_id=data.category_id)
+    mapped = generic.map_fields(data, spec, image_map=color_sku_image_map)
+
     violations = [
+
         *generic.validate(mapped, spec),
         *generic.image_count_check(mapped, minimum=1),
         *_color_ready_violations(color_sku_image_map, inputs),

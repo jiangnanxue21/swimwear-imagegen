@@ -90,7 +90,12 @@ const TONE_COLOR: Record<Tone, string> = {
  * `DONE` 不在这里:它是"已导出、无待办",不是待办。
  */
 const SECONDARY_ACTIONS: NextActionCode[] = [
+  // 建档与方案(阶段 6 的第一、四步,A45-batch27)。放在最前:它们排在
+  // 流程最前面,而"整整一步对运营是隐形的"正是这张表的守卫要防的事
+  'COMPLETE_SETUP',
+  'CHOOSE_PLAN',
   'UPLOAD_MATERIAL',
+
   'RELEASE_QUARANTINE',
   'CONFIRM_ASSET_ROLE',
   'RUN_EXTRACTION',

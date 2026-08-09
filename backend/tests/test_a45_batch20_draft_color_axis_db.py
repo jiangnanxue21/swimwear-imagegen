@@ -160,26 +160,38 @@ def _approved_image_set(session, spu: Spu, per_colour) -> ListingImageSet:
     return image_set
 
 
-def _approved_copy(session, spu: Spu) -> ListingCopy:
+def _approved_copy(session, spu: Spu, *colours: ColorVariant) -> list[ListingCopy]:
+    """给点名的每个颜色各建一版已批准文案(迁移 0051)。
+
+    0051 之前这里只建一行:文案是 SPU 一个槽,谁来取都取到它。现在
+    `latest_approved` 按颜色等值过滤,一个只有 SPU 槽的存量行**永远不命中**
+    —— 于是草稿会卡在「没有已批准的 en 文案」。那正是这次改动想要的语义
+    (每个颜色的文案是各自的东西),所以夹具跟着按颜色建,而不是给
+    查询加一条回落。
+    """
     plan = ContentPlan(spu=spu.spu_code, facts={}, selling_points=[], forbidden_claims=[])
     session.add(plan)
     session.flush()
-    row = ListingCopy(
-        spu=spu.spu_code,
-        channel=generic.CHANNEL,
-        site=generic.SITE,
-        locale=generic.LOCALE,
-        version=1,
-        content_plan_id=plan.id,
-        status=CopyStatus.APPROVED.value,
-        title="Test swimwear",
-        bullet_points=["a", "b"],
-        description="d",
-        keywords=["k"],
-    )
-    session.add(row)
+    rows = []
+    for colour in colours:
+        row = ListingCopy(
+            spu=spu.spu_code,
+            channel=generic.CHANNEL,
+            site=generic.SITE,
+            locale=generic.LOCALE,
+            color_variant_id=str(colour.id),
+            version=1,
+            content_plan_id=plan.id,
+            status=CopyStatus.APPROVED.value,
+            title="Test swimwear",
+            bullet_points=["a", "b"],
+            description="d",
+            keywords=["k"],
+        )
+        session.add(row)
+        rows.append(row)
     session.flush()
-    return row
+    return rows
 
 
 def _ready_two_colour_spu(session, *, second_status=SellableStatus.ACTIVE.value):
@@ -199,8 +211,9 @@ def _ready_two_colour_spu(session, *, second_status=SellableStatus.ACTIVE.value)
         for variant in (red, blue)
     ]
     _approved_image_set(session, spu, per_colour)
-    _approved_copy(session, spu)
+    _approved_copy(session, spu, red, blue)
     return spu, red, blue, products
+
 
 
 def _colour_problems(row) -> list[str]:
@@ -479,7 +492,7 @@ def test_a_single_colour_spu_is_not_blocked_by_the_colour_axis(session):
     product = _product(session, spu, only, "S")
     asset = _asset(session, product, spu, only)
     _approved_image_set(session, spu, [(only, asset)])
-    _approved_copy(session, spu)
+    _approved_copy(session, spu, only)
     session.flush()
 
     row = wb.build_draft(session, product, actor="batch20")
@@ -507,7 +520,7 @@ def test_a_product_without_the_ownership_fk_gets_no_colour_axis(session):
     product = _product(session, spu, only, "S")
     asset = _asset(session, product, spu, only)
     _approved_image_set(session, spu, [(only, asset)])
-    _approved_copy(session, spu)
+    _approved_copy(session, spu, only)
     product.spu_id = None  # 未回填的存量行
     session.flush()
 

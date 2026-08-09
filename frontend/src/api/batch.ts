@@ -91,7 +91,10 @@ export const BATCH_JOB_STATUS_LABEL: Record<
  * 契约测试能立刻指出来 —— 那种情况下界面会显示英文常量,而没人会立刻发现。
  */
 export const BATCH_ERROR_LABEL: Record<string, string> = {
+  OWNERSHIP_MISSING: '没挂到 SPU / 颜色上',
+  NO_ACTIVE_PLAN: '还没选生成方案',
   PRECHECK_MISMATCH: '当前不该做这个动作',
+
   SAME_SPU_DEDUPED: '同 SPU 已有一件在执行',
   ALREADY_EXPORTED: '已导出且无过期',
   NO_USABLE_MATERIAL: '没有可用素材',

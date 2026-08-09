@@ -68,24 +68,34 @@ class ContentPlan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class ListingCopy(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """某个 (渠道, 站点, 语言) 的文案(§8.3)。
 
-    键是 `(spu, channel, site, locale, version)`。v1 只按 locale 分版本 ——
-    那样 SHEIN 和 Mercado Livre 的英文标题会互相覆盖,而两家的长度上限、
-    是否允许品牌词、bullet 条数完全不同。
+    键是 `(spu, channel, site, locale, color_variant_id, version)`。
+    v1 只按 locale 分版本 —— 那样 SHEIN 和 Mercado Livre 的英文标题会互相
+    覆盖,而两家的长度上限、是否允许品牌词、bullet 条数完全不同。
+    颜色维是 A45-batch24 加的(迁移 0051):文案按设计就是颜色相关的
+    (标题模板第一段是颜色,`REQUIRED_FACTS` 要求 `primary_color` 有 claim),
+    而存储原来是 SPU 一个槽 —— 多颜色 SPU 在颜色轴上来回点生成,
+    每次都判「键不等 → 重新付费」,且两个颜色的文案互相把对方挤成历史。
+    键与内容的作用域必须一致,取哪一侧对齐由 AC-11 第二句定死:
+    「颜色维文案若启用,幂等粒度为 SPU + 颜色 + 语言」。证据链见 §3.54。
     """
 
     __tablename__ = "listing_copies"
     __table_args__ = (
         UniqueConstraint(
-            "spu", "channel", "site", "locale", "version",
+            "spu", "channel", "site", "locale", "color_variant_id", "version",
             name="uq_listing_copies_version",
         ),
-        Index("ix_listing_copies_lookup", "spu", "channel", "site", "locale", "status"),
+        Index(
+            "ix_listing_copies_lookup",
+            "spu", "channel", "site", "locale", "color_variant_id", "status",
+        ),
         # 复用查询按 scope + 键找最新一版。上面那条索引的列序里没有键,
         # 于是复用检查会退化成按 scope 全扫再逐行比 —— 一个 SPU 的文案版本
         # 不多,今天扫得动,而它会随重生成次数无声增长
         Index(
             "ix_listing_copies_idempotency",
-            "spu", "channel", "site", "locale", "idempotency_key",
+            "spu", "channel", "site", "locale", "color_variant_id",
+            "idempotency_key",
         ),
     )
 
@@ -95,6 +105,23 @@ class ListingCopy(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: 'ANY' 表示该渠道通用。
     #: 用哨兵值而不是 NULL:这两列进唯一键,而 PostgreSQL 把 NULL 当成互不相等
     site: Mapped[str] = mapped_column(String(32), nullable=False, default="ANY")
+    #: 这一版文案属于哪个**颜色**(§4.9 / AC-11 第二句,迁移 0051)。
+    #:
+    #: 存的是变体**身份串**(`listings/variants.variant_id_for()` 的产出,
+    #: 与属性 owner_id、`color_sku_image_map` 的键同一份定义),**不是外键**:
+    #: 身份的三级回落(外键 → variant_key → 种子)只有那一处定义,
+    #: 在这里再立一条 UUID 外键等于给「变体口径只有一份定义」开第二个口。
+    #:
+    #: **哨兵 `""`,不用 NULL** —— 与 `site` 的 'ANY' 同一条理由:这一列进
+    #: 唯一键,而 PostgreSQL 把 NULL 当成互不相等,版本号的唯一性会在
+    #: NULL 槽上失效。`""` 的含义是「迁移 0051 之前建的版本,颜色维未知」:
+    #: 按颜色查(`_current_copy` / `latest_approved`)时它**永远不命中**,
+    #: 也就是存量文案一律判「这个颜色还没有文案」—— fail closed,
+    #: 与 0050 对 NULL 键判 GENERATE 同向(§3.1:系统尚未正式使用,
+    #: 没有存量数据要迁,所以迁移不做回填)。
+    color_variant_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default=""
+    )
     category_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     locale: Mapped[str] = mapped_column(String(16), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

@@ -748,11 +748,20 @@ def test_the_decision_layer_has_production_callers():
     #
     # 名单本身不是成绩,它是"谁在依赖这一层"的清单:多一个消费者就多一处
     # 会被 schema 版本变化波及的地方,而那正是升版时要逐个看的东西。
-    assert hits == ["export_preview.py", "service.py", "upstream_collect.py"], (
-        f"判定层的引用方变成了 {hits} —— 今天应当是三处:"
+    assert hits == [
+        "color_rollup.py",
+        "export_preview.py",
+        "service.py",
+        "upstream_collect.py",
+    ], (
+        f"判定层的引用方变成了 {hits} —— 今天应当是四处:"
         "`workbench/service.py`(读写)、`workbench/upstream_collect.py`(取数)、"
-        "`listings/export_preview.py`(只读形状版本)"
+        "`listings/export_preview.py`(只读形状版本)、"
+        "`workbench/color_rollup.py`(阶段 6 的向导聚合,batch28 加的)。"
+        "第四处读同一个 builder 是**刻意的**:向导上的「缺主图」与导出预览上的"
+        "必须是同一条口径 —— 各算一次的表现就是 §3.54 记的 AC-19"
     )
+
 
     src = (BACKEND_ROOT / "app" / "workbench" / "service.py").read_text(encoding="utf-8")
     for func, needle in (
