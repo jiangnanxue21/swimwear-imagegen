@@ -306,12 +306,14 @@ export interface Task {
   external_task_id: string | null
   idempotency_key: string
   base_seed: number | null
+  prompt: string | null
   prompt_version: string
   created_at: string
   started_at: string | null
   finished_at: string | null
   can_cancel: boolean
   can_retry: boolean
+  can_delete: boolean
 }
 
 export interface Attempt {
@@ -351,6 +353,9 @@ export interface Candidate {
 export interface TaskDetail extends Task {
   attempts: Attempt[]
   candidates: Candidate[]
+  dispatch_status: string | null
+  dispatch_attempts: number
+  dispatch_error: string | null
 }
 
 export interface Provider {

@@ -139,6 +139,7 @@ class TaskOut(BaseModel):
     external_task_id: str | None
     idempotency_key: str
     base_seed: int | None
+    prompt: str | None
     prompt_version: str
     created_at: datetime
     started_at: datetime | None
@@ -146,11 +147,16 @@ class TaskOut(BaseModel):
     #: 该状态下允许的操作,前端据此决定按钮可用性
     can_cancel: bool = False
     can_retry: bool = False
+    #: 只允许删除从未进入 Provider 调用阶段、随后被取消的空任务。
+    can_delete: bool = False
 
 
 class TaskDetailOut(TaskOut):
     attempts: list[AttemptOut] = Field(default_factory=list)
     candidates: list[CandidateOut] = Field(default_factory=list)
+    dispatch_status: str | None = None
+    dispatch_attempts: int = 0
+    dispatch_error: str | None = None
 
 
 class TaskCreateResult(BaseModel):

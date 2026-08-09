@@ -95,8 +95,8 @@ export default function ProductFormModal({
   return (
     <Modal
       open={open}
-      title={editing ? `编辑 ${product?.sku}` : '新增商品'}
-      okText={editing ? '保存修改' : '创建商品'}
+      title={editing ? `编辑 ${product?.sku}` : '向已有款式添加 SKU'}
+      okText={editing ? '保存修改' : '添加 SKU'}
       cancelText="取消"
       confirmLoading={confirmLoading}
       onCancel={onCancel}

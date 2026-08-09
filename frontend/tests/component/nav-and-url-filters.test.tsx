@@ -64,17 +64,14 @@ describe('侧栏导航', () => {
     expect(new Set(labels).size).toBe(labels.length)
   })
 
-  it('「系统管理」是唯一一个 adminOnly 的组，运营看不到它里面的任何一页', () => {
-    const adminGroups = NAV.filter((g) => g.adminOnly)
-    expect(adminGroups.map((g) => g.label)).toEqual(['系统管理'])
+  it('「系统管理」不按账号隐藏，所有设置入口都可以被发现', () => {
+    const system = NAV.find((g) => g.label === '系统管理')
+    const visible = NAV.flatMap((g) => g.items.map((i) => i.key))
 
-    // 运营视角 = AppLayout 里那一行 `groups.filter(g => !g.adminOnly || isAdmin)`
-    const operatorVisible = NAV.filter((g) => !g.adminOnly).flatMap((g) =>
-      g.items.map((i) => i.key),
-    )
-
-    for (const guarded of ['/settings', '/providers', '/prompts', '/audit', '/system', '/dashboard']) {
-      expect(operatorVisible).not.toContain(guarded)
+    expect(system).toBeDefined()
+    expect(NAV.some((g) => 'adminOnly' in g)).toBe(false)
+    for (const entry of ['/settings', '/providers', '/prompts', '/audit', '/system', '/dashboard']) {
+      expect(visible).toContain(entry)
     }
   })
 

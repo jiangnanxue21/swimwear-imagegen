@@ -630,6 +630,54 @@ def cancel_task(session: Session, task_id: UUID, *, actor: str) -> GenerationTas
     return task
 
 
+def can_delete_unstarted(task: GenerationTask) -> bool:
+    """只有确认没有进入 Provider 阶段的已取消空任务才允许清理。"""
+    return (
+        task.status == TaskStatus.CANCELLED.value
+        and task.current_round == 0
+        and not task.external_task_id
+    )
+
+
+def delete_unstarted_task(session: Session, task_id: UUID, *, actor: str) -> None:
+    """删除未执行任务；任何 Provider 调用痕迹都会把删除挡下。
+
+    已执行任务是费用、错误和人工审核的证据，不能当普通 CRUD 行物理删除。
+    """
+    task = get_task(session, task_id, for_update=True)
+    if not can_delete_unstarted(task):
+        raise ValidationError(
+            "只有在 Provider 调用前取消的任务可以删除；已执行任务必须保留用于费用与错误追踪",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    attempt_count = session.scalar(
+        select(func.count())
+        .select_from(GenerationAttempt)
+        .where(GenerationAttempt.task_id == task.id)
+    ) or 0
+    if attempt_count:
+        raise ValidationError(
+            "任务已有 Provider 调用记录，不能删除",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.DELETE,
+        entity_type="GenerationTask",
+        entity_id=task.id,
+        payload={
+            "reason": "cancelled_before_provider_call",
+            "product_id": task.product_id,
+            "provider": task.provider,
+        },
+    )
+    session.delete(task)
+
+
 def can_resume_formatting(session: Session, task: GenerationTask) -> bool:
     """判断这次失败是不是"图已经选好了,只是转换那步崩了"。
 

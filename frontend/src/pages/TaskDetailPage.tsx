@@ -303,6 +303,42 @@ export default function TaskDetailPage() {
         />
       )}
 
+      {(task.status === 'CREATED' || task.status === 'QUEUED') && task.attempts.length === 0 && (
+        <Alert
+          type={task.dispatch_status === 'ABANDONED' ? 'error' : 'info'}
+          showIcon
+          message={
+            task.dispatch_status === 'DISPATCHED'
+              ? task.status === 'CREATED'
+                ? '消息已进入 Redis，但还没有 Celery worker 领取'
+                : '消息已进入 Redis，正在等待 Celery worker 领取'
+              : task.dispatch_status === 'PENDING'
+                ? '消息正在等待投递到 Redis'
+                : task.dispatch_status === 'ABANDONED'
+                  ? '消息投递已放弃，需要处理 Redis 或 worker 故障'
+                  : '任务正在等待后台执行'
+          }
+          description={(
+            <Space direction="vertical" size={2}>
+              <span>FastAPI 窗口只记录 HTTP；真正的 FASHN 请求与报错会出现在 Celery worker 窗口。</span>
+              <span className="mono">
+                Windows 启动：python -m celery -A app.tasks.celery_app:celery_app worker -l info -P solo
+              </span>
+              {task.dispatch_error && <span>最近一次派发错误：{task.dispatch_error}</span>}
+            </Space>
+          )}
+        />
+      )}
+
+      {task.status === 'CANCELLED' && task.attempts.length === 0 && (
+        <Alert
+          type="info"
+          showIcon
+          message="任务在调用 Provider 前已经取消"
+          description="因此下面没有 FASHN 请求记录或 Provider 报错；这类未执行任务可以从任务列表删除。"
+        />
+      )}
+
       {task.status === 'SCORING' && (
         <Alert type="info" showIcon message="候选图已生成,正在评分与分档" />
       )}
@@ -337,6 +373,9 @@ export default function TaskDetailPage() {
           <Descriptions.Item label="每轮候选">{task.candidate_count}</Descriptions.Item>
           <Descriptions.Item label="外部任务 ID" span={2}>
             <span className="mono">{task.external_task_id ?? '—'}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="队列派发">
+            {task.dispatch_status ?? '—'}（尝试 {task.dispatch_attempts} 次）
           </Descriptions.Item>
           <Descriptions.Item label="基础 seed">{task.base_seed ?? '默认'}</Descriptions.Item>
           <Descriptions.Item label="幂等键" span={3}>

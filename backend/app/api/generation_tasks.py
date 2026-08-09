@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor, db_session, require_operator
@@ -49,6 +49,7 @@ def _task_out(task) -> TaskOut:
     out = TaskOut.model_validate(task)
     out.can_cancel = sm.can_cancel(task.status)
     out.can_retry = sm.can_retry(task.status)
+    out.can_delete = gs.can_delete_unstarted(task)
     return out
 
 
@@ -149,6 +150,11 @@ def get_task(task_id: UUID, session: Session = Depends(db_session)) -> TaskDetai
     detail.candidates = [
         _candidate_out(c, storage) for c in gs.list_candidates(session, task_id)
     ]
+    dispatch = dispatch_service.latest_for_task(session, task_id)
+    if dispatch is not None:
+        detail.dispatch_status = dispatch.status
+        detail.dispatch_attempts = dispatch.attempts
+        detail.dispatch_error = dispatch.last_error
     return detail
 
 
@@ -159,6 +165,19 @@ def cancel_task(
     task = gs.cancel_task(session, task_id, actor=current_actor(request))
     session.commit()
     return _task_out(task)
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_operator)],
+)
+def delete_task(
+    task_id: UUID, request: Request, session: Session = Depends(db_session)
+) -> Response:
+    gs.delete_unstarted_task(session, task_id, actor=current_actor(request))
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{task_id}/retry", response_model=TaskOut, dependencies=[Depends(require_operator)])

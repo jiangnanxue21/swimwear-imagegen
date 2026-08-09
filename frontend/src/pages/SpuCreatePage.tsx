@@ -83,7 +83,7 @@ const emptyColour = (): ColorVariantDraft => ({
 export default function SpuCreatePage() {
   const { message } = App.useApp()
   const navigate = useNavigate()
-  useDocumentTitle('三步建档')
+  useDocumentTitle('新建商品款式')
 
   const [current, setCurrent] = useState(0)
   const [basics, setBasics] = useState<Basics>(EMPTY_BASICS)
@@ -344,8 +344,8 @@ export default function SpuCreatePage() {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <UnsavedGuard dirty={dirty} what="建档表单" />
       <PageHeader
-        title="三步建档"
-        subtitle="先立身份与颜色,视觉属性由识别补 —— 不填也能建档"
+        title="新建商品款式"
+        subtitle="按三步建立 SPU、颜色和首批 SKU；视觉属性可以稍后识别补全"
       />
 
       <Steps

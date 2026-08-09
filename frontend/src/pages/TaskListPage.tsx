@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { App, Button, Card, Empty, Select, Space, Table, Tag, Tooltip } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { generationApi, SUBMIT_RESULT_UNKNOWN } from '../api/generation'
+import {
+  generationApi, SUBMIT_RESULT_UNKNOWN, type TaskCreatePayload,
+} from '../api/generation'
 import { isResultUnknown, readError, readWriteError } from '../api/client'
 import {
   MODE_LABEL, TASK_STATUS_LABEL, listPollInterval, type Task, type TaskStatus,
@@ -26,7 +28,7 @@ const TASK_SORT_KEYS = ['created_at', 'provider', 'current_round', 'status'] as 
 export default function TaskListPage() {
   useDocumentTitle('生成任务')
   const navigate = useNavigate()
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const queryClient = useQueryClient()
   //: 正在走强制重试确认的那一行。整行留着而不是只留 id ——
   //: 弹窗要显示 provider 与外部任务 ID,那是运营去后台核对的全部依据
@@ -46,6 +48,23 @@ export default function TaskListPage() {
   })
   const { status, page } = filters.values
   const [open, setOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState<Task | null>(null)
+  const editInitialValues = useMemo<Partial<TaskCreatePayload> | undefined>(
+    () => editTarget
+      ? {
+          product_id: editTarget.product_id,
+          mode: editTarget.mode,
+          provider: editTarget.provider,
+          routing_mode: editTarget.routing_mode,
+          model_template_id: editTarget.model_template_id,
+          candidate_count: editTarget.candidate_count,
+          max_rounds: editTarget.max_rounds,
+          base_seed: editTarget.base_seed,
+          prompt: editTarget.prompt ?? undefined,
+        }
+      : undefined,
+    [editTarget],
+  )
 
   // 服务端排序。这张表默认按创建时间倒序,但排障时最常要的是「按更新时间」——
   // updated_at 同时是 worker 心跳(reap_stalled 靠它判断进程还活着),
@@ -73,6 +92,7 @@ export default function TaskListPage() {
     mutationFn: generationApi.create,
     onSuccess: (result) => {
       setOpen(false)
+      setEditTarget(null)
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       if (result.deduplicated) {
         message.info('相同参数的任务已存在,已为你打开它')
@@ -114,6 +134,15 @@ export default function TaskListPage() {
     onSuccess: (_data, vars) => {
       message.success(vars.force ? '已在对账后强制重试' : '已重新排队')
       setForceTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    },
+    onError: onWriteError,
+  })
+
+  const remove = useMutation({
+    mutationFn: generationApi.remove,
+    onSuccess: () => {
+      message.success('未执行任务已删除')
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
     },
     onError: onWriteError,
@@ -183,7 +212,7 @@ export default function TaskListPage() {
     },
     {
       title: '操作',
-      width: 170,
+      width: 330,
       render: (_, row) => {
         // FE-TASK-LIST-03:loading 绑到**这一行**。用页面级 isPending 的话,
         // 点一行的重试会让整列按钮一起转圈,运营看不出自己点的是哪一条
@@ -192,6 +221,13 @@ export default function TaskListPage() {
         const submitUnknown = row.error_code === SUBMIT_RESULT_UNKNOWN
         return (
           <Space size={4}>
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => setEditTarget(row)}
+            >
+              修改参数
+            </Button>
             <Button
               size="small"
               disabled={!row.can_cancel || cancelling}
@@ -224,6 +260,31 @@ export default function TaskListPage() {
                 重试
               </Button>
             )}
+            <Tooltip
+              title={row.can_delete
+                ? '只删除这条尚未调用 Provider 的空任务'
+                : '已有执行痕迹的任务必须保留，用于费用、错误与审核追踪'}
+            >
+              <span>
+                <Button
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={!row.can_delete || (remove.isPending && remove.variables === row.id)}
+                  loading={remove.isPending && remove.variables === row.id}
+                  onClick={() => modal.confirm({
+                    title: '删除这条未执行任务？',
+                    content: '只会删除在 Provider 调用前已经取消的空任务，此操作不可撤销。',
+                    okText: '删除',
+                    okButtonProps: { danger: true },
+                    cancelText: '取消',
+                    onOk: () => remove.mutateAsync(row.id),
+                  })}
+                >
+                  删除
+                </Button>
+              </span>
+            </Tooltip>
           </Space>
         )
       },
@@ -285,9 +346,15 @@ export default function TaskListPage() {
       />
 
       <TaskCreateModal
-        open={open}
+        open={open || Boolean(editTarget)}
+        productId={editTarget?.product_id}
+        initialValues={editInitialValues}
+        title={editTarget ? '修改参数并新建任务' : '创建生成任务'}
         confirmLoading={create.isPending}
-        onCancel={() => setOpen(false)}
+        onCancel={() => {
+          setOpen(false)
+          setEditTarget(null)
+        }}
         onSubmit={(values) => create.mutate(values as never)}
       />
 

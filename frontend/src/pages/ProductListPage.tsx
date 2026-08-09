@@ -1,18 +1,16 @@
-import { useCallback, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  App, Button, Card, Empty, Input, Select, Space, Table, Tag, Upload,
+  Button, Card, Empty, Input, Select, Space, Table, Tag,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ImportOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { productsApi } from '../api/products'
 import { readError } from '../api/client'
-import { useWriteError } from '../hooks/useWriteError'
 import {
   AUDIENCE_LABEL, GARMENT_TYPES, STATUS_LABEL, type Product, type ProductStatus,
 } from '../api/types'
-import ProductFormModal from '../components/ProductFormModal'
 import { AudienceTag } from '../components/AudienceBadge'
 import { useServerSort } from '../hooks/useServerSort'
 import { brandVars } from '../theme'
@@ -20,10 +18,8 @@ import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 export default function ProductListPage() {
-  useDocumentTitle('商品')
+  useDocumentTitle('商品与 SKU')
   const navigate = useNavigate()
-  const { message, modal } = App.useApp()
-  const queryClient = useQueryClient()
 
   const [search, setSearch] = useState('')
   /** 输入框里的字。与已生效的 `search` 分开:敲字不该每个字符打一次接口,
@@ -33,7 +29,6 @@ export default function ProductListPage() {
   const [garmentType, setGarmentType] = useState<string | undefined>()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [formOpen, setFormOpen] = useState(false)
 
   // 服务端排序(不是客户端的 sorter 函数):这张表一页只有 20 行,
   // 在前端排等于对这 20 行排,而运营以为排的是全部命中
@@ -50,61 +45,6 @@ export default function ProductListPage() {
         page,
         page_size: pageSize,
       }),
-  })
-
-  /**
-   * 建商品与导入 CSV 都是写请求(BLOCK-05)。
-   *
-   * 导入尤其要紧:一次导入会建几十上百行。超时后重来一次,已经建成的那些
-   * 会撞 SKU 唯一约束,于是一次**部分成功**的导入被报成一屏错误,
-   * 而运营分不出"哪些是这次撞的、哪些是本来就有的"。先刷新列表看总数。
-   */
-  const refreshProducts = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['products'] })
-  }, [queryClient])
-
-  const onWriteError = useWriteError(refreshProducts)
-
-  const create = useMutation({
-    mutationFn: productsApi.create,
-    onSuccess: (product) => {
-      message.success(`已创建 ${product.sku}`)
-      setFormOpen(false)
-      queryClient.invalidateQueries({ queryKey: ['products'] })
-    },
-    onError: onWriteError,
-  })
-
-  const importCsv = useMutation({
-    mutationFn: productsApi.importCsv,
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['products'] })
-      if (result.failed > 0) {
-        modal.warning({
-          title: `导入完成,${result.failed} 行未通过`,
-          width: 560,
-          content: (
-            <div style={{ maxHeight: 320, overflow: 'auto' }}>
-              <p>
-                新增 {result.created} 个,已存在跳过 {result.skipped_existing} 个。
-              </p>
-              <ul style={{ paddingLeft: 18 }}>
-                {result.errors.map((e, i) => (
-                  <li key={i}>
-                    第 {e.row_number} 行 · {e.field}:{e.message}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ),
-        })
-      } else {
-        message.success(
-          `新增 ${result.created} 个,已存在跳过 ${result.skipped_existing} 个`,
-        )
-      }
-    },
-    onError: onWriteError,
   })
 
   const columns: ColumnsType<Product> = [
@@ -184,7 +124,10 @@ export default function ProductListPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="商品" subtitle="商品主数据:新建、批量导入、改基础信息" />
+      <PageHeader
+        title="商品与 SKU"
+        subtitle="查看和维护已建档的 SKU；新款建档与批量导入从右侧入口开始"
+      />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>
         <Space wrap>
@@ -227,20 +170,11 @@ export default function ProductListPage() {
           <Button icon={<ReloadOutlined />} onClick={() => query.refetch()}>
             刷新
           </Button>
-          <Upload
-            accept=".csv"
-            showUploadList={false}
-            beforeUpload={(file) => {
-              importCsv.mutate(file)
-              return false
-            }}
-          >
-            <Button icon={<ImportOutlined />} loading={importCsv.isPending}>
-              导入 CSV
-            </Button>
-          </Upload>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setFormOpen(true)}>
-            新增商品
+          <Button icon={<ImportOutlined />} onClick={() => navigate('/workbench-import')}>
+            批量导入 SKU
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/spus/new')}>
+            新建商品款式
           </Button>
         </Space>
       </Card>
@@ -260,7 +194,7 @@ export default function ProductListPage() {
               description={
                 query.isError
                   ? readError(query.error)
-                  : '还没有商品。导入 sample-data/products.csv 就能看到 10 个示例款式。'
+                  : '还没有 SKU。请先新建商品款式，或向已有款式批量导入 SKU。'
               }
             />
           ),
@@ -270,7 +204,7 @@ export default function ProductListPage() {
           pageSize,
           total: query.data?.total ?? 0,
           showSizeChanger: true,
-          showTotal: (t) => `共 ${t} 个商品`,
+          showTotal: (t) => `共 ${t} 个 SKU`,
           onChange: (p, ps) => {
             setPage(p)
             setPageSize(ps)
@@ -278,12 +212,6 @@ export default function ProductListPage() {
         }}
       />
 
-      <ProductFormModal
-        open={formOpen}
-        confirmLoading={create.isPending}
-        onCancel={() => setFormOpen(false)}
-        onSubmit={(values) => create.mutate(values)}
-      />
     </Space>
   )
 }

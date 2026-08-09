@@ -13,26 +13,14 @@ import { UploadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { mediaApi, type MediaAsset, type MediaRole } from '../../api/media'
 import { productsApi } from '../../api/products'
-import { colorVariantLabel, type ColorVariant } from '../../api/spus'
+import { colorVariantLabel } from '../../api/spus'
 import { useWriteError } from '../../hooks/useWriteError'
 import ErrorNotice from '../ErrorNotice'
 import { ASSET_TYPE_LABEL, type AssetType } from '../../api/types'
 import { IssueList } from './FlowBits'
 import type { FlowStepResult } from '../../api/workbench'
 import { brandVars } from '../../theme'
-
-/** 与后端 MediaRole 同集合。缺一个角色这里就少一个选项,不影响判定,只影响能不能改 */
-export const MEDIA_ROLE_LABEL: Record<MediaRole, string> = {
-  PRODUCT_FRONT: '正面图',
-  PRODUCT_BACK: '背面图',
-  MODEL_FRONT: '模特正面',
-  MODEL_BACK: '模特背面',
-  DETAIL: '细节图',
-  SIZE_CHART: '尺码表',
-  FLAT_LAY: '平铺图',
-  PACKAGING: '包装图',
-  OTHER: '其它',
-}
+import { GENERIC, groupByColour, MEDIA_ROLE_LABEL } from './materialUtils'
 
 const STATUS_TAG: Record<string, { text: string; color: string }> = {
   PENDING: { text: '待检查', color: 'processing' },
@@ -102,46 +90,6 @@ function AssetCard({
       </figcaption>
     </figure>
   )
-}
-
-/** 「通用图」这一组的键。空串不做键 —— 它和"没选"在 `Select` 里长得一样 */
-const GENERIC = '__generic__'
-
-/**
- * 素材按颜色分组。
- *
- * ## 读 `color_variant_id`,不读 `variant_hint`
- *
- * 第四次拒绝同一件事(前三次在 14-9 / 14-10 与 `run_state.scope_of`)。
- * hint 是模型猜的;拿它分组的表现是界面按 A 色显示的一张图,在完整度门禁
- * 和作用域指纹眼里属于共享作用域 —— 同一张图三处两个答案,而都不报错。
- *
- * ## 归属到已删除/未声明颜色的图不许消失
- *
- * 分组的键取「素材实际带的归属」与「SPU 声明的颜色」的并集,和后端
- * `_material_facts` 那一处同向。只按声明清单分组的话,一张挂在已下架颜色
- * 上的存量图会从页面上凭空消失 —— 而那种行恰恰需要有人处理。
- */
-export function groupByColour(
-  assets: MediaAsset[],
-  variants: ColorVariant[],
-): { key: string; label: string; assets: MediaAsset[] }[] {
-  const label = new Map(variants.map((v) => [v.id, colorVariantLabel(v)]))
-  const buckets = new Map<string, MediaAsset[]>()
-  for (const v of variants) buckets.set(v.id, [])
-  for (const a of assets) {
-    const key = a.color_variant_id ?? GENERIC
-    if (!buckets.has(key)) buckets.set(key, [])
-    buckets.get(key)!.push(a)
-  }
-  const colours = [...buckets.entries()]
-    .filter(([key]) => key !== GENERIC)
-    .map(([key, rows]) => ({ key, label: label.get(key) ?? key, assets: rows }))
-  const generic = buckets.get(GENERIC) ?? []
-  // 通用图排最后:它不属于任何颜色,排在前面会让人以为它是第一个颜色的图
-  return generic.length || colours.length
-    ? [...colours, { key: GENERIC, label: '通用图(不属于某个颜色)', assets: generic }]
-    : []
 }
 
 export default function MaterialTab({

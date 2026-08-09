@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
 import { Alert, Form, InputNumber, Modal, Select, Input, Space, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
-import { modelTemplatesApi, providersApi } from '../api/generation'
+import {
+  modelTemplatesApi, providersApi, type TaskCreatePayload,
+} from '../api/generation'
 import { productsApi } from '../api/products'
 import {
   AUDIENCE_LABEL, MOCK_EVALUATOR_OUTCOMES, MOCK_OUTCOMES, MODE_LABEL,
@@ -12,13 +14,15 @@ import { fontScale } from '../theme'
 interface Props {
   open: boolean
   productId?: string
+  initialValues?: Partial<TaskCreatePayload>
+  title?: string
   confirmLoading?: boolean
   onCancel: () => void
   onSubmit: (values: Record<string, unknown>) => void
 }
 
 export default function TaskCreateModal({
-  open, productId, confirmLoading, onCancel, onSubmit,
+  open, productId, initialValues, title = '创建生成任务', confirmLoading, onCancel, onSubmit,
 }: Props) {
   const [form] = Form.useForm()
 
@@ -70,16 +74,17 @@ export default function TaskCreateModal({
     if (open) {
       form.resetFields()
       form.setFieldsValue({
-        product_id: productId,
         mode: 'virtual_try_on',
         provider: 'mock',
         candidate_count: 4,
         max_rounds: 3,
         mock_outcome: 'success',
         mock_evaluator_outcome: 'auto',
+        ...initialValues,
+        product_id: productId ?? initialValues?.product_id,
       })
     }
-  }, [open, productId, form])
+  }, [open, productId, initialValues, form])
 
   const usable = (providers.data ?? []).filter(isProviderSelectable)
   /*
@@ -95,7 +100,7 @@ export default function TaskCreateModal({
   return (
     <Modal
       open={open}
-      title="创建生成任务"
+      title={title}
       okText="提交任务"
       cancelText="取消"
       confirmLoading={confirmLoading}
@@ -111,7 +116,17 @@ export default function TaskCreateModal({
           if (mock_evaluator_outcome && mock_evaluator_outcome !== 'auto') {
             providerParams.mock_evaluator = { outcome: mock_evaluator_outcome }
           }
-          onSubmit({ ...rest, provider_params: providerParams })
+          /*
+           * 商品详情页会固定 `productId`,因此不渲染商品下拉。未渲染的
+           * Form.Item 不属于 `validateFields()` 的返回值,即使上面调用过
+           * `setFieldsValue({ product_id })` 也不能依赖它被带回来。
+           * 在提交边界显式合并路由里的商品主键,保证两种入口请求形状一致。
+           */
+          onSubmit({
+            ...rest,
+            product_id: productId ?? rest.product_id,
+            provider_params: providerParams,
+          })
         })
       }
     >

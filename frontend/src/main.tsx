@@ -1,14 +1,13 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ConfigProvider, App as AntdApp, theme as antdTheme } from 'antd'
-import zhCN from 'antd/locale/zh_CN'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from 'react-router-dom'
 import { router } from './App'
 import { isAuthError } from './api/client'
-import { applyBrandCssVars, assertSameKeys, buildTheme } from './theme'
-import { ThemeModeProvider, useThemeMode } from './hooks/useThemeMode'
+import { applyBrandCssVars, assertSameKeys } from './theme'
+import { ThemeModeProvider } from './hooks/useThemeMode'
 import ErrorBoundary from './components/ErrorBoundary'
+import ThemedApp from './components/ThemedApp'
 import './styles/global.css'
 
 // 令牌 -> CSS 变量。必须在首帧之前跑,否则 global.css 里的 var() 会先用 fallback
@@ -32,22 +31,6 @@ function initialMode(): 'light' | 'dark' {
 // 两份调色板的键必须一一对应。只在开发环境查:漏键是编码错误,
 // 该在写的时候当场炸,而不是让线上多一次启动期抛错的可能
 if (import.meta.env.DEV) assertSameKeys()
-
-/** 把当前模式接到 antd 上。antd 组件内部的色是算出来的,吃不了 CSS 变量。 */
-function ThemedApp({ children }: { children: React.ReactNode }) {
-  const { mode } = useThemeMode()
-  return (
-    <ConfigProvider
-      locale={zhCN}
-      theme={buildTheme(mode, {
-        defaultAlgorithm: antdTheme.defaultAlgorithm,
-        darkAlgorithm: antdTheme.darkAlgorithm,
-      })}
-    >
-      <AntdApp>{children}</AntdApp>
-    </ConfigProvider>
-  )
-}
 
 /**
  * 评审 P1-5:401 / 403 不重试。

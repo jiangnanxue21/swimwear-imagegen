@@ -72,6 +72,16 @@ def enqueue(
     return row
 
 
+def latest_for_task(session: Session, task_id: UUID) -> TaskDispatch | None:
+    """返回最近一次派发意图,供任务详情解释“消息现在到哪了”。"""
+    return session.scalar(
+        select(TaskDispatch)
+        .where(TaskDispatch.task_id == task_id)
+        .order_by(TaskDispatch.created_at.desc(), TaskDispatch.id.desc())
+        .limit(1)
+    )
+
+
 def mark_dispatched(session: Session, row: TaskDispatch) -> None:
     row.status = DispatchStatus.DISPATCHED.value
     row.dispatched_at = _now()

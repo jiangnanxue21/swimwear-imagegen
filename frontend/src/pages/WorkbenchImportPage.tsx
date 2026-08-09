@@ -11,6 +11,7 @@
  * 改完可以直接重新上传,不用先删两列。
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Descriptions, Empty, Space, Statistic, Steps, Table, Tag,
   Tooltip, Upload,
@@ -45,7 +46,8 @@ export default function WorkbenchImportPage() {
    * 这里是唯一一处例外 —— 唯一的例外就是漂移的起点。
    */
   const { message } = App.useApp()
-  useDocumentTitle('商品导入')
+  const navigate = useNavigate()
+  useDocumentTitle('批量导入 SKU')
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null)
   const [committed, setCommitted] = useState<ImportPreviewResponse | null>(null)
@@ -152,7 +154,19 @@ export default function WorkbenchImportPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="商品导入" subtitle="先看逐行计划,确认无误再落库" />
+      <PageHeader title="批量导入 SKU" subtitle="向已有款式追加 SKU；先预览逐行计划，再确认落库" />
+
+      <Alert
+        type="info"
+        showIcon
+        message="这里不创建新款式"
+        description="新款请先建立 SPU、颜色和首批 SKU；本页只向已有 SPU/颜色批量追加 SKU。"
+        action={(
+          <Button size="small" onClick={() => navigate('/spus/new')}>
+            去新建商品款式
+          </Button>
+        )}
+      />
 
       <Steps
         size="small"

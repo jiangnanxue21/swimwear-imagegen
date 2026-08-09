@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -253,12 +254,26 @@ def create_app() -> FastAPI:
     async def request_context(request: Request, call_next):
         rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
         token = request_id_var.set(rid)
+        started = time.perf_counter()
         try:
             response = await call_next(request)
+            fields = {
+                "method": request.method,
+                # 只记 path,不记 query string。查询参数里可能出现外部 ID 或口令。
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+            }
+            if response.status_code >= 500:
+                logger.error("http request completed", extra={"extra_fields": fields})
+            elif response.status_code >= 400:
+                logger.warning("http request completed", extra={"extra_fields": fields})
+            else:
+                logger.info("http request completed", extra={"extra_fields": fields})
+            response.headers["x-request-id"] = rid
+            return response
         finally:
             request_id_var.reset(token)
-        response.headers["x-request-id"] = rid
-        return response
 
     # ------------------------------------------------------------------
     # CORS **最后 add,因此在最外层**。这不是风格问题。
@@ -330,16 +345,28 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        problems = [
+            {"loc": ".".join(str(x) for x in e.get("loc", [])), "msg": e.get("msg", "")}
+            for e in exc.errors()
+        ]
+        # 只记字段位置与校验结论,不记用户提交的值。值里可能含提示词、URL 或密钥。
+        logger.warning(
+            "request validation failed",
+            extra={
+                "extra_fields": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "fields": problems,
+                }
+            },
+        )
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
                     "code": str(ErrorCode.INPUT_INVALID),
                     "message": "请求参数不合法",
-                    "fields": [
-                        {"loc": ".".join(str(x) for x in e.get("loc", [])), "msg": e.get("msg", "")}
-                        for e in exc.errors()
-                    ],
+                    "fields": problems,
                 }
             },
         )

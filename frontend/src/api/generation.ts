@@ -38,6 +38,10 @@ export const generationApi = {
 
   cancel: async (id: string) => (await apiClient.post<Task>(`/generation-tasks/${id}/cancel`)).data,
 
+  remove: async (id: string) => {
+    await apiClient.delete(`/generation-tasks/${id}`)
+  },
+
   /**
    * 重试。`force` 用来放行「提交结果未知」的任务(后端 `SUBMIT_RESULT_UNKNOWN`)。
    *

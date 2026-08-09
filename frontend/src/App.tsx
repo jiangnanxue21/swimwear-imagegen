@@ -45,9 +45,9 @@ import PublishPage from './pages/PublishPage'
  * 计划 §3.2 给的普通运营清单是九项。落地时多留了三项,理由都是"少了它这条路
  * 就断了",不是"顺手留着":
  *
- *     商品        `/products` 是**唯一**能手工新建商品的地方(ProductFormModal),
- *                 而 Gate A 就是单件 UAT。工作台列表页的空状态也在指着它说
- *                 「先在「商品」页导入」—— 拿掉它,那句话会指向一个不存在的入口
+ *     商品与 SKU  `/products` 是**唯一**能逐个查看和修改 SKU 基础信息的地方。
+ *                 新款统一走 `/spus/new`,批量追加统一走 `/workbench-import`;
+ *                 列表页只提供跳转,不再藏第三套建档入口
  *     生成任务    A9 首页的「生成失败」「运行中任务」两张卡片点进来就是这一页。
  *                 首页有卡片、菜单没入口,运营第二次想看时会找不到路
  *     图片审核    `/reviews` 是候选图评分不过关时的落点(MANUAL_REVIEW)。
@@ -80,11 +80,11 @@ export const NAV: NavGroup[] = [
     label: '商品生产',
     items: [
       { key: '/workbench', label: '商品工作台', icon: <ProfileOutlined /> },
-      { key: '/products', label: '商品', icon: <SkinOutlined /> },
-      { key: '/workbench-import', label: '商品导入', icon: <ImportOutlined /> },
+      { key: '/products', label: '商品与 SKU', icon: <SkinOutlined /> },
+      { key: '/spus/new', label: '新建商品款式', icon: <PlusSquareOutlined /> },
+      { key: '/workbench-import', label: '批量导入 SKU', icon: <ImportOutlined /> },
       { key: '/media', label: '素材管理', icon: <FolderOpenOutlined /> },
       { key: '/tasks', label: '生成任务', icon: <PictureOutlined /> },
-      { key: '/spus/new', label: '三步建档', icon: <PlusSquareOutlined /> },
       { key: '/workbench-spus', label: 'SPU 聚合', icon: <ClusterOutlined /> },
     ],
   },
@@ -105,7 +105,6 @@ export const NAV: NavGroup[] = [
   },
   {
     label: '系统管理',
-    adminOnly: true,
     items: [
       { key: '/dashboard', label: '指标仪表盘', icon: <DashboardOutlined /> },
       { key: '/spend', label: '付费调用花费', icon: <WalletOutlined /> },
@@ -132,10 +131,10 @@ export const NAV: NavGroup[] = [
  * 顺带得到的是布局路由:`AppLayout` 成为父路由,子页面从 `<Outlet />` 出来,
  * 不再靠 `children` 透传。
  *
- * ## 路由**不按角色裁剪**,只有菜单裁剪(A8)
+ * ## 路由和菜单都不按角色裁剪
  *
- * 两个理由:一,新人第一次进来还不是管理员,而他必须能顺着冷启动横幅的链接走到
- * /settings 填口令 —— 前端守卫会把他锁在门外;二,权限边界在后端 require_admin,
+ * 两个理由:一,新人第一次进来还不是管理员,也必须能找到 /settings 填口令;
+ * 二,真正的权限边界在后端 require_admin,
  * 再在这里加一份判断只会多出一处可能与后端不一致的地方。手敲 URL 打开管理页的
  * 后果是页面上一片 403,不是数据泄露。
  */

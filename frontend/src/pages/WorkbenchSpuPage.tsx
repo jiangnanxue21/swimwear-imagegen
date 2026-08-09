@@ -67,7 +67,7 @@ export default function WorkbenchSpuPage() {
               {row.spu}
             </Link>
           ) : (
-            <Tooltip title="这个 SPU 是老建档路径建的,没有主键,配不了生成方案。走三步建档重新建一次即可">
+            <Tooltip title="这个 SPU 是老建档路径建的,没有主键,配不了生成方案。走“新建商品款式”重新建一次即可">
               <span className="mono">{row.spu}</span>
             </Tooltip>
           )}

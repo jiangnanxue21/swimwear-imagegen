@@ -1,25 +1,23 @@
 /**
  * 外框 + 侧栏导航。
  *
- * ## A8:菜单按角色收敛
+ * ## A8:菜单按工作阶段分组
  *
- * 上一版是 17 项平铺,没有分组也没有角色区分 —— 新运营第一次打开侧栏,
+ * 上一版是 17 项平铺,没有分组 —— 新运营第一次打开侧栏,
  * 「Provider」「系统状态」「操作审计」和「商品工作台」并排站着,而他今天的活
- * 只涉及最后一个。收敛做两件事:
+ * 只涉及最后一个。现在按工作阶段分组,但不再按账号隐藏入口:
  *
  *     分组      三个组回答三个问题:今天要干什么、商品在哪儿、导出的东西在哪儿
- *     按角色    「系统管理」整组只对管理员显示
+ *     可发现性  「系统管理」始终可见,避免设置入口因当前口令角色不同而消失
  *
  * 分组用 antd 的 `type: 'group'`(常显的组标题)而不是可折叠的子菜单:
  * 折叠起来的话,新人要先点开三个组才能看见全部入口,而 A9 的验收标准恰恰是
  * 「无需先理解菜单结构即可找到当前任务」。
  *
- * ## 这里收敛的是显示,不是权限
+ * ## 菜单可见不等于后端放弃保护
  *
- * 角色来自后端 `/auth/whoami`(降级规则见 `useIdentity`)。**路由本身对所有人
- * 保持注册** —— 见 App.tsx 里那段注释:新人还不是管理员的时候,得能顺着冷启动
- * 横幅的链接走进设置页填口令。真正的权限边界在后端 `require_admin`,
- * 藏起来的菜单项即使被手敲 URL 打开,每个请求也还是会被挡回来。
+ * 路由和菜单都对所有人显示。涉及 API Key、Provider 和系统配置的真实读写仍由
+ * 后端 `require_admin` 校验;前端不再把隐藏菜单误当成权限边界。
  */
 import { Button, Dropdown, Layout, Menu, Space, Tag, Tooltip } from 'antd'
 import {
@@ -28,7 +26,7 @@ import {
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { brandVars, fontScale, layoutMax } from '../theme'
+import { brandVars, layoutMax } from '../theme'
 import ColdStartBanner from './ColdStartBanner'
 import EnvironmentBanner from './EnvironmentBanner'
 import SpendAlertBanner from './SpendAlertBanner'
@@ -47,11 +45,6 @@ export interface NavItem {
 export interface NavGroup {
   /** 组标题。不参与路由,只是侧栏上的一行小字 */
   label: string
-  /**
-   * 整组只对管理员显示。粒度刻意在组上而不在项上:一个组里混着两种可见性,
-   * 下次加项的人得先读注释才知道该跟哪边。
-   */
-  adminOnly?: boolean
   items: NavItem[]
 }
 
@@ -61,12 +54,12 @@ interface Props {
 
 export default function AppLayout({ groups }: Props) {
   const location = useLocation()
-  const { isAdmin, who, loading: identityLoading } = useIdentity()
+  const { who, loading: identityLoading } = useIdentity()
   /** 后端把所有人都叫 operator = 配的是共用口令,审计追不到人 */
   const sharedToken = who?.name === 'operator'
   const { mode, toggle } = useThemeMode()
 
-  const visible = groups.filter((g) => !g.adminOnly || isAdmin)
+  const visible = groups
 
   // 选中项按"最长前缀"匹配,和上一版一致:`/workbench/:id` 要点亮
   // 「商品工作台」,而 `/workbench-review` 不能被 `/workbench` 抢走 ——
@@ -90,10 +83,7 @@ export default function AppLayout({ groups }: Props) {
         {/* 顶栏两个模式下都是深色,所以这里用的是 onHeader 而不是 surface ——
             surface 在暗色下会翻成深色,那会让标题变成深底上的深字 */}
         <span style={{ color: brandVars.onHeader, fontWeight: 600, letterSpacing: '0.02em' }}>
-          商品展示图生产台
-        </span>
-        <span style={{ color: brandVars.sand, fontSize: fontScale.meta, letterSpacing: '0.08em' }}>
-          泳装 / 服装
+          服装上架平台
         </span>
         <span style={{ flex: 1 }} />
 

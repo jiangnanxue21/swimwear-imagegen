@@ -34,7 +34,7 @@ import {
 import { isResultUnknown, readWriteError } from '../../api/client'
 import { IMAGE_SET_STATUS_LABEL, type FlowStepResult } from '../../api/workbench'
 import { IssueList, RejectNotice } from './FlowBits'
-import { MEDIA_ROLE_LABEL } from './MaterialTab'
+import { MEDIA_ROLE_LABEL } from './materialUtils'
 import ErrorNotice from '../ErrorNotice'
 import UnsavedGuard from '../UnsavedGuard'
 import { brandVars, fontScale, imageTile } from '../../theme'
