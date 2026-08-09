@@ -34,6 +34,7 @@ from app.schemas.attribute import (
     ExtractRequest,
     FieldSpecOut,
 )
+from app.services import dispatch_service, spu_service
 
 router = APIRouter(tags=["attributes"], dependencies=[Depends(require_operator)])
 
@@ -70,6 +71,17 @@ def _product(session: Session, product_id: UUID) -> Product:
     return product
 
 
+def _extraction_out(row) -> ExtractionOut:
+    out = ExtractionOut.model_validate(row)
+    out.can_cancel = run_state.can_cancel(row.status)
+    return out
+
+
+def _dispatch_if_queued(row) -> None:
+    if row.status == "QUEUED":
+        dispatch_service.send_attribute_extraction(row.id)
+
+
 @router.post("/products/{product_id}/extract-attributes", response_model=ExtractionOut)
 def extract_attributes(
     product_id: UUID,
@@ -77,19 +89,14 @@ def extract_attributes(
     request: Request,
     session: Session = Depends(db_session),
 ) -> ExtractionOut:
-    """触发识别。
-
-    同步执行:M3 用的是 Mock,一次几毫秒。接真实模型之后要改成异步任务
-    并返回 extraction_id —— 那时候 §6.6 说的"异步返回"才有意义。
-    现在就异步只会多一层没人能观察的间接。
-    """
+    """兼容 SKU 入口：只排队并立即返回，执行由 Celery 完成。"""
     product = _product(session, product_id)
     # AC-05(F-2):识别属于属性步,前置是素材就绪。绕过它直接 POST 的表现是
     # 一次真实付费调用跑在一个连样品都没有的商品上 —— 而向导上那个按钮是灰的
     action_gate.ensure_allowed(
         session, product, action_gate.NextActionCode.RUN_EXTRACTION
     )
-    extraction = attr_service.run_extraction(
+    extraction = attr_service.queue_extraction(
         session,
         product=product,
         extractor=get_extractor(),
@@ -100,27 +107,49 @@ def extract_attributes(
         # 而调用方没有任何入参能表达它 —— 只能人工挑图 id,而挑漏一张的
         # 表现是那个颜色重试完仍然缺证据,于是再付一次钱重试一次
         only_variant_ids=payload.color_variant_ids,
+        actor=current_actor(request),
     )
-    # A2:一张都没成功时不合并证据 —— 没有证据可合并,跑一遍只会在审计里
-    # 留下一次"什么都没改"的属性写入,还让界面误以为识别过了。
-    # 识别记录本身照常提交:succeeded_count / failed_count 是运营判断
-    # "要不要重试、重试哪几张"的依据,回滚掉等于把失败也抹掉。
-    #
-    # A45-batch14-11:判据从 `succeeded_count > 0` 换成单点派生的
-    # `run_is_authoritative`。**今天两者的结论逐条相同**,换的是将来:
-    # §4.6 的 cancel 落地之后,被叫停的那次 run 同样会有
-    # `succeeded_count > 0`(前几张已经跑完并且付过钱),而它的证据
-    # 不该改写事实 —— 人喊停多半正是因为这一次跑错了。
-    # 写成两处各自判断的话,那时要改的是**这一行**,而它离判定很远。
-    if run_state.run_is_authoritative(extraction.status):
-        attr_service.apply_evidence(
-            session,
-            product=product,
-            extraction=extraction,
-            actor=current_actor(request),
-        )
     session.commit()
-    return ExtractionOut.model_validate(extraction)
+    _dispatch_if_queued(extraction)
+    return _extraction_out(extraction)
+
+
+@router.post(
+    "/spus/{spu_id}/attribute-extraction-runs", response_model=ExtractionOut
+)
+def create_spu_extraction_run(
+    spu_id: UUID,
+    payload: ExtractRequest,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ExtractionOut:
+    """PRD §12.3 的 SPU 级异步入口。输入取整个 SPU 的证据素材快照。"""
+    spu_service.get_spu(session, spu_id)
+    products = spu_service.skus_of(session, spu_id)
+    if not products:
+        raise ValidationError(
+            "SPU 还没有 SKU，无法创建识别 run",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    action_gate.ensure_allowed_for_spu(
+        session,
+        action_gate.NextActionCode.RUN_EXTRACTION,
+        spu_id=spu_id,
+    )
+    extraction = attr_service.queue_extraction(
+        session,
+        product=products[0],
+        extractor=get_extractor(),
+        fields=tuple(payload.fields) if payload.fields else None,
+        only_media_ids=payload.media_asset_ids,
+        only_variant_ids=payload.color_variant_ids,
+        spu_scope_id=spu_id,
+        actor=current_actor(request),
+    )
+    session.commit()
+    _dispatch_if_queued(extraction)
+    return _extraction_out(extraction)
 
 
 @router.get("/products/{product_id}/attributes", response_model=list[AttributeValueOut])
@@ -202,6 +231,9 @@ def confirm_attributes(
 
 
 @router.get("/extractions/{extraction_id}", response_model=ExtractionDetailOut)
+@router.get(
+    "/attribute-extraction-runs/{extraction_id}", response_model=ExtractionDetailOut
+)
 def get_extraction(
     extraction_id: UUID, session: Session = Depends(db_session)
 ) -> ExtractionDetailOut:
@@ -212,10 +244,27 @@ def get_extraction(
     """
     row = attr_service.get_extraction(session, extraction_id)
     detail = ExtractionDetailOut.model_validate(row)
+    detail.can_cancel = run_state.can_cancel(row.status)
     detail.evidence = [
         EvidenceOut.model_validate(e) for e in attr_service.list_evidence(session, row.id)
     ]
     return detail
+
+
+@router.post(
+    "/attribute-extraction-runs/{extraction_id}/cancel",
+    response_model=ExtractionOut,
+)
+def cancel_extraction(
+    extraction_id: UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ExtractionOut:
+    row = attr_service.request_cancellation(
+        session, extraction_id, actor=current_actor(request)
+    )
+    session.commit()
+    return _extraction_out(row)
 
 
 @router.get("/attributes/calibration")

@@ -539,3 +539,92 @@ def test_deleting_the_spu_keeps_the_ledger(session, product_with_spu, extractor_
     survivor = session.get(ProductAttributeExtraction, run_id)
     assert survivor is not None, "删 SPU 把识别记录一起带走了 —— 账本没了"
     assert survivor.spu_id is None
+
+
+# ---------------------------------------------------------------- 异步执行
+
+
+def test_queueing_is_idempotent_and_does_not_call_the_extractor(
+    session, product_with_spu, extractor_spy
+):
+    """HTTP 阶段只建 QUEUED 行；重复请求复用该行，不能提前产生付费调用。"""
+    from app.attributes import service as attr_service
+
+    first = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        actor="tester",
+    )
+    second = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        actor="tester",
+    )
+
+    assert first.status == S.QUEUED.value
+    assert second.id == first.id
+    assert first.input_asset_ids
+    assert first.requested_by == "tester"
+    assert extractor_spy.calls == 0
+
+
+def test_the_worker_claims_and_finishes_the_queued_snapshot(
+    session, product_with_spu, extractor_spy, celery_eager, monkeypatch
+):
+    """worker 只消费排队时的素材快照，并把逐图 checkpoint 与终态一起落库。"""
+    from app.attributes import service as attr_service
+    from app.tasks import attribute_tasks
+
+    monkeypatch.setattr(attribute_tasks, "get_extractor", lambda _name: extractor_spy)
+    row = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        actor="tester",
+    )
+    session.commit()
+
+    result = attribute_tasks.run_attribute_extraction.run(str(row.id))
+    session.refresh(row)
+
+    assert result["status"] == S.COMPLETED.value
+    assert row.status == S.COMPLETED.value
+    assert row.started_at is not None
+    assert row.finished_at is not None
+    assert row.image_outcomes == [
+        {
+            "asset_id": row.input_asset_ids[0],
+            "scope": str(product_with_spu.color_variant_id),
+            "succeeded": True,
+        }
+    ]
+    assert row.failed_scopes == []
+    assert extractor_spy.calls == 1
+
+
+def test_cancelling_a_queued_run_is_terminal_and_costs_nothing(
+    session, product_with_spu, extractor_spy, celery_eager, monkeypatch
+):
+    """尚未领取的 run 取消后直接终态；迟到的 worker 消息必须成为空操作。"""
+    from app.attributes import service as attr_service
+    from app.tasks import attribute_tasks
+
+    monkeypatch.setattr(attribute_tasks, "get_extractor", lambda _name: extractor_spy)
+    row = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        actor="tester",
+    )
+    attr_service.request_cancellation(session, extraction_id=row.id, actor="tester")
+    session.commit()
+
+    result = attribute_tasks.run_attribute_extraction.run(str(row.id))
+    session.refresh(row)
+
+    assert result["status"] == S.CANCELLED.value
+    assert row.status == S.CANCELLED.value
+    assert row.finished_at is not None
+    assert extractor_spy.calls == 0

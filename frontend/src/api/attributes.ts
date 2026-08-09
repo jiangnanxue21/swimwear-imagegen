@@ -119,7 +119,10 @@ export interface Extraction {
   image_count: number
   succeeded_count: number
   failed_count: number
+  failed_scopes: string[]
   status: ExtractionRunStatus
+  cancel_requested: boolean
+  can_cancel: boolean
   duration_ms: number | null
   created_at: string | null
 }
@@ -130,9 +133,8 @@ export interface Extraction {
  * 语气不是装饰:`error` 会留在屏幕上等人关掉,`success` 两秒就消失。
  * 一次全部失败的识别用 success 弹一下,运营的结论是「识别过了」。
  *
- * `QUEUED` / `RUNNING` 今天不会出现(同步执行),但它们在联合类型里,
- * 所以也必须在这张表里 —— 少一个键会让 §4.6 异步落地那天
- * 界面拿到 undefined,然后什么都不显示。
+ * `QUEUED` / `RUNNING` 是异步 worker 的真实中间态，是否继续轮询由后端
+ * `can_cancel` 给出，前端不维护第二份终态清单。
  */
 export const RUN_STATUS_LABEL: Record<ExtractionRunStatus, string> = {
   QUEUED: '已排队',
@@ -209,7 +211,6 @@ export const attributesApi = {
   list: async (productId: string) =>
     (await apiClient.get<AttributeValue[]>(`/products/${productId}/attributes`)).data,
 
-  /** 触发识别。M3 是同步的,几毫秒返回;接真实模型后这里会变成轮询 */
   /**
    * 触发识别。`colorVariantIds` 用于**按颜色重试**(§11 第一行)。
    *
@@ -220,13 +221,28 @@ export const attributesApi = {
    * 识别是**付费链路**,所以这里不给默认值:不传 = 整件商品重跑,
    * 那是一个更贵的选择,必须由调用点显式做出来。
    */
-  extract: async (productId: string, fields?: string[], colorVariantIds?: string[]) =>
+  extract: async (
+    productId: string,
+    fields?: string[],
+    colorVariantIds?: string[],
+    spuId?: string | null,
+  ) =>
     (
-      await apiClient.post<Extraction>(`/products/${productId}/extract-attributes`, {
+      await apiClient.post<Extraction>(
+        spuId
+          ? `/spus/${spuId}/attribute-extraction-runs`
+          : `/products/${productId}/extract-attributes`, {
         fields: fields ?? null,
         media_asset_ids: null,
         color_variant_ids: colorVariantIds ?? null,
       })
+    ).data,
+
+  cancel: async (extractionId: string) =>
+    (
+      await apiClient.post<Extraction>(
+        `/attribute-extraction-runs/${extractionId}/cancel`,
+      )
     ).data,
 
   /** 人工确认 / 改值 / 裁决冲突。写入 MANUAL,留痕在后端(BE-206) */
@@ -238,5 +254,9 @@ export const attributesApi = {
     ).data,
 
   extraction: async (extractionId: string) =>
-    (await apiClient.get<ExtractionDetail>(`/extractions/${extractionId}`)).data,
+    (
+      await apiClient.get<ExtractionDetail>(
+        `/attribute-extraction-runs/${extractionId}`,
+      )
+    ).data,
 }

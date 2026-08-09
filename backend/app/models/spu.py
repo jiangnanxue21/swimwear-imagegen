@@ -30,7 +30,15 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -56,6 +64,15 @@ class Spu(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_spus_status", "status"),
         # §26:成功指标按受众分组统计。受众的权威从今天起在这一列上
         Index("ix_spus_audience", "audience"),
+        # §9.1 的建档幂等。**部分索引,谓词必须与迁移 0053 一字不差** ——
+        # 两边不同向时 autogenerate 会每次都想改它,而那种噪音最后会让人
+        # 把 autogenerate 关掉
+        Index(
+            "uq_spus_request_key",
+            "request_key",
+            unique=True,
+            postgresql_where=text("request_key IS NOT NULL"),
+        ),
     )
 
     #: 全局唯一业务编码。同时是 SKU 编码的第一段(`listings/sku_matrix`),
@@ -91,6 +108,19 @@ class Spu(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: 乐观锁。**不是自增主键的替代品** —— 它防的是"两个人同时改同一个 SPU,
     #: 后写的静默覆盖先写的"。本批次只落列,并发编辑接口在阶段 1 第二批
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    #: §9.1 建档幂等:客户端 `Idempotency-Key` 头的原值。**可空** ——
+    #: 不带头的调用方是合法的,那种请求不参与幂等(部分唯一索引的谓词)。
+    request_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: 那一次请求的入参指纹,算法在 `sku_matrix.spu_request_fingerprint`。
+    #:
+    #: 只存键不存它的话「同键不同入参」判不出来:第二次请求会拿到第一次
+    #: 建的那个 SPU,而它要的是另一个款 —— 那种错要等到有人问
+    #: "为什么这个编码的商品名字不对"才会被发现
+    request_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     color_variants: Mapped[list[ColorVariant]] = relationship(
         back_populates="spu",

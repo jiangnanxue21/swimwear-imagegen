@@ -1,3 +1,36 @@
+# 2026-08-09 人工测试准入收口交接:身份先行、0054 异步识别、签名预览
+
+> 当前结论以 `docs/DECISIONS.md` §3.65、`docs/STATUS.md` 顶部与
+> `docs/AC-VERIFICATION.md` §11 为准。下方 F-12/F-4 交接保留为历史记录。
+
+## 本轮交付
+
+- CSV 导入只接受已存在 SPU；单颜色可补唯一颜色，多颜色必须给 `variant_code`，
+  预览与提交共用数据库身份解析并写齐 `spu_id` / `color_variant_id` / 受众 / 品类。
+- 属性识别改为 Celery 异步：HTTP 先提交 QUEUED run 再投递，worker 使用排队时
+  素材快照，支持取消、逐图成绩、失败颜色重试、relay/reaper 与断点续跑。
+- preview→commit 使用独立 HMAC token，绑定操作者、文件摘要、预览摘要、数据库
+  身份状态与有效期；文件或数据库事实变化后必须重新预览。
+- 迁移 head 为 `0054`；`sample-data/products.csv` 保留为解析和拒绝路径回归样本，
+  正式播种只走 `spus.json` 与 SPU 服务。
+
+## 已有真环境记录
+
+2026-08-09 用户授权的 PostgreSQL + Redis 回归记录为：全量 pytest 3128/3128，
+新建 UAT 库从空库升级到 `0054`，真实 Celery worker ping 与 Uvicorn 健康检查通过；
+前端 Vitest 100/100、Chromium Playwright 6/6。本次文档整理没有重新连接真库。
+
+## 当前边界
+
+- Docker CLI 仍缺失，两个镜像与 compose 六服务未执行；真实 FASHN / 真实渠道无凭据。
+- 仓库根当前存在 `.env`，本轮 `verify_delivery` 因此为 18/19；未读取、未删除。
+  交付前必须把它移出仓库树，若含真实凭据先轮换，不能只靠打包黑名单遮住。
+- **PRD 阶段 2 尚未验收关闭**：`MODEL_REFERENCE` 绕行分支仍会跳过受众与授权
+  检查。冒烟使用已授权模板只是不再踩缝，不是关缝。
+- 工作树含大量未提交改动与新迁移；不要为了门禁变绿擅自暂存或覆盖用户改动。
+
+---
+
 # 2026-08-09 评审修复交接:F-12/F-4 颜色维已可操作,`DELIVERY_STAGE` 仍是 4
 
 > 当前结论以 `docs/DECISIONS.md` §3.64 与 `docs/STATUS.md` 顶部为准。
@@ -395,7 +428,11 @@ typecheck、Vitest 74/74、build 通过，lint 0 错/4 条既有 warning；交�
 
 ## 丑、CSV 导入那笔债:本批**没有**关它,只保证说法与实现一致
 
-`import_products` 今天仍然直接 `Product(**row)`:不解析 spu 码、不抄 audience、
+> **当前状态（§3.65）：这笔债后来选择方案 (a) 并已关闭。** 下两段保留的是
+> batch15 当时的判断，不是现行契约；现行导入要求已存在 SPU，多颜色必须给
+> `variant_code`，失败行进入 `errors`，不会自动建最简 SPU。
+
+`import_products` 在 batch15 当时仍直接 `Product(**row)`:不解析 spu 码、不抄 audience、
 不过 C-03 闸,写进去的行 `spu_id` 是 NULL。`test_csv_import_creates_products` /
 `test_reimport_is_idempotent` 照样绿,因为它们走的正是这条没关的路。
 

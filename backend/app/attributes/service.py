@@ -98,6 +98,11 @@ def run_extraction(
     fields: tuple[str, ...] | None = None,
     only_media_ids: list[UUID] | None = None,
     only_variant_ids: list[UUID] | None = None,
+    spu_scope_id: UUID | None = None,
+    prepare_only: bool = False,
+    existing_run: ProductAttributeExtraction | None = None,
+    cooperative: bool = False,
+    actor: str = "system",
 ) -> ProductAttributeExtraction:
     """逐图识别,落证据。**不写任何属性值。**
 
@@ -133,7 +138,10 @@ def run_extraction(
     # `IMPORTED_URL` 没有任何写入点,所以这个值改变不了任何一条真实数据的去留。
     # 接可信机制时改这里,不要改默认值 —— 默认值留给新调用点,新调用点该 fail closed。
     evidence = media_service.evidence_assets_for(
-        session, product.id, imported_url_trusted=True
+        session,
+        None if spu_scope_id is not None else product.id,
+        spu_id=spu_scope_id,
+        imported_url_trusted=True,
     )
     if only_media_ids:
         wanted = set(only_media_ids)
@@ -169,7 +177,11 @@ def run_extraction(
         # 用计数而不是 `usable_assets()`:识别路径上只要出现过一个装着
         # 未过滤素材行的变量,下一个人就可能顺手拿它去喂抽取器 ——
         # 而那一步不会有任何地方报错。拿不到行,就不会有人用错行。
-        total = media_service.usable_asset_count(session, product.id)
+        total = media_service.usable_asset_count(
+            session,
+            None if spu_scope_id is not None else product.id,
+            spu_id=spu_scope_id,
+        )
         if total:
             raise ValidationError(
                 f"该商品的 {total} 条可用素材全部不能作为识别证据"
@@ -223,7 +235,17 @@ def run_extraction(
         targets=targets,
         whole_product=not only_media_ids,
     )
-    if identity.key:
+    if existing_run is not None:
+        # worker 读取的是排队时冻结的素材 id，所以 `only_media_ids` 非空；
+        # 不能因此把已落库的业务幂等键降成空，否则供应商逐图重试保护会消失。
+        identity = _RunIdentity(
+            existing_run.spu_id,
+            existing_run.requested_scope,
+            existing_run.input_fingerprint,
+            existing_run.idempotency_key,
+            None,
+        )
+    if existing_run is None and identity.key:
         existing = _run_occupying_key(session, identity.key)
         verdict = run_state.reuse_verdict(
             existing.status if existing is not None else None
@@ -245,7 +267,7 @@ def run_extraction(
                 },
             )
             return existing
-    elif identity.no_key_reason:
+    elif existing_run is None and identity.no_key_reason:
         # **如实说为什么没有键。**不说的话,「双击产生了两个 run」这件事
         # 在排查时只剩一个猜:是键算错了,还是根本没算?两者的修法完全不同
         logger.info(
@@ -259,48 +281,74 @@ def run_extraction(
         )
 
     started = time.monotonic()
-    row = ProductAttributeExtraction(
-        product_id=product.id,
-        extractor=getattr(extractor, "name", "unknown"),
-        target_fields=list(targets),
-        image_count=len(assets),
-        schema_version=EXTRACTION_SCHEMA_VERSION,
-        # 建行即 RUNNING。这一档**占键**(`KEY_OCCUPYING_STATUSES`),
-        # 所以第二个并发请求要么在下面撞唯一索引、要么查到这一行然后复用 ——
-        # 两条路都不会再打一次付费调用。同步执行下没有 QUEUED 那一档
-        status=ExtractionRunStatus.RUNNING.value,
-        spu_id=identity.spu_id,
-        requested_scope=identity.scope_token,
-        input_fingerprint=identity.input_fingerprint,
-        idempotency_key=identity.key,
-    )
-    # 先查后插只能挡住「明显重复」,挡不住并发 —— 与 `create_product` 同一个
-    # 形状,也是 §9.2 写「数据库裁决」的原因。保存点是必需的:约束冲突会让
-    # 整个事务进入 aborted 状态,不回滚就没法继续往下跑这次识别
-    savepoint = session.begin_nested()
-    try:
-        session.add(row)
-        session.flush()
-        savepoint.commit()
-    except IntegrityError:
-        savepoint.rollback()
-        winner = _run_occupying_key(session, identity.key) if identity.key else None
-        if winner is None:
-            # 不是幂等键撞的(或者撞了但那一行已经不占键了)。**不吞** ——
-            # 把别的约束冲突翻译成「复用了一次识别」会让一个真实的写入缺陷
-            # 表现成一次安静的成功
-            raise
-        logger.info(
-            "extraction run lost the idempotency race and reused the winner",
-            extra={
-                "extra_fields": {
-                    "product_id": str(product.id),
-                    "extraction_id": str(winner.id),
-                    "idempotency_key": identity.key,
-                }
-            },
+    if existing_run is None:
+        row = ProductAttributeExtraction(
+            product_id=product.id,
+            extractor=getattr(extractor, "name", "unknown"),
+            target_fields=list(targets),
+            image_count=len(assets),
+            schema_version=EXTRACTION_SCHEMA_VERSION,
+            # 异步入口先落 QUEUED 并提交，worker 原子认领后才进 RUNNING。
+            # 同步兼容调用仍直接 RUNNING，供服务层测试与批次内部调用使用。
+            status=(
+                ExtractionRunStatus.QUEUED.value
+                if prepare_only
+                else ExtractionRunStatus.RUNNING.value
+            ),
+            spu_id=identity.spu_id,
+            requested_scope=identity.scope_token,
+            input_fingerprint=identity.input_fingerprint,
+            idempotency_key=identity.key,
+            requested_media_ids=(
+                [str(value) for value in only_media_ids]
+                if only_media_ids is not None
+                else None
+            ),
+            requested_variant_ids=(
+                [str(value) for value in only_variant_ids]
+                if only_variant_ids is not None
+                else None
+            ),
+            input_asset_ids=[str(asset.id) for asset in assets],
+            requested_by=actor,
+            cancel_requested=False,
         )
-        return winner
+        # 先查后插只能挡住「明显重复」,挡不住并发 —— 与 `create_product` 同一个
+        # 形状,也是 §9.2 写「数据库裁决」的原因。保存点是必需的:约束冲突会让
+        # 整个事务进入 aborted 状态,不回滚就没法继续往下跑这次识别
+        savepoint = session.begin_nested()
+        try:
+            session.add(row)
+            session.flush()
+            savepoint.commit()
+        except IntegrityError:
+            savepoint.rollback()
+            winner = _run_occupying_key(session, identity.key) if identity.key else None
+            if winner is None:
+                # 不是幂等键撞的(或者撞了但那一行已经不占键了)。**不吞** ——
+                # 把别的约束冲突翻译成「复用了一次识别」会让一个真实的写入缺陷
+                # 表现成一次安静的成功
+                raise
+            logger.info(
+                "extraction run lost the idempotency race and reused the winner",
+                extra={
+                    "extra_fields": {
+                        "product_id": str(product.id),
+                        "extraction_id": str(winner.id),
+                        "idempotency_key": identity.key,
+                    }
+                },
+            )
+            return winner
+    else:
+        row = existing_run
+        if row.product_id != product.id:
+            raise ValidationError(
+                "识别 run 与商品不匹配", code=ErrorCode.INPUT_INVALID
+            )
+
+    if prepare_only:
+        return row
 
     enum_defs = {name: enum_hint_for(name) for name in targets}
     # 受众传给抽取器,让 Schema/提示词里的**枚举取值**也按受众收窄。
@@ -310,12 +358,35 @@ def run_extraction(
 
     options: dict[str, Any] = {AUDIENCE_KEY: audience} if audience else {}
 
-    succeeded = failed = fabricated = 0
+    persisted_outcomes = list(row.image_outcomes or [])
+    completed_asset_ids = {
+        str(item.get("asset_id"))
+        for item in persisted_outcomes
+        if item.get("asset_id")
+    }
+    succeeded = sum(1 for item in persisted_outcomes if item.get("succeeded") is True)
+    failed = sum(1 for item in persisted_outcomes if item.get("succeeded") is False)
+    fabricated = row.fabricated_field_count or 0
     #: 逐图成绩,按作用域归集用(§11 第一行)。**不是两个标量能替代的东西**:
     #: 「3 张图散着失败」与「B 色的 3 张全失败」在计数里一模一样,
     #: 而前者每个颜色都还有证据、后者 B 色一条都没有
-    outcomes: list[run_state.ImageResult] = []
+    outcomes: list[run_state.ImageResult] = [
+        run_state.ImageResult(
+            scope=item.get("scope"), succeeded=bool(item.get("succeeded"))
+        )
+        for item in persisted_outcomes
+    ]
     for asset in assets:
+        if str(asset.id) in completed_asset_ids:
+            continue
+        if cooperative:
+            # 上一张图的证据与费用先独立落库，再释放行锁读取取消位。
+            # 外部调用失败或 worker 被杀时，已经花掉的钱不会随整次 run 回滚。
+            row.updated_at = _now()
+            session.commit()
+            session.refresh(row, ["cancel_requested", "status"])
+            if row.cancel_requested:
+                break
         call_started = time.monotonic()
         # 每张图一把**自己的**供应商幂等键(A45-batch18 / P1-2)。
         #
@@ -349,7 +420,16 @@ def run_extraction(
             # 而每一次都在花钱 —— 与 §4.5 三个原因指向三个动作同一个病灶,
             # 只是换到了日志这条通道上
             failed += 1
-            outcomes.append(run_state.image_result(asset, succeeded=False))
+            image_outcome = run_state.image_result(asset, succeeded=False)
+            outcomes.append(image_outcome)
+            persisted_outcomes.append(
+                {
+                    "asset_id": str(asset.id),
+                    "scope": image_outcome.scope,
+                    "succeeded": False,
+                }
+            )
+            row.image_outcomes = list(persisted_outcomes)
             fields: dict[str, Any] = {
                 "media_asset_id": str(asset.id),
                 "error": type(exc).__name__,
@@ -375,7 +455,16 @@ def run_extraction(
             continue
 
         succeeded += 1
-        outcomes.append(run_state.image_result(asset, succeeded=True))
+        image_outcome = run_state.image_result(asset, succeeded=True)
+        outcomes.append(image_outcome)
+        persisted_outcomes.append(
+            {
+                "asset_id": str(asset.id),
+                "scope": image_outcome.scope,
+                "succeeded": True,
+            }
+        )
+        row.image_outcomes = list(persisted_outcomes)
         if billable:
             # 失败的也记(上面那条分支):厂商在收到请求那一刻就开始计费,
             # 超时和解析失败都不退钱 —— 与评分流水同一条口径
@@ -433,6 +522,12 @@ def run_extraction(
                 )
             )
 
+    if cooperative:
+        # 最后一张图之后没有下一轮循环替它 checkpoint；在终态判定前补一次。
+        row.updated_at = _now()
+        session.commit()
+        session.refresh(row, ["cancel_requested", "status"])
+
     row.succeeded_count = succeeded
     row.failed_count = failed
     row.fabricated_field_count = fabricated
@@ -457,7 +552,7 @@ def run_extraction(
         image_count=row.image_count or 0,
         succeeded=succeeded,
         failed=failed,
-        cancel_requested=False,
+        cancel_requested=bool(row.cancel_requested),
     ).value
 
     # ---- 终态派生(A45-batch14-11 / §4.6)----
@@ -490,6 +585,7 @@ def run_extraction(
     # 规格见 `test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one`。
     # 那是欠账,不是设计 —— 但它欠的是**界面**,不再是那一列。
     outcome = run_state.outcome_by_scope(outcomes)
+    row.failed_scopes = list(outcome.failed_scopes)
     if outcome.failed_scopes:
         logger.warning(
             "every image of one or more colour scopes failed",
@@ -516,6 +612,68 @@ def run_extraction(
             }
         },
     )
+    return row
+
+
+def queue_extraction(
+    session: Session,
+    *,
+    product: Product,
+    extractor,
+    fields: tuple[str, ...] | None = None,
+    only_media_ids: list[UUID] | None = None,
+    only_variant_ids: list[UUID] | None = None,
+    spu_scope_id: UUID | None = None,
+    actor: str,
+) -> ProductAttributeExtraction:
+    """只做付费调用前的校验、幂等裁决与 QUEUED 建行。
+
+    调用方必须提交后再投递 Celery。这样 worker 永远不会读到一条尚未提交的
+    run，HTTP 超时也不会把已经受理的请求和后续费用证据一起回滚。
+    """
+    return run_extraction(
+        session,
+        product=product,
+        extractor=extractor,
+        fields=fields,
+        only_media_ids=only_media_ids,
+        only_variant_ids=only_variant_ids,
+        spu_scope_id=spu_scope_id,
+        prepare_only=True,
+        actor=actor,
+    )
+
+
+def request_cancellation(
+    session: Session, extraction_id: UUID, *, actor: str
+) -> ProductAttributeExtraction:
+    """请求协作式取消。QUEUED 可当场结束，RUNNING 由 worker 在边界观察。"""
+    row = session.scalars(
+        select(ProductAttributeExtraction)
+        .where(ProductAttributeExtraction.id == extraction_id)
+        .with_for_update()
+    ).first()
+    if row is None:
+        raise NotFoundError("识别 run 不存在")
+    if not run_state.can_cancel(row.status):
+        raise ValidationError(
+            f"状态 {row.status} 的识别 run 不能取消",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    row.cancel_requested = True
+    if row.status == ExtractionRunStatus.QUEUED.value:
+        row.status = ExtractionRunStatus.CANCELLED.value
+        row.finished_at = _now()
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.UPDATE,
+        entity_type="ProductAttributeExtraction",
+        entity_id=row.id,
+        payload={"action": "cancel", "observed_status": row.status},
+    )
+    session.flush()
     return row
 
 

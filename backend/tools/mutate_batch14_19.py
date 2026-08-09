@@ -124,7 +124,10 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "识别路径退回 usable_assets(唯一取数入口这条整个失效)",
         ATTRS,
         "    evidence = media_service.evidence_assets_for(\n"
-        "        session, product.id, imported_url_trusted=True\n"
+        "        session,\n"
+        "        None if spu_scope_id is not None else product.id,\n"
+        "        spu_id=spu_scope_id,\n"
+        "        imported_url_trusted=True,\n"
         "    )",
         "    evidence = media_service.usable_assets(session, product.id)",
     ),
@@ -132,7 +135,11 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "P2",
         "识别路径同时留一个装未过滤行的变量(下一个人拿哪个全看运气)",
         ATTRS,
-        "        total = media_service.usable_asset_count(session, product.id)",
+        "        total = media_service.usable_asset_count(\n"
+        "            session,\n"
+        "            None if spu_scope_id is not None else product.id,\n"
+        "            spu_id=spu_scope_id,\n"
+        "        )",
         "        total = len(media_service.usable_assets(session, product.id))",
     ),
     (

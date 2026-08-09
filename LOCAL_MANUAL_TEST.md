@@ -6,9 +6,10 @@
 本文所有步骤都跑在 `DEFAULT_PROVIDER=mock` / `EVALUATOR_BACKEND=mock` /
 Simulator 渠道上，**不会产生任何外部调用与费用**。
 
-> ⚠️ **本文档尚未在真实 Docker 环境中端到端验证过。**
-> 编写它的环境没有 Docker、没有网络、没有 PostgreSQL，能验证的只有静态部分
-> （compose 语义、迁移链、镜像依赖、认证分支、脚本入口）。
+> ⚠️ **Docker 环境仍未端到端验证。** 2026-08-09 已在 Windows 主机原生验证
+> PostgreSQL 迁移到 `0054`、样例播种、真实 HTTP 健康检查、远端 Redis 与
+> Celery worker ping，以及 Chromium Playwright 6/6；本机没有 Docker CLI，
+> 所以 compose 与两个镜像构建仍只能按本文步骤执行后回填。
 > 第 0 节列出的就是「照着做的时候最可能先崩的地方」——它们是推导出来的，
 > 不是跑出来的。第一次执行的人请按第 9 节回填。
 
@@ -42,9 +43,43 @@ Simulator 渠道上，**不会产生任何外部调用与费用**。
 
 主机不需要装 Python、Node、PostgreSQL。全部在容器里。
 
+### 1.1 这台 Windows 主机已准备好的非 Docker UAT
+
+2026-08-09 已创建独立数据库 `swimwear_imagegen_uat`，迁移到 `0054` 并播种：
+3 个 SPU、6 个颜色、19 个 SKU、21 条按颜色/共享作用域归属的素材。测试夹具使用
+另一个 `_test` 库，不会清理这里。Redis 建议使用已确认空闲的逻辑库 `/13`；不要
+清空共享的 `/15`，那里观察到过历史生成消息。
+
+没有 Docker 时可开三个 PowerShell 终端。以下凭据只设在进程环境，尖括号换成
+本机值，**不要提交 `.env`**：
+
+```powershell
+# 后端（终端 1）
+$env:DATABASE_URL='postgresql+psycopg://postgres:<PG密码>@127.0.0.1:5432/swimwear_imagegen_uat'
+$env:REDIS_URL='redis://:<Redis密码>@<Redis主机>:6379/13'
+$env:SETTINGS_SECRET_KEY='<临时测试密钥>'
+cd backend
+.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+```
+
+```powershell
+# worker（终端 2；设置同样三个环境变量）
+cd backend
+.\.venv\Scripts\celery.exe -A app.tasks.celery_app worker --pool=solo --concurrency=1 -l info
+```
+
+```powershell
+# 前端（终端 3）
+cd frontend
+npm.cmd run dev -- --host 127.0.0.1
+```
+
+打开 <http://127.0.0.1:5173>。若要验证卡死回收与定时投递，再开第四个终端运行
+`backend\.venv\Scripts\celery.exe -A app.tasks.celery_app beat -l info`（同样先设环境变量）。
+
 ---
 
-## 2. 启动
+## 2. Docker 启动
 
 ```bash
 # 在仓库根目录
@@ -102,7 +137,9 @@ docker compose logs frontend   # 应该有 Vite 的 "ready in xxx ms"
 # 1) 迁移（backend 启动命令里已经跑过一次，这里是确认幂等）
 make migrate
 
-# 2) 灌样例数据：10 个 SKU + 30 张图
+# 2) 灌样例数据。**具体条数不写在这里** —— 写死的数字会在下一次增删样例时
+#    静默过期(这份文件的「10 个 SKU + 30 张图」就过期过一次,实际是 51 张)。
+#    要当前口径跑:cd backend && python3 tools/verify_sample_data.py
 make seed
 
 # 3) 确认 worker 真的在消费队列（不是只是进程活着）
@@ -115,13 +152,17 @@ make worker-ping
 ### 迁移升降级验证
 
 ```bash
-docker compose exec backend alembic current      # 期望 0030 (head)
+# **不要拿这里的期望值当口径** —— head 会随每次迁移往前走,而这份文件
+# 写死过 `0030`,在链路已经到 0053 时仍那么写,照着做的人会以为迁移失败了。
+# 当前 head 问文件树:ls backend/migrations/versions | sort | tail -1
+docker compose exec backend alembic heads         # 记下它,下面两步要对回来
 docker compose exec backend alembic downgrade -1
 docker compose exec backend alembic upgrade head
-docker compose exec backend alembic current      # 仍然 0030
+docker compose exec backend alembic current       # 应与上面的 heads 一致
 ```
 
-链路是 `0001 → 0030` 单 head，每一版都有非空 `downgrade()`。
+链路是 `0001 → <当前 head>` **单 head**(由 `verify_delivery.py` 的
+「迁移链单一 head」守着),每一版都有非空 `downgrade()`。
 **做完这一步请重新 `make seed`**——降级会删表，样例数据不一定还在。
 
 ---
@@ -159,8 +200,13 @@ OPERATOR_TOKENS=tester:op-local-test
 
 `make seed` 灌入 `sample-data/`：
 
-- `products.csv` — 10 个泳装 SKU（`SW-001` … `SW-010`），含颜色/尺码维度
-- `images/` — 每个 SKU 三张：`_front` / `_back` / `_detail`，共 30 张
+- `spus.json` — 新结构建档样例(阶段 1 之后加的),含一个**三颜色九 SKU** 的 SPU
+- `products.csv` — 旧结构泳装 SKU,含颜色/尺码维度
+- `images/` — 每个 SKU/颜色三视角：`_front` / `_back` / `_detail`
+
+**这里原来写着「10 个 SKU」「共 30 张」,两个数都过期了**(实际 51 张、
+另有 3 个 SPU)。条数一律以 `backend/tools/verify_sample_data.py` 的输出为准 ——
+它每次现数一遍,而写在文档里的数字过期时不会有任何东西报错。
 
 需要另外造数时用 `sample-data/generate_images.py`。
 **不要手工往库里插数据**——如果某条链路非得手改库才能继续，那是 bug，记进 §9。
@@ -173,9 +219,14 @@ OPERATOR_TOKENS=tester:op-local-test
 
 ### 6.1 商品导入
 
-1. 商品列表页 → 导入，上传 `sample-data/products.csv`
-2. ✅ 10 个 SKU 入列，变体维度（颜色/尺码）解析正确
-3. ✅ **刷新页面，数据还在**（验收项）
+1. 先在 SPU 页确认样例 `SPU-SW-102` / 颜色 `WHT` 已存在
+2. 商品列表页 → 导入 → 下载模板，把示例行改成该 SPU、该颜色和一个全新 SKU
+3. 先点预览；✅ 显示 1 行新增并返回预览凭证，再点提交
+4. 把 SPU 改成不存在的值重新预览；✅ 预览直接显示错误行，而不是提交后才失败
+5. ✅ 刚才的 SKU 入列且带 `spu_id` / `color_variant_id`，刷新页面仍在
+
+`sample-data/products.csv` 仍用于解析、字段与 30 张旧命名图片的回归检查，
+但它的十个旧款号没有预建 SPU，**不再是可直接落库的人工测试文件**。
 
 ### 6.2 素材上传
 
@@ -254,9 +305,10 @@ docker compose restart worker
 
 > `run_batch_task` 已按 A45-batch9 加了 `autoretry_for=(OperationalError,)`；
 > 批次条目的租约由 `reap_batch_leases`（60 秒节拍）回收，
-> **但回收时机取决于 `lease_until`（默认 1800 秒），不是 60 秒**。
-> 也就是说重启后最长可能要等半小时才看到条目被回收——
-> 这不是卡死，是设计值。等不及就把 `.env` 里的租约时长调小重测。
+> **但回收时机取决于 `lease_until`（当前 3600 秒），不是 60 秒**。
+> 也就是说 worker 消失后，最迟约 61 分钟（租约 3600 秒 + 下一次回收节拍）
+> 才看到条目被回收；界面会更早按进度阈值显示 STALLED。这不是卡死，是为避免
+> 回收仍在付费调用中的条目而取的保守值。该值是代码常量，不要按旧说明去改 `.env`。
 
 ---
 

@@ -4398,3 +4398,32 @@ test_migrations                      6   Alembic 升降级、ORM 元数据一致
 颜色不能越出入口 SPU;组件用例覆盖 URL 传参、选择器写 URL 与跨色面板目标。
 真实 PostgreSQL 全量 pytest 3109/3109、纯逻辑 2728/2728、前端 Vitest 97/97、
 Playwright 3/3 均通过。`DELIVERY_STAGE` 仍为 4。
+
+## 3.65 人工测试准入收口：身份先行、异步识别与签名预览
+
+本轮按评审报告补齐三条此前跨阶段悬空的接缝。
+
+第一，CSV 保留为兼容入口，但不再制造无身份商品。每行必须引用已存在 SPU；
+单颜色 SPU 可无歧义采用唯一颜色，多颜色 SPU 必须显式给 `variant_code`。入库统一写
+`spu_id` / `color_variant_id`，受众与品类以 SPU 为准。预览和提交共用同一份数据库
+身份解析，因此缺 SPU、颜色歧义与款式/受众冲突在预览阶段就是 ERROR。
+`sample-data/products.csv` 随之降为解析与旧素材命名回归样本；正式播种只走
+`spu_service.create_spu()`，不再忽略十条落库错误后打印假成功。
+
+第二，属性识别的 HTTP 入口只负责落 QUEUED run 与投递 Celery。worker 使用排队时
+保存的素材白名单快照，原子认领后逐图写成绩单，并在每张图之间检查取消；失败颜色
+从成绩单归集，可只重试对应作用域。relay / reaper 负责漏投与卡死恢复，重试复用
+已保存成绩，不重复调用已成功图片。迁移 `0054` 提供快照、取消、成绩单、失败作用域
+和时间列。两个 HTTP 入口都在投递前提交 QUEUED run，付费调用与 `record_usage`
+归 worker 的独立会话；因此旧限制“调用已发生、HTTP 后续回滚又把流水带走”在结构上
+关闭。它不等于供应商计费口径已验证，后者仍需真实端点。
+
+第三，批量导入的 preview→commit 不再只靠前端记住“点过预览”。服务端用独立派生
+密钥签 HMAC token，绑定操作者、文件摘要、预览摘要和有效期；文件被改、SKU 被其他
+请求抢先创建、数据库身份状态变化或 token 过期都返回 409 要求重预览。该密钥与设置
+主密钥用途隔离，凭据不落库、不进仓库。
+
+验证环境由用户明确授权：PostgreSQL + Redis 全量 pytest 3128/3128，真实 Celery
+worker ping、Uvicorn HTTP、前端 100/100 与 Chromium 6/6 通过。独立 UAT 库已迁移
+并播种，Mock / Simulator 可以进入人工测试。Docker CLI 缺失，所以镜像与 compose
+仍是未执行项；真实 Provider / 渠道无凭据，也不在本次通过范围。

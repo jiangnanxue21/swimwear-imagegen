@@ -381,8 +381,8 @@ def test_every_no_key_path_says_why():
 # ================================================================ 四、终态落列
 
 
-def test_the_row_starts_running_so_the_key_is_occupied_while_it_runs():
-    """建行即 RUNNING,而 RUNNING **占键**。
+def test_the_row_starts_queued_and_both_active_states_occupy_the_key():
+    """异步入口建行即 QUEUED；QUEUED 与 RUNNING 都必须占键。
 
     建成别的档(比如直接建成 COMPLETED,或者留空让 server_default 兜)的
     后果分两种,都不报错:
@@ -394,10 +394,12 @@ def test_the_row_starts_running_so_the_key_is_occupied_while_it_runs():
                            第二个请求会拿到一份还没写完的证据
     """
     body = _code(_func("attributes/service.py", "run_extraction"))
-    assert "status=ExtractionRunStatus.RUNNING.value" in body, (
-        "建行时的状态不是 RUNNING —— 跑的过程中键没被占住"
+    assert "ExtractionRunStatus.QUEUED.value if prepare_only" in body, (
+        "排队入口没有把新 run 建成 QUEUED"
     )
+    assert S.QUEUED in rs.KEY_OCCUPYING_STATUSES, "QUEUED 不占键了"
     assert S.RUNNING in rs.KEY_OCCUPYING_STATUSES, "RUNNING 不占键了"
+    assert rs.reuse_verdict(S.QUEUED) == rs.ReuseVerdict.RETURN_EXISTING
     assert rs.reuse_verdict(S.RUNNING) == rs.ReuseVerdict.RETURN_EXISTING, (
         "撞上正在跑的那一行时不再返回原 run"
     )

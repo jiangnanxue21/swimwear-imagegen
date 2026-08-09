@@ -465,6 +465,22 @@ def test_the_loop_records_every_image_with_the_asset_it_came_from():
             if kw.arg == "succeeded" and isinstance(kw.value, ast.Constant):
                 flags.add(kw.value.value)
     assert flags == {True, False}, f"成败两条分支没有都记:{flags}"
+    appended = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "outcomes"
+        and node.func.attr == "append"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "image_outcome"
+    ]
+    assert len(appended) == 2, (
+        f"逐图成绩算了两份，却只有 {len(appended)} 份进入归集清单；"
+        "成功/失败任一分支漏 append 都会把失败颜色算错"
+    )
 
 
 def test_the_aggregation_is_actually_read():
@@ -490,46 +506,18 @@ def test_the_aggregation_is_actually_read():
     )
 
 
-# ================================================================ 七、欠账
+# ================================================================ 七、持久化
 
 
-def test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one():
-    """**这条守卫记的是欠账,不是成绩。还款日:阶段 5。**
+def test_failed_scope_outcomes_are_persisted_for_retry_and_display():
+    """逐图结果与失败颜色必须落库，不能从 evidence 缺席反推。
 
-    还款日读作「交付阶段推进到 5 之前必须还清」。它属于 §4.6 那一批列,
-    而 §4.6 剩下的那半(异步化 + cancel)是阶段 3 唯一真的卡在环境上的一项
-    —— 但**这一列不卡环境**,加两个列不需要 Redis,只需要有人写。
-    两件事混在一句话里的后果是下一个人以为"等机器就行"。
+    成功调用也可能因目标字段为空而不写 evidence，所以只有逐图 checkpoint
+    能同时回答「跑没跑、成没成、属于哪个作用域」。`failed_scopes` 是同一份
+    checkpoint 经 `outcome_by_scope` 归集后的可展示、可精确重试结论。
 
-    §11 要的是「失败颜色明确列出」。今天它只到日志为止,因为跑完之后
-    **没有任何一列**记得这件事:
-
-        succeeded_count / failed_count   两个标量,分不出「散着失败」和
-                                         「某个颜色全军覆没」
-        AttributeEvidence 的缺席          反推不出来 —— `plan_evidence` 在模型
-                                         只答了目标清单外的字段时返回空计划,
-                                         于是一张**扣了钱的成功调用**同样
-                                         一条证据行都没有
-
-    所以欠的那一列必须能分辨三件事:这张图**跑没跑**、**成没成**、
-    **属于哪个作用域**。它属于 §4.6 那一批(五列 + 一条迁移),
-    不在本批单独加 —— 三条线并行时迁移链是**单写者资源**,
-    各自加一条 0037 的下场是合树时谁都改不动对方的 revision。
-
-    那一列落库那天这条会红。那时该做的是:把 `outcome_by_scope` 的结果
-    落进去,并删掉这条守卫。
-
-    ## A45-batch14-20:`requested_scope` 落库了,但它**不是**这一列
-
-    §4.6 那批列到齐之后,原来清单里的 `requested_scope` 不再成立 ——
-    但欠账**一条都没还**:那一列记的是「这次请求要跑哪个作用域」,
-    而 §11 要的是「跑完之后哪个作用域全军覆没」。两者在时间上就不同,
-    一个写在付钱之前、一个只有跑完才知道。
-
-    拿它顶数是最省事也最坏的补法:一次 `requested_scope=ALL` 的 run 里
-    B 色全挂了,读那一列得到的答案是「ALL」—— 于是重试范围是全部颜色,
-    为已经答上来的颜色再付一次钱。所以这里把它从欠账清单里挪出来,
-    改成一条**反向断言**:它在,但它不许成为失败清单的落点。
+    `requested_scope` 仍只表示付费前的请求范围，不能拿来装失败范围；否则
+    `ALL` 请求里只有 B 色全失败时，下一次仍会把所有颜色重新付费一遍。
     """
     model = (APP / "models" / "attribute.py").read_text(encoding="utf-8")
     tree = ast.parse(model)
@@ -539,17 +527,15 @@ def test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one():
             for stmt in node.body:
                 if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                     columns.add(stmt.target.id)
-    for owed in ("failed_scopes", "input_asset_ids"):
-        assert owed not in columns, (
-            f"`{owed}` 落库了 —— 现在该把 outcome_by_scope 的结果写进去,"
-            "并删掉这条守卫"
-        )
+    assert {"input_asset_ids", "image_outcomes", "failed_scopes"} <= columns
     # `requested_scope` 在(14-20),但它只能装**请求的**作用域。
     # 归集结果落到它身上的话,重试范围会宽成整批 —— 见上面第三节
     assert "requested_scope" in columns, (
         "`requested_scope` 不见了 —— 幂等键里的作用域那一维会没地方存"
     )
     service = (APP / "attributes" / "service.py").read_text(encoding="utf-8")
+    assert "row.image_outcomes = list(persisted_outcomes)" in service
+    assert "row.failed_scopes = list(outcome.failed_scopes)" in service
     assert "requested_scope=identity.scope_token" in service, (
         "`requested_scope` 写的不是 `canonical_scope()` 的产物"
     )
@@ -558,7 +544,7 @@ def test_listing_the_failed_scopes_needs_a_column_and_here_is_which_one():
             "归集结果被写进了 `requested_scope` —— 那一列记的是请求的作用域,"
             "不是失败的作用域;混用会让重试范围宽成整批"
         )
-    # 反向:今天确实只有两个标量在记这件事,别让这条守卫在列名改动后变成空断言
+    # 两个标量仍保留给聚合指标，但不再承担失败范围的事实来源。
     assert {"succeeded_count", "failed_count"} <= columns
 
 

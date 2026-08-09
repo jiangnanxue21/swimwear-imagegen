@@ -1,15 +1,70 @@
 # 当前状态
 
 <!-- DELIVERY_STAGE: 4 -->
+<!-- CODE_STAGE: 6 -->
 <!--
-  上面那一行是**机器可读的**,由 `tools/verify_delivery.py` 的
-  「欠账守卫都在还款日之内」读走。它的含义是"本仓当前落码到 PRD §13 的第几
-  阶段" —— 不是"第几阶段验收完了"(那个数字今天是 0,见文末)。
+  ## 两个标记,两件事(2026-08-09 评审 F-04 修正)
 
-  改它之前先想一遍:每往上加一,所有写着「还款日:阶段 N ≤ 新值」的欠账守卫
-  会当场变红。**那是它存在的全部意义。** 变红时该做的是还上那笔欠账,
-  或者把还款日往后改并写清为什么改 —— 不是回来把这个数字调回去。
+  这里原来只有 `DELIVERY_STAGE`,而它的说明写的是"本仓当前落码到 PRD §13 的
+  第几阶段"。**那句话已经不成立**:阶段 5 与阶段 6 都已全部落码,而这个数字
+  停在 4 —— 停在 4 的理由写在下面几节里,是"推到 5 会让 11 条列写入欠账
+  + 3 条欠账守卫当场逾期变红,而那 14 条都不是阶段 5 的交付项"。
+
+  也就是说:门禁读到的不是"代码推进到哪",是"**能让门禁保持绿的那个数**"。
+  自称 A 而实际是 B 的标记,比没有标记更糟 —— 读它的人会以为阶段 5、6 没开工。
+
+  修法不是把 4 改成 6(那会让 14 条欠账当场逾期,而它们确实还没还),
+  是**把两件事拆成两个标记**:
+
+    DELIVERY_STAGE   **欠账结算阶段**。语义:还款日 ≤ 它的欠账必须已经还清。
+                     `verify_delivery.py` 的「欠账守卫都在还款日之内」读它。
+                     它是一条**闸**,不是一份进度报告。
+    CODE_STAGE       **已落码阶段**,如实描述代码推进到 PRD §13 的第几阶段。
+                     不参与任何闸,只负责让上面那个落差看得见。
+
+  两者的差(6 − 4 = 2)就是欠着的账。`check_stage_markers_are_consistent()`
+  钉着 `CODE_STAGE >= DELIVERY_STAGE` —— 反过来意味着"结算跑到了落码前面",
+  那只可能是有人为了让门禁绿而调高了闸。
+
+  改 `DELIVERY_STAGE` 之前先想一遍:每往上加一,所有写着「还款日:阶段 N ≤
+  新值」的欠账守卫会当场变红。**那是它存在的全部意义。** 变红时该做的是
+  还上那笔欠账,或者把还款日往后改并写清为什么改 —— 不是回来把这个数字调回去。
+
+  改 `CODE_STAGE` 的判据只有一条:PRD §13 那一阶段的交付项是不是都落码了。
+  它和欠账无关 —— 把它也调低来"保持一致"就是在重犯上面那个错。
 -->
+
+> ## 2026-08-09 回归收口：Mock / Simulator 已进入人工测试
+>
+> 本轮把评审点名但尚未落地的四段链路补齐：CSV 导入只接受已存在的 SPU / 颜色
+> （单色可无歧义补齐，多色必须给 `variant_code`）；SPU、颜色和 SKU 支持版本化修改/
+> 追加；属性识别改为 Celery 异步执行，具备取消、逐图成绩单、失败颜色精确重试、
+> relay/reaper 与重试续跑；导入 preview→commit 使用独立 HMAC 签名，绑定操作者、
+> 文件摘要和数据库预览状态。预览现在也读取真实 SPU / 颜色事实，不会再出现
+> “预览说新增、提交才说 SPU 不存在”。迁移 head 为 `0054`。
+>
+> 实跑证据：PostgreSQL + Redis 全量 pytest **3128/3128**；纯测试 **2740/2740**；
+> `verify_delivery` 在该次验收中 **19/19**；样例自检 **10/10**；mutation anchors **553/553**，
+> 本次受影响的 4 份 mutation runner **87/87 条退化验红**；
+> 架构契约 **3/3**；前端 typecheck / lint(0 error，4 个既有 warning) / Vitest
+> **100/100** / build / syntax **93/93**；Chromium Playwright **6/6**；隔离 Redis
+> 逻辑库上的真实 Celery worker `health.ping` 返回 SUCCESS。真实 HTTP 启动后
+> `/api/health=ok`，SPU 列表返回 3/3。
+>
+> 已创建独立 `swimwear_imagegen_uat` 并升到 `0054`，播种后有 3 个 SPU、6 个颜色、
+> 19 个 SKU、21 条素材；启动命令与人工步骤见 `LOCAL_MANUAL_TEST.md` §1.1 / §6。
+> **Mock Provider + mock evaluator + Simulator 渠道现在可以开始人工测试。**
+>
+> 外部环境项仍有 Docker：本机没有 Docker CLI，`docker build` 两个镜像及
+> compose 六服务未执行；真实 FASHN / 真实渠道也没有凭据，因此未调用、未计费。
+> 另外，本轮文档复验发现仓库根当前存在 `.env`，`verify_delivery` 因此为
+> **18/19**；本轮未读取或删除它。交付前必须把凭据移出仓库树，若里面是真实凭据
+> 还要先轮换。正式 P0 冻结不能把这项和 Docker 一起写成已关闭。
+>
+> **这份 Mock 人工测试准入不等于 PRD 阶段 2 验收关闭。** `generation_service`
+> 的 `MODEL_REFERENCE` 分支仍在告警后直接返回，"不指定模特"仍会绕过受众与授权
+> 检查；冒烟改走已授权模板只是不再经过缺口，不是关闭缺口。当前状态见下方
+> 「已知限制」与 `AC-VERIFICATION.md` §3。
 
 > ## 2026-08-09 评审修复:F-12/F-4 颜色维可操作
 >
@@ -914,9 +969,12 @@
 >
 > ### D4 有一个真实的行为变更
 >
-> **CSV 导入从此要求 SPU 先存在。** 这不是兼容性疏漏:放行的代价是每一条走
-> 老路径的商品继续绕过 §4.2 受众必填,而那批商品正是将来 `spu_id` 收
-> NOT NULL 时挡在路上的那批。爆炸半径核过:1 个路由 + 1 条真库用例。
+> **历史边界:**D4 当时只关了 `create_product`；CSV 导入路径尚未同步，所以旧版
+> 把两条入口一起写成已关是错误的。**当前边界已由 §3.65 收口:**
+> `import_products()` 现在同样要求已存在 SPU，单颜色可补唯一颜色，多颜色必须给
+> `variant_code`；入库统一回填 `spu_id` / `color_variant_id` / SPU 权威受众与品类，
+> 找不到身份的行进入 `errors`，不自动造最简 SPU。旧的反向注释已清除，
+> `test_a45_batch16_doc_truth.py` 同时守正向契约和"不得残留反向断言"。
 >
 > ### 三处被工具当场证伪的判断
 >
@@ -2694,7 +2752,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 费用只按主币种汇总,不折算 | 「本月已花费」与预算进度条只统计 `SPEND_CURRENCY` 那一种,**这是刻意的**(汇率是估的,这一页用来发现异常不是对账)。a32 起有别的币种时页面会明说「另有 X 没有计入」并列出各币种金额(后端 `by_currency`,金额由 `format_money` 生成);a34 起 `by_currency` 还带 `calls` / `unpriced_calls`,于是**只有未配价调用的币种不再从提示里消失** —— 它金额是 0,而那个 0 的意思是"未知"不是"没花"。仍**没有**的是每日曲线本身 —— `/spend` 页至今不画曲线,`daily[]` 的数据没有消费方 |
-| 图片集变体绑定无入口 | `variant_coverage` 后端已算出并回在详情响应与批准审计里,但前端没有设置变体的地方,`variant_id` 恒为 null。所以变体覆盖规则至今不触发,**BLOCK-02 保持「处理中」,负责人「联合」**。a31 只修了属性那条同类问题(BLOCK-11),a32 也没动它 —— 它需要的不只是一个下拉框,还要决定「通用图 + 变体图混排时以哪个为准」,那是一个业务决定。今天所有图都是通用图,改成硬阻断等于让每个多色 SPU 立刻无法批准 |
+| ~~图片集变体绑定无入口~~ **已关闭,原文整条过期(2026-08-09 评审订正)** | 原文写着「前端没有设置变体的地方,`variant_id` 恒为 null,所以变体覆盖规则至今不触发,**BLOCK-02 保持「处理中」**」——**三句话全部与代码事实相反**,而且方向是最危险的那种:把已经做完的说成没做,下一个人会去补一个已经存在的门禁,或误判多色 SPU 今天可以带缺图批准。事实是:①入口在 `ImageSetTab.setVariant()`(A-26,行级颜色选择器 + 「再绑一个颜色」);②`image_set_rules.coverage()` 已删掉「有通用图就算覆盖」那条放行(§6.5:通用图只能进附图位、不得跨色回退);③`image_set_service.validate()` 与**批准路径**都传 `variant_ids=required_variant_ids(...)` + `required_angles`,有问题时抛 **409 阻断批准**。原文最后那句「今天所有图都是通用图,改成硬阻断等于让每个多色 SPU 立刻无法批准」是当时不做的理由,它随 A-26 的入口一起失效 |
 | 退回人不回显 | 退回回执显示原因、补充说明与时间,不显示退回人 —— 系统没有账号体系,`rejected_by` 取的是 `X-Actor` 头(缺省 `system`),显示出来是一个假的问责对象。该值仍落库并进审计,查得到 |
 | 属性值只能改标量与列表 | a31 按后端给的 `value_type` 渲染控件,列表字段不再被回传成字符串(BLOCK-11)。但值是**结构化对象**时仍然只读 —— 当前注册表里没有这类字段,真出现时界面会如实说「编辑器装不下」,而不是 `JSON.stringify` 之后当字符串存回去 |
 | A12 只覆盖主流程 | 换掉的是工作台主链路的 10 处。快审页(4 处)、审核队列、商品详情、任务详情、设置页等 17 处仍是 `Alert + readError`:文案对,但技术层没有落点,管理员在那些页面还得开控制台。**这 17 处没有被冻结进任何契约测试** —— 本文此前两处都声称有,是错的。`describeError` / `readError` / `<ErrorNotice>` 的**行为**在 `frontend/tests/` 里是有测试的(`client.test.ts`、`error-and-cold-start.test.tsx`),但**没有任何一条去数调用点**,所以加第 18 处 `Alert + readError` 不会有东西报错。要变成棘轮,得加一条统计 `readError(` 的 `<Alert>` 用法数与 `useWriteError(` 调用点数、只许减不许增的测试。另有 5 处 `message.error(readError(e))` 的 toast 按设计不迁移(全站 toast 调用点共 16 个,本文原写「100 多处」是错的)—— toast 装不下折叠面板 |
@@ -2704,8 +2762,9 @@
 | ~~属性识别只有 Mock~~ **A45-batch14 接上了 vision,但一次都没连过真模型** | 任务 7 已落码:`extractors/vision.py`,双 API 形状,复用 `llm/` 的传输层与图片层,`EXTRACTOR_BACKEND=vision` 即启用。**但它从未对着真实端点发过一次请求** —— 守卫全是纯逻辑与 AST,验的是「请求体长什么样、响应怎么解析」,验不到「厂商真的会这么回答」。第一次接真端点时要盯三件事:结构化输出降级(strict json_schema 被拒 → 换 json_object → 换 prompt_only)、`finish_reason=length` 有没有如实报成「输出被截断」而不是「JSON 不合法」、以及**账单上的调用数与 `provider_usage_records` 里 `operation='attribute_extract'` 的行数对不对得上**。`describe_extractors()` 从本批起如实上报(`configured` 问实现自己),所以配错时状态条会说「没配好」而不是「已就绪」 |
 | ~~**识别输入白名单还没收(§5.1 未落地)**~~ **已解决,原文已过期** |判定在 A45-batch14-7 就接上了(AI 图进不来),取数入口在 A45-batch14-19 收口(`media.evidence_assets_for()`)。原文说「今天仍走 `usable_assets()`、AI 图会进识别输入并产生真实付费调用」——**那句话从 14-7 起就不成立**,留着它会让人去查一个不存在的问题。真库验证 `tests/test_a45_batch14_19_evidence_query_db.py` 已写、未跑 |
 | **AI 图伪装成样品:两条路堵了,第三条还开着** | A45-batch14-11 接了 §11 / AC-22 的溯源冲突拦截:同 SPU 同 sha256 命中带溯源的行时,新建那一路落隔离、去重命中那一路不再补角色。**但拦截的判据是「本系统生成过这张图」,不是「这张图是 AI 画的」** —— 从别处拿来的 AI 图(外部工具生成、供应商推来的合成图)没有任何溯源痕迹,照样成为 `PRODUCT_EVIDENCE`。堵那一条要靠图像侧的判别,不在本期范围。另外:冲突**只记 `logger.warning`,没有落审计**(`ingest()` 手里没有 actor,记谁头上是一个业务决定);隔离行经 `release()` 人工放行后会**重新成为证据**(它的 `source` 是 `MANUAL_UPLOAD`,而 `evidence_class` 由 source 派生)—— 那是设计(人工放行的语义就是「我确认这确实是实物样品照」),但**没有人在真界面上走过这一步** |
+| **"不指定模特"绕行缝仍未关闭(C-10)** | `generation_service._assert_assets_are_usable()` 的 `MODEL_REFERENCE` 分支仍在结构化告警后直接返回，跳过 §10.5 受众与 §11 授权/年龄/AI 换装/禁用品类检查。迁移 `0038` 已提供 `generation_task_id` / `generation_candidate_id` 溯源列，**前置已满足但闭环未接**；下一步必须用溯源解析到可执行同等检查的授权主体，解析不了就拒绝。`make smoke` 改走已授权模板只是不再踩缝，不能记成关缝；因此 PRD §13 阶段 2 的对应验收项仍未满足 |
 | 「有证据但不采信」没有界面 | A45-batch14-11 的判定已经产出 `ATTR_EVIDENCE_ONLY` 阻断与 `FILL_ATTRIBUTES` 动作码,前端补了动作码的三张镜像表 + 首页「其余待办」。**但属性页上没有为这条动线做任何事** —— 没有「这批字段为什么不采信」的分组展示,也没有一键人工填写入口。运营点「人工填写属性」会落在属性页,然后自己逐个找。真实抽取器接上、校准为空时这条动线会是主路径,那时要补 |
-| 识别的付费调用与请求事务同生死 | 同步路径上 `record_usage` 写的行在同一个事务里。付费调用已经发生、而同请求内后续步骤回滚时,**流水行会跟着回滚,钱却真的花了**。生成链路靠三段事务 + `billing_key` 解决同型问题,识别这边的正解是 §4.6 的异步化(阶段 3 第二批):run 落库与调用分开。本批只记账,不改事务形状 —— 改了在这台机器上验不了 |
+| ~~识别的付费调用与 HTTP 请求事务同生死~~ **已由 0054 关闭** | 两个 HTTP 入口现在只 `queue_extraction()`，先提交 QUEUED run，再投递 Celery；真实模型调用与 `record_usage` 在 worker 的独立会话中执行，后续 HTTP 回滚不再撤销已经发生的调用流水。迁移 `0054` 同时落输入快照、逐图成绩、取消与恢复列，relay/reaper 补漏投与卡死。Windows 真基础设施记录见本文顶部与 `AC-VERIFICATION.md` §11。**这只关闭“HTTP 事务同生死”这笔账**；真实供应商的计费口径仍未连端点验证，见上方 vision 限制，不合并宣称 |
 | 配置变更无值历史 | 审计只记谁改了哪些键,不记改前改后的值(记了等于把明文密钥换个地方存) |
 | worker 配置最终一致 | 改完配置 worker 最迟 `SETTINGS_CACHE_TTL_SECONDS` 秒跟上,期间两边可能不同 |
 | FALLBACK 路由 | 显式抛错说明尚未实现,不假装支持 |
@@ -2727,14 +2786,14 @@
 | 批次租约的预算算错了三批,现已按识别配置推导 | A45-batch18 / P2-1:`LONGEST_LEGAL_ITEM_SECONDS` 原来是 `90×3×4`,三项全部取自 **VISION_MODEL_\*(评分器)**,而批次里跑的 EXTRACT 读的是 **EXTRACTOR_MODEL_\***。真实上限 `60×3×12 = 2160` 秒 > 当时的租约 1800 秒 —— 那条「租约必须长于单件最长合法耗时」的不变量**在默认配置下根本不成立**,而模块级 `if` 因为被除数取错一次都没红过。现在 `ITEM_LEASE_SECONDS` = 3600、`BATCH_PROGRESS_STALL_SECONDS` = 2700,并加了一条读**实际部署配置**的启动检查(`lease_budget_shortfall()`,设置页改大超时/图片上限时会报 error 日志) |
 | 付费调用前的续租现在是**已提交**的事实 | A45-batch18 / P2-1:A43 加的 `renew_lease()` 顺序一直是对的(在 `_execute()` 之前),但那条 UPDATE 留在外层事务里,而外层事务要等结果保存完才提交 —— 整个付费调用期间回收器读到的仍是**领取时**那个 `lease_until`,续租等于没续。源码扫描看不见这个区别(两种写法顺序完全一样)。现在续租后立即提交,并补了双会话真库用例 `tests/test_a45_batch18_lease_visibility_db.py`(3 条,含一条反向用例证明不提交时确实读不到)。**该用例已写、未跑** |
 | 门禁扫工作树,交付的是版本库 | A45-batch18 / P1-1:外部评审发现 `0046` / `0047` 两条迁移与对应测试**未被 Git 跟踪** —— 本机 `alembic heads` 说 0047、`verify_delivery` 16/16、纯测试全绿,而 clean checkout 的最后一条迁移是 `0045`。新增门禁 `check_every_migration_and_db_test_is_tracked_by_git()`(问 `git ls-files`,不是 Git 工作树时直接失败)。**它写完当场就红了**,红在本批自己新增的 `0048` 和那个新 DB 测试上 |
-| 向导浏览器未实测 | A45-batch29:`/wizard/:id` 七步页面有 13 条 Vitest 组件用例(轨道、刷新恢复、挂载不发写请求、费用与影响提示),**但没有人在浏览器里从头走过一遍**。与任务 20-A 的发布页同一状态 —— Playwright 主流程在任务 24。「用例绿」证明的是编排逻辑,证明不了 antd 布局在真实分辨率下读不读得下去 |
+| 向导浏览器**部分**实测(2026-08-09 评审补) | A45-batch29 时这一行写的是「**没有人在浏览器里从头走过一遍**」。现在 AC-16 那一条走过了:`frontend/tests/e2e/wizard-refresh.spec.ts` 3 条真浏览器用例(刷新后停在 URL 上那一步、停在那个颜色、不带 `step` 时落后端算出的当前步),`page.reload()` 真的重建 JS 上下文 —— 组件卸载重挂载替代不了它。做过反证:把 `WizardPage` 的 `values.step ?? wizard.current_step` 改成恒用后端值,第一条当场变红。**仍然没有走过的**:七步从头到尾的业务动线(任务 24 的主体)、antd 布局在真实分辨率下读不读得下去、以及「断线重连不丢进行中任务」(要真 worker)。发布页(20-A)仍是一条浏览器用例都没有 |
 | AC-05 的闸只在 HTTP 边界 | A45-batch29:`_ensure_action_allowed` 挂在 `generate_copy` / `build_draft` / `export_draft` 三个**接口**上,不在 service 层。**这是刻意的**:批次执行直接调 service 函数,它有自己的跳过判定与回执表,在 service 层加同一道闸会让批次在"这一件还没就绪"时抛异常而不是记一条跳过。代价是:任何绕过 HTTP 直接调 service 的新代码路径不受它管,而今天没有守卫能发现新增了这样一条路径 |
 | 影响提示是**对象级**的,没有字段级 | A45-batch30:AC-17 的原话是"对象 / 字段 / 需要执行的动作"。`stale_matrix` 是 (变更源 × 对象) 的矩阵,给得出对象与动作,**给不出"哪几个字段会失效"** —— 那取决于运营具体改的是哪一个字段,而提示发生在他改之前、还没选定字段的时候。字段级今天只有**事后**那一份:草稿变 STALE 之后 `GET /draft/stale-reason`(BE-205)会点名字段。要做事前字段级,得让接口接受"我要改哪个字段"并按注册表推依赖,那是一条新口径,本批不猜 |
 | 费用预估的用量是估的,而且方向恒定偏小 | A45-batch30:按"每个缺角度出 1 张候选图、每张评一次分"算,不含重试、评分退回与人工重做。文案生成今天不写付费流水(生成器未接付费后端),Mock 抽取器/评分器不计费 —— 两者都不计入,并在 `notes` 里说出来。未配价的动作金额记 `None` 且**不进总额**,界面显示「未配价」而不是 ¥0。所以那个总数**永远是下限**,`is_complete=false` 时界面会明说它不全 |
 | 本地存储 | 后端 `/files` 直接托管,仅适合开发;生产改 `STORAGE_BACKEND=s3` |
 | 上传走内存 | 20 MB 上限下可接受;大文件需改流式落盘 |
 | 平台侧全手工 | 平台状态与驳回原因都靠人录入,不接平台 API |
-| API 驳回关不掉 | `resolve_gate()` 认的「已修复」证据是**驳回之后有一次新的导出**,而 API 自动上架的商品根本不走导出。于是驳回记得进台账(`located_by=publish_attempt`)、却关不掉。当前处置:在工作台手工标记解决。发布接口会如实把这一条报出来(`blocking_reasons` 里的 `REJECTION_CANNOT_AUTO_CLOSE`),不假装没有。**由任务 20-B 补齐** —— 把「驳回之后有一次新的提交尝试」也算作等价证据,判据落在 `PublishAttempt` 上(时间晚于 `PlatformRejection.created_at` 且草稿指纹变过) |
+| ~~API 驳回关不掉~~ **新数据已能自证关闭,旧数据仍需人工(2026-08-09 评审订正)** | 原文写「`resolve_gate()` 认的证据是驳回之后有一次新的**导出**,而 API 自动上架的商品根本不走导出,于是关不掉,**由任务 20-B 补齐**」——**20-B 已经落码**。`platform_service._publish_attempt_entries()` 把「驳回之后有一次**成功的**提交尝试」当作等价证据喂进 `resolve_gates()` 与解决路径;关联走 `ChannelListing.draft_id`,指纹那半边仍落在当前草稿指纹上,所以**没改草稿的重复提交过不了闸**;只认 `SUCCEEDED`(PENDING/IN_FLIGHT 没结果、UNKNOWN 不知道平台收没收到、FAILED/ABORTED 没提交成功)。**仍然欠两件**:①**真库 seam 没有** —— 从一行真实 `PublishAttempt` 穿过 `platform_service` 到驳回关闭,没有一条真库用例走完过;②`draft_id IS NULL` 的历史驳回关联不上尝试,仍然只能在工作台手工标记。发布接口对后者照旧如实报 `REJECTION_CANNOT_AUTO_CLOSE` |
 | 发布页没跑过浏览器 | 界面已补齐(B-02 关闭,`PublishPage.tsx` + 侧栏「发布上架」+ 导出页跳转)。**「没有 tsc、没有 vitest」这半句已过期**(A45-batch24 订正):`npm run typecheck` 与 `node tools/syntax-check.mjs` 从阶段 4 起就覆盖全部 89 个前端文件,`PublishPage.tsx` 在内。仍然成立的是最后半句 —— **没有一条用例点开过它**:Vitest 的 78 条覆盖 saveBlob、路由拦截、草稿页图片预览等,不含发布页;Playwright 未开工。门禁验到"入口存在且不自建第二份判定",验不到"点下去这一步真的发生了" |
 
 | ~~集成测试有 15 条真实失败~~ **A42 已全部修** | 第一次把 `requires_db` 那批真的跑起来:1652 条 0 跳过,**最初 15 条失败**。根因是三件事:(1)产品缺陷:`POST /api/reviews/{id}/approve|reject|regenerate` 三个接口无条件 500 —— `_basic_review_out` 签名被改而三处调用没改,**这是生产 bug,非测试杂项**;(2)既有夹具缺陷:`celery_eager` 把 `commit` 换成 `flush`,导致应用代码的 `rollback()` 回到用例开头,同一任务被派发两次,第二次抢不到、rollback 全清 —— 改用 `savepoint` 模式;(3)过期断言:人工通过后任务继续走完出图,不停在中间态。修后:1652 全绿,含批次并发 8 条、生成链路 21 条、审核链路 17 条,全部真库双 session/Celery eager 跑过 |
@@ -2800,7 +2859,7 @@ PG `39.97.61.13:5432` + Redis `39.97.61.13:6379`,本机直连,**不起 Docker**�
 |---|---|---|
 | P0-1 真库 pytest 全量 | ❌ | `POST /api/products` 接口契约改了(SPU 外键化),12-4/12-5 fixture 仍走老路径,11/13 在 `_product_with_asset` 上 422 |
 | P0-2 Alembic 升降级 | ✅ | `imagegen_test` 上 0038→0045→base→0045 全链通过;`imagegen` 未动 |
-| P0-3 前端四条 + docker | ⚠️ | typecheck 6 条 TS2322(`nav-and-url-filters.test.tsx`);Vitest 因 `node_modules/.vite` root-owned EACCES;docker 两条未验证 |
+| P0-3 前端四条 + docker | ⚠️ | ~~typecheck 6 条 TS2322(`nav-and-url-filters.test.tsx`);Vitest 因 `node_modules/.vite` root-owned EACCES~~ **前两格已于 2026-08-09 复验关闭**(typecheck 退出 0 零诊断、Vitest 97/97,见 `AC-VERIFICATION.md` §10);**docker 两条仍未验证** |
 | P0-4 R-04/R-05 | ✅ | `run_pure_tests.py batch12_7` 16/16 + `verify_imports.py` 419 文件 |
 | P0-5 BILLED_RESULT_UNKNOWN 演练 | ✅ | `12-7_billed_unknown` + `batch_receipt_lifecycle` 18/18 |
 | P0-6 租约 fencing 双 session | ⚠️ | `batch_lease_concurrency` 1 条真库跑绿;`12-5` 5 条同 P0-1 fixture 问题 |

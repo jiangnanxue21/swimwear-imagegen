@@ -250,6 +250,22 @@ def _send(task_id: UUID) -> None:
     run_generation_task.delay(str(task_id))
 
 
+def send_attribute_extraction(extraction_id: UUID) -> int:
+    """投递一个已提交的识别 run。失败留在 QUEUED，beat 下一拍补投。"""
+    from app.tasks.attribute_tasks import run_attribute_extraction
+
+    try:
+        run_attribute_extraction.delay(str(extraction_id))
+    except Exception:  # noqa: BLE001
+        # Broker URL 可能含密码，异常原文不进入日志。
+        logger.warning(
+            "attribute extraction dispatch failed; queued run will be relayed",
+            extra={"extra_fields": {"extraction_id": str(extraction_id)}},
+        )
+        return 0
+    return 1
+
+
 def _deliver(session: Session, row: TaskDispatch, *, send=_send) -> bool:
     try:
         send(row.task_id)
@@ -259,7 +275,8 @@ def _deliver(session: Session, row: TaskDispatch, *, send=_send) -> bool:
         # 只记类型/内部码,绝不记异常原文:Broker URL 里带着密码
         mark_failed(session, row, describe_failure(exc))
         logger.warning(
-            "dispatch attempt failed, will retry from outbox",
+            "dispatch attempt failed (%s), will retry from outbox",
+            type(exc).__name__,
             extra={
                 "extra_fields": {
                     "task_id": str(row.task_id),

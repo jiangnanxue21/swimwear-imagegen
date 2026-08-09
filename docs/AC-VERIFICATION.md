@@ -79,11 +79,16 @@ STATUS.md §「阶段 1 剩余项:三步建档 UI」记的是同一笔账 ——
 
 **② P0-3:一真一假,别读成同一类**
 
-| 子项 | 归类 | 事实 |
+> **⚠ 这一格的前两行已于 2026-08-09 复验关闭,原文保留作历史证据。**
+> 当前结论见 [§10](#10-2026-08-09-p0-3-前两行复验关闭)。**照这两行去修的人会找不到问题** ——
+> `nav-and-url-filters.test.tsx` 的 6 条 `TS2322` 现已不复现,Vitest 也跑得起来了。
+> 第三行(docker)仍然成立。
+
+| 子项 | 归类 | 事实(2026-08-07 当时) |
 |---|---|---|
-| `npm run typecheck` | **真错(代码)** | `tests/component/nav-and-url-filters.test.tsx` 6 条 `TS2322`(`Codec<undefined>` 不可赋给 `Codec<never>`)。**退出码是 0** —— CI 若只看退出码会整批漏掉,这本身是门禁缺陷。 |
-| `npm run test`(Vitest) | **机器前提,非代码** | `node_modules/.vite` 由 root 拥有,当前用户无 sudo 通道,`mkdir` 被 `EACCES` 挡下。**一条用例都没起来** —— 空结果不能读作「通过」。 |
-| `docker build` 后端 / 前端 | **未验证** | 本机无 `docker` 命令,两条都没跑。 |
+| ~~`npm run typecheck`~~ | ~~**真错(代码)**~~ **已关闭** | `tests/component/nav-and-url-filters.test.tsx` 6 条 `TS2322`(`Codec<undefined>` 不可赋给 `Codec<never>`)。**退出码是 0** —— CI 若只看退出码会整批漏掉,这本身是门禁缺陷。 |
+| ~~`npm run test`(Vitest)~~ | ~~**机器前提,非代码**~~ **已关闭** | `node_modules/.vite` 由 root 拥有,当前用户无 sudo 通道,`mkdir` 被 `EACCES` 挡下。**一条用例都没起来** —— 空结果不能读作「通过」。 |
+| `docker build` 后端 / 前端 | **未验证**(仍然成立) | 本机无 `docker` 命令,两条都没跑。 |
 
 **③ 22 条 AC 仍是 0 条完整通过；AC-10/11/18/19 已有 batch19~23 的部分自动证据（含真库）**
 
@@ -174,11 +179,14 @@ head 已是 0045);脚本本身仍可运行,但 Item P0-2 那条注释「expected
 
 ### P0-3 前端 typecheck / lint / Vitest / build + Docker build
 
-| 子项 | 结果 |
+> **⚠ 本节前两行已于 2026-08-09 复验关闭。** 当前结论见 [§10](#10-2026-08-09-p0-3-前两行复验关闭);
+> 下表是 2026-08-07 当时的原始证据,保留不删。
+
+| 子项 | 结果(2026-08-07 当时) |
 |---|---|
-| `npm run typecheck` | **失败** —— `tests/component/nav-and-url-filters.test.tsx` 6 条 TS2322(`Codec<undefined>` 不赋给 `Codec<never>`)。退出码 0(TSC 输出不等于非零退出),但实际有错误。 |
+| ~~`npm run typecheck`~~ **已关闭(§10)** | **失败** —— `tests/component/nav-and-url-filters.test.tsx` 6 条 TS2322(`Codec<undefined>` 不赋给 `Codec<never>`)。退出码 0(TSC 输出不等于非零退出),但实际有错误。 |
 | `npm run lint` | **通过** —— `✖ 6 problems (0 errors, 6 warnings)`,退出码 0。 |
-| `npm run test` (Vitest) | **失败** —— `EACCES` `/Users/xueguozhi/.../frontend/node_modules/.vite/vitest`(`mkdir`)。该目录由 root 拥有,本机用户没有 sudo 通道(已 `sudo` 试过 `egg-info` 与 `.vite` 都无权删)。 |
+| ~~`npm run test` (Vitest)~~ **已关闭(§10)** | **失败** —— `EACCES` `/Users/xueguozhi/.../frontend/node_modules/.vite/vitest`(`mkdir`)。该目录由 root 拥有,本机用户没有 sudo 通道(已 `sudo` 试过 `egg-info` 与 `.vite` 都无权删)。 |
 | `npm run build` | **通过** —— 退出码 0。 |
 | `docker build backend` | **未验证** —— `docker` 命令本机不存在。 |
 | `docker build frontend` | **未验证** —— 同上。 |
@@ -316,9 +324,13 @@ PRD §13 阶段 1 验收段写的判据:
   成为唯一取数入口」
 - 「跨颜色重复图需人工确认」 —— 落码(14-23 / 14-26)
 - 「§17-2 图片模特受众核对接线」 —— 落码(14-15)
-- 「不指定模特」绕行缝 —— 已关闭(STATUS 记)
+- 「不指定模特」绕行缝 —— **仍未关闭**。`generation_service.py` 的
+  `if "MODEL_REFERENCE" in roles:` 仍在告警后直接返回,跳过受众与授权检查。
+  `media_assets.generation_task_id` 等溯源列已经落地,所以"缺迁移"不再是前置；
+  尚未完成的是把自由素材解析到可执行同等检查的授权主体,或在无法解析时拒绝。
 
-**未验证**。这些断言需要在真实上传流程 + 真实样品的链路下走完。本机有
+**未验证,且阶段 2 的「绕行缝关闭」验收项当前明确未满足。** 其余断言仍需在
+真实上传流程 + 真实样品的链路下走完。本机有
 `sample-data/`(10 件女装占位图,STATUS §1 记「不满足真实样品要求」),但
 **「跨颜色重复图需人工确认」** 这种判据**只有在真实样品 + 真实抽取器调度的
 全链路下才能观察**。
@@ -599,3 +611,76 @@ tests/test_batch_lease_concurrency_db.py
 
 本次没有执行真实模型调用、Docker build、Playwright E2E 或完整 Redis/Celery 集成
 套件，因此不能据此宣称阶段 P0 或 AC-01~AC-22 全部关闭。
+
+---
+
+## 10. 2026-08-09 P0-3 前两行复验关闭
+
+本节**取代** §0.5 ② 与 §1 P0-3 前两行的结论。它们记的是 2026-08-07 那台机器上的事实,
+而那两条一条是代码错、一条是机器前提 —— 两条都已经不成立,却一直挂在
+「先说结论」那一格里。这正是本仓反复点名的那类过期:**读者按最上面那一段开工,
+去修一个不存在的类型错误。**
+
+### 10.1 复验环境
+
+Linux 容器,Node 22.22.2 / npm 10.9.7,`npm install` 装齐依赖后就地执行。
+`node_modules/.vite` 由当前用户拥有,**没有 §1 那条 `EACCES` 前提**。
+本机**无 PostgreSQL、无 Redis、无 docker daemon**,所以真库与镜像两类仍未跑。
+
+### 10.2 结果
+
+| 子项 | 2026-08-07 | 2026-08-09 复验 |
+|---|---|---|
+| `tsc --noEmit` | 失败,6 条 `TS2322` | **通过 —— 退出码 0,零诊断输出** |
+| `vitest run` | 未执行(`EACCES`) | **通过 —— 10 个文件,97/97** |
+| 后端纯逻辑 | — | **2728/2728 passed, 0 failed** |
+| `verify_delivery.py` | 16/16 | **17/17** |
+| `verify_sample_data.py` | — | **10/10**(含「存在三颜色九 SKU 的 SPU — SPU-SW-101」) |
+| `verify_imports.py` | 419 文件 | **474 文件全部解析得通** |
+| `audit_column_writers.py` | — | **542 列都答得出谁写它**(28 条在台账上) |
+| `docker build` ×2 | 未验证 | **仍未验证**(本机无 docker daemon) |
+
+§0.5 ② 表里那句「**退出码是 0** —— CI 若只看退出码会整批漏掉,这本身是门禁缺陷」
+**仍然是一条有效的门禁意见**,不因这次复验而失效:`tsc` 有诊断时是否非零退出,
+取决于调用方式,而 `npm run typecheck` 今天走的是 `tsc --noEmit`。这一条与
+6 条 TS2322 是两件事,不要一起划掉。
+
+### 10.3 本轮新增的证据(不只是复验)
+
+| 项 | 证据 |
+|---|---|
+| **AC-16 刷新恢复**:真浏览器 | `frontend/tests/e2e/wizard-refresh.spec.ts` 3 条,Chromium 真跑。`page.reload()` 重建整个 JS 上下文 —— 组件卸载重挂载替代不了。**做过反证**:`WizardPage` 的 `values.step ?? wizard.current_step` 改成恒用后端值,第一条当场变红 |
+| **PRD §9.1 建档幂等** | `POST /api/spus` 接 `Idempotency-Key`(迁移 0053 两列 + 部分唯一索引)。判定层 10 条纯用例;前端客户端 3 条单元用例。**落库那一半未跑**(本机无 PG) |
+| Playwright 整体 | 6/6 passed(3 条 smoke + 3 条向导刷新) |
+
+### 10.4 这次复验**没有**改变的结论
+
+- **P0-1 / P0-2 / P0-4 / P0-5 / P0-6 一个字都没重跑**(本机无 PG/Redis)。
+- **AC-01~AC-22 仍是 0 条完整通过。** 本节只动 P0-3 的两格,不动 §6 那张全表。
+- **阶段 P0 仍未关闭**,§14.3 的人工测试准入仍不满足。
+
+## 11. 2026-08-09 Windows 真基础设施回归与人工测试交接
+
+本节取代 §10.4 中“本机无 PG/Redis、真库未跑”的环境结论；Docker 结论不变。
+用户在当前任务明确授权连接本地 PostgreSQL 与远端 Redis，凭据仅放进进程环境，
+没有写入仓库。
+
+| 项 | 结果 |
+|---|---|
+| PostgreSQL + Redis 全量 pytest | **3128/3128 passed**（172 个文件） |
+| Alembic | 新建 UAT 库从空库升级到 `0054 head`；全量测试另含升降级链用例 |
+| Celery | 空闲 Redis 逻辑库上启动真实 solo worker，`health.ping` 返回 SUCCESS |
+| HTTP | Uvicorn 真启动，`/api/health=ok`，SPU 列表 3/3 |
+| 前端 | typecheck、lint、Vitest **100/100**、build、syntax **93/93** |
+| Playwright | Chromium **6/6** |
+| Docker build ×2 / compose | **未执行**：本机没有 Docker CLI |
+
+UAT 数据库 `swimwear_imagegen_uat` 已迁移并播种（3 SPU / 6 颜色 / 19 SKU /
+21 素材）。因此 Mock Provider、mock evaluator 与 Simulator 渠道可以开始人工走查；
+正式 P0 仍不能宣称全关，剩余的是 Docker images job。真实 FASHN / 真实渠道没有
+凭据，也不属于这次 Mock 人工准入的通过项。
+
+> **后续工作树状态（本轮文档复验）：**仓库根现在存在 `.env`，所以当前
+> `verify_delivery` 是 18/19，而不是本节真环境回归当时的 19/19。本轮没有读取或
+> 删除该文件；交付前必须移出仓库树，若含真实凭据还要先轮换。本节的 0054 真库
+> 记录仍有效，但不能拿历史的交付卫生结果覆盖当前失败。

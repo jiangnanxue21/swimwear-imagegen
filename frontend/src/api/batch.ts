@@ -650,6 +650,7 @@ export interface ImportPreviewResponse {
   created?: number
   skipped_existing?: number
   failed?: number
+  preview_token?: string
 }
 
 export interface ImportColumn {
@@ -867,9 +868,10 @@ export const batchApi = {
     ).data
   },
 
-  importCommit: async (file: File) => {
+  importCommit: async (file: File, previewToken: string) => {
     const form = new FormData()
     form.append('file', file)
+    form.append('preview_token', previewToken)
     return (
       await apiClient.post<ImportPreviewResponse>('/workbench/import/commit', form)
     ).data

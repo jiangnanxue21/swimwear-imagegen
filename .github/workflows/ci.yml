@@ -77,6 +77,25 @@ jobs:
       POSTGRES_USER: imagegen
       POSTGRES_PASSWORD: imagegen
       POSTGRES_DB: imagegen
+      # ---- 测试库契约(2026-08-09 评审 F-01)----
+      #
+      # `tests/conftest.py` 要两样东西,少一样这个 job **在 collect 阶段就炸**:
+      #
+      #   1. 一个真的存在、且**库名以 `_test` 结尾**的库。conftest 不传
+      #      TEST_DATABASE_URL 时会从 DATABASE_URL 推出 `imagegen_test`,
+      #      而 postgres 服务只建了 `imagegen` —— 连不上。
+      #   2. `ALLOW_DESTRUCTIVE_TEST_DB=1`。夹具会无条件
+      #      `DROP SCHEMA public CASCADE`,`_assert_safe_to_wipe()` 要求人显式确认。
+      #
+      # 而 GitHub Actions 自己会设 `CI=true`,于是 conftest 的
+      # `_database_required()` 为真 —— 连不上不是 skip,是
+      # `raise RuntimeError` 当场终止收集。**这个 job 因此从来没有绿过**,
+      # 连带 `all-green` 也没有,而分支保护正是挂在 all-green 上。
+      #
+      # 显式写 TEST_DATABASE_URL 而不是靠推导:推导依赖 DATABASE_URL 的形状,
+      # 哪天主库地址带上查询参数,推导仍然对、但这里读起来就不明显了。
+      TEST_DATABASE_URL: postgresql+psycopg://imagegen:imagegen@localhost:5432/imagegen_test
+      ALLOW_DESTRUCTIVE_TEST_DB: "1"
       REDIS_URL: redis://localhost:6379/0
       SETTINGS_SECRET_KEY: ci-fixed-key-not-for-production
     steps:
@@ -84,6 +103,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: 建专用测试库
+        # 夹具建的是 **schema**(走 alembic),建不了**库**本身。
+        # `IF NOT EXISTS` 让这一步可重跑 —— job 重试时不该因为库已存在而红。
+        run: |
+          PGPASSWORD=imagegen psql -h localhost -U imagegen -d imagegen -tc \
+            "SELECT 1 FROM pg_database WHERE datname='imagegen_test'" \
+            | grep -q 1 || PGPASSWORD=imagegen psql -h localhost -U imagegen -d imagegen \
+            -c "CREATE DATABASE imagegen_test"
       - name: 安装后端(含 dev 依赖)
         run: cd backend && pip install -e ".[dev]"
       - name: Ruff
@@ -140,7 +167,17 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: cd frontend && npm ci
       - run: cd frontend && npx playwright install --with-deps chromium
-      - name: 主流程 e2e
+      # 步骤名按**实际覆盖**写,不按打算覆盖的写。
+      #
+      # 这里原来叫「主流程 e2e」,而 `frontend/tests/e2e/` 至今只有
+      # `smoke.spec.ts`(应用外壳能起来 / 路由不打空 / 断言失败真的会红),
+      # 且用例内部 `page.route('**/api/**')` 把后端全拦了。主流程用例是
+      # 任务 24,`REVIEW.md` 12.1 表里仍未开工。
+      #
+      # 一个名字比覆盖范围大的绿灯,比没有这个 job 更危险:它让人以为
+      # 主流程每次提交都验过。改名不动命令 —— `verify_delivery.py` 找的是
+      # 命令字面量,不是步骤名。
+      - name: e2e 冒烟(骨架;主流程用例见任务 24)
         run: cd frontend && npm run e2e
 
   # ---------------------------------------------------------------- 生产镜像

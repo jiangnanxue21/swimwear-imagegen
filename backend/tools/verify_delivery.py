@@ -356,6 +356,70 @@ def check_ci_backs_pytest_with_redis() -> None:
         )
 
 
+def check_ci_satisfies_the_test_database_contract() -> None:
+    """跑 `pytest` 的 job 必须满足 `tests/conftest.py` 的测试库契约。
+
+    ## 这条门禁补的是哪一格(2026-08-09 评审 F-01)
+
+    上一条只问「PostgreSQL 服务声明了没有」，而 conftest 要的**不是**主库：
+
+        TEST_DB_URL = os.getenv("TEST_DATABASE_URL") or _derive_test_url()
+        # 推导 = 把 database 段换成 `<主库名>_test`
+
+    再加一道 `_assert_safe_to_wipe()`：库名必须以 `_test` 结尾，**且**必须显式
+    设 `ALLOW_DESTRUCTIVE_TEST_DB`（夹具会 `DROP SCHEMA public CASCADE`）。
+
+    而 GitHub Actions 自己会设 `CI=true`，于是 conftest 的
+    `_database_required()` 为真 —— 连不上**不是 skip，是 collect 阶段
+    `raise RuntimeError`**。少任何一样，这个 job 都不是"少跑几条"，
+    是**整个 job 起不来**。
+
+    这就是它为什么值得单独一条：`postgres:` 和 `POSTGRES_DB` 都在、
+    上一条门禁全绿，而 `backend` job 从来没有绿过 —— 连带
+    `all-green` 也没有，而分支保护挂的正是 all-green。
+    一条永远红的门禁最后会被人摘掉，而摘掉它之前没有任何东西会说
+    「你摘的是唯一验证这次改动的那批用例」。
+
+    ## 为什么问三件事而不是一件
+
+        建库        `pg_database` / `CREATE DATABASE` —— 夹具建 schema，建不了库
+        指向        `TEST_DATABASE_URL`（或能推导出 `_test` 的主库名）
+        销毁授权    `ALLOW_DESTRUCTIVE_TEST_DB`
+
+    三件缺任何一件，失败信息都完全不一样，而且都不指向真正的原因。
+    """
+    ci = _ci_text()
+    if "pytest" not in ci:
+        return  # 上一条已经会因此失败，这里不重复报
+
+    lacking: list[str] = []
+    if "ALLOW_DESTRUCTIVE_TEST_DB" not in ci:
+        lacking.append(
+            "ALLOW_DESTRUCTIVE_TEST_DB —— conftest._assert_safe_to_wipe() 要求"
+            "显式确认这个库可以被 DROP SCHEMA，没有它夹具直接拒绝执行"
+        )
+    if "TEST_DATABASE_URL" not in ci:
+        lacking.append(
+            "TEST_DATABASE_URL —— 不写的话 conftest 从 DATABASE_URL 推导出"
+            "`<主库名>_test`，而那个库 CI 里没人建"
+        )
+    # 建库这一步：接受任何一种写法（psql / createdb / initdb 脚本），
+    # 只要求 CI 里真的出现「建一个 _test 库」这件事。
+    creates_test_db = "CREATE DATABASE" in ci.upper() or "createdb" in ci
+    if not creates_test_db:
+        lacking.append(
+            "建专用测试库的步骤 —— 夹具走 alembic 建的是 schema，"
+            "**库本身**得先存在（postgres 服务只按 POSTGRES_DB 建了主库）"
+        )
+    if lacking:
+        raise Failure(
+            "CI 跑 pytest 但不满足 tests/conftest.py 的测试库契约：\n  "
+            + "\n  ".join(lacking)
+            + "\n少任何一样，这个 job 都不是少跑几条 —— GitHub Actions 会设 "
+            "CI=true，conftest 因此在 collect 阶段 raise，整个 job 起不来。"
+        )
+
+
 def check_the_offline_gate_is_honest_about_its_coverage() -> None:
     """`make check` 要么覆盖全部门禁，要么说清楚自己没覆盖什么。
 
@@ -859,7 +923,7 @@ DEBT_GUARD_MARKER = "记的是欠账"
 #: 这是 §3.26「docstring 是源码的一部分」的又一个方向——前几次是文档把
 #: 断言喂成平凡真,这次是文档把判据喂成假阳。
 #:
-#: 收进第一段是有依据的,不是为了绕开:仓库里四条欠账守卫的声明**全都**
+#: 收进第一段是有依据的,不是为了绕开:仓库里现存欠账守卫的声明**全都**
 #: 写在第一行,形如「**这条守卫记的是欠账,不是成绩。还款日:阶段 N。**」。
 #: 也就是说这条规矩本来就存在,只是原来没写下来——**声明写在开头,
 #: 解释可以出现在任何地方。**
@@ -888,7 +952,7 @@ DEBT_GUARD_NAME_HINTS = (
 #: 还款日。**只有一种写法:交付阶段。**
 #:
 #: 第一版这里还有一种「还款日:条件式」,意思是"某件事落地那天守卫自己会红,
-#: 判据长在自己身上,不用外部盯"。写完之后回头核了一遍仓库里那四条欠账,
+#: 判据长在自己身上,不用外部盯"。写完之后回头核了一遍仓库里现存欠账,
 #: **没有一条用得上它** —— 每一条都自称"接线那天这条会红",而每一条同时
 #: 都有一个真实的阶段死线。
 #:
@@ -919,6 +983,58 @@ def _declared_stage() -> int:
     return int(match.group(1))
 
 
+_CODE_STAGE = re.compile(r"<!--\s*CODE_STAGE\s*[:：]\s*([0-9]+)\s*-->")
+
+
+def check_stage_markers_are_consistent() -> None:
+    """两个阶段标记必须都在，且结算不许跑到落码前面（2026-08-09 评审 F-04）。
+
+    ## 为什么要两个标记
+
+    `DELIVERY_STAGE` 原来自称"本仓当前落码到第几阶段"，而它实际是**欠账结算
+    闸**：往上加一，所有还款日 ≤ 新值的欠账守卫当场变红。于是阶段 5、6 都
+    落码之后，这个数字仍然停在 4 —— 停在能让门禁保持绿的那个位置。
+
+    一个自称 A 而实际是 B 的标记，比没有标记更糟：读它的人会以为阶段 5、6
+    没有开工，然后去重做一遍已经写好的东西（本仓为这个形状付过三次账，
+    根 `CLAUDE.md` 里 5/6、7/9 那两段点名的就是它）。
+
+    所以拆成两个：
+
+        DELIVERY_STAGE  欠账结算阶段 —— 闸，还款日 ≤ 它的欠账必须已还清
+        CODE_STAGE      已落码阶段   —— 如实描述，不参与任何闸
+
+    ## 这条门禁只钉一个方向
+
+    `CODE_STAGE >= DELIVERY_STAGE`。反过来意味着"结算跑到了落码前面"，
+    而那只有一种成因：有人为了让某条门禁变绿而调高了闸。
+
+    **不钉相等**：两者的差就是欠着的账，差本身是合法状态，也正是它要
+    暴露的东西。今天是 6 − 4 = 2。
+    """
+    status = PROJECT_ROOT / "docs" / "STATUS.md"
+    if not status.exists():
+        raise Failure(f"{status} 不存在 —— 阶段标记无从读起")
+    text = status.read_text(encoding="utf-8")
+    code_match = _CODE_STAGE.search(text)
+    if not code_match:
+        raise Failure(
+            "docs/STATUS.md 里找不到 `<!-- CODE_STAGE: N -->` 标记。\n"
+            "它是「代码实际推进到 PRD §13 第几阶段」的唯一机器可读来源。\n"
+            "少了它，`DELIVERY_STAGE` 又会被当成进度报告读 —— 而它是一条"
+            "欠账结算闸，两者今天并不相等。"
+        )
+    code_stage = int(code_match.group(1))
+    settle_stage = _declared_stage()
+    if code_stage < settle_stage:
+        raise Failure(
+            f"CODE_STAGE({code_stage}) 小于 DELIVERY_STAGE({settle_stage}) —— "
+            "欠账结算跑到了落码前面。\n"
+            "这只有一种成因：为了让某条门禁变绿而调高了结算阶段。\n"
+            "该做的是还上欠账或重新认领还款日，不是调标记。"
+        )
+
+
 def check_no_debt_guard_is_past_its_due_stage() -> None:
     """欠账守卫必须声明还款日，而且不许过期。
 
@@ -946,7 +1062,7 @@ def check_no_debt_guard_is_past_its_due_stage() -> None:
 
     ## 自己会红,不等于到期会红
 
-    仓库里四条欠账守卫都写着"接线那天这条会红",而那是真的:它们断言的是
+    仓库里的欠账守卫都写着"接线那天这条会红",而那是真的:它们断言的是
     "还没人接",接了就红。但**没人接的时候它们永远是绿的** —— 那正是
     `facts_stale` 那笔欠账躺过一整个阶段的方式。自翻转是还款的**确认**,
     不是还款的**催促**,两者都要有。
@@ -1240,12 +1356,17 @@ CHECKS = [
     ("每条前端门禁脚本都有人调用", check_every_frontend_gate_script_is_invoked),
     ("CI 覆盖全部 14 条门禁", check_ci_runs_every_gate),
     ("CI 的 pytest 有 PostgreSQL + Redis", check_ci_backs_pytest_with_redis),
+    (
+        "CI 满足 conftest 的测试库契约",
+        check_ci_satisfies_the_test_database_contract,
+    ),
     ("make check 覆盖前端门禁", check_the_offline_gate_is_honest_about_its_coverage),
     ("Vitest 四件事都接上了", check_the_frontend_test_runner_is_actually_wired),
     ("前端用例 0 skip", check_no_skipped_frontend_tests),
     ("迁移链单一 head", check_the_migration_chain_has_a_single_head),
     ("交付源码、迁移与测试都已被 Git 跟踪", check_every_migration_and_db_test_is_tracked_by_git),
     ("决策日志编号不重复", check_the_decision_log_has_no_duplicate_section_numbers),
+    ("阶段标记:结算不跑到落码前面", check_stage_markers_are_consistent),
     ("欠账守卫都在还款日之内", check_no_debt_guard_is_past_its_due_stage),
     ("落地的模块真的被接线了", check_every_wired_module_is_actually_called),
     ("每一列都答得出谁写它", check_every_column_can_say_who_writes_it),

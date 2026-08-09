@@ -30,8 +30,6 @@ HANDOVER.md       最近交接。过程文档不留档 —— 结论进 docs/DEC
 
 ## 门禁
 
-一条命令跑全部:
-
 ```bash
 make check          # = check-offline + fe-check,需联网(前端要装依赖)
 make check-offline  # 后端子集:纯测试 + ruff + 架构契约 + 交付自检 + 样例数据
@@ -42,6 +40,21 @@ CI(`.github/workflows/ci.yml`)跑六个 job:`gates` / `backend` / `frontend` /
 
 **`make check-offline` 跑绿 ≠ 全都过了。** 它不含前端类型、lint、Vitest 与构建;
 目标自己会在末尾打印这句话。改了前端还只跑 offline,等于没验。
+
+**`make check` 跑绿也 ≠ CI 会绿。** 这里原来写的是「一条命令跑全部」,
+而 `check = check-offline + fe-check`,两者都**不跑 `pytest`**。
+`make check` 覆盖不到的是整整三个 CI job:
+
+```
+backend  真库 pytest + Alembic 升降级 + -O 冒烟   ← 要 PostgreSQL + Redis
+e2e      Playwright                              ← 要 npx playwright install
+images   docker build ×2                         ← 要 docker daemon
+```
+
+也就是说本地能跑的那一份**结构上就比 CI 窄**,而窄的方向永远是更松。
+`verify_delivery.py` 里那条检查的措辞是「make check **覆盖前端门禁**」——
+它是准确的,被夸大的是这一段。要在本地逼近 CI,得自己起库与 Redis 跑
+`make test`,再加 `make fe-e2e`;docker 那两条本地没有等价物。
 
 ### 本地真实基础设施验证须由用户明确触发
 
@@ -236,15 +249,25 @@ app/api/publish.py                六个端点,只做取数 / 调判定 / 持有
 
     20-A  发布前端页面与状态操作   ✅ 已交付(`pages/PublishPage.tsx` + 路由),
                                   但**浏览器未实测** —— Playwright 在任务 24
-    20-B  API 驳回的 resolve_gate 缺口   未做
+    20-B  API 驳回的 resolve_gate   ✅ 新数据路径已落码(2026-08-09 评审订正),
+                                  缺真库 seam 测试;旧数据仍需人工
 
 拆开的原因是三份文档曾经对"任务 20 完成了没有"给出三个不同答案,
 而它们各对了一部分:页面确实做完了,`resolve_gate` 确实还没有。
 一个号绑着两件依赖与排期都不同的交付物,排期就得靠猜按哪一句算。
 
-下一步是 **20-B**:API 上架的驳回现在记得进台账但关不掉,细节与判据见
-`docs/STATUS.md`「已知限制」的「API 驳回关不掉」那一行。接口层已经如实
-把这一条报在 `blocking_reasons` 里,前端照着展示即可,不要自己再判一次。
+**20-B 已经落码,这里原来写的「下一步是 20-B」已过期**(2026-08-09 评审订正)。
+`platform_service._publish_attempt_entries()` 把「驳回之后有一次**成功的**
+提交尝试」当作等价证据喂进 `resolve_gates()` 与解决路径,关联口径是
+`ChannelListing.draft_id`,指纹那半边仍落在当前草稿指纹上 ——
+**所以没改草稿的重复提交过不了闸**。只认 `SUCCEEDED`:PENDING / IN_FLIGHT
+还没有结果,UNKNOWN 不知道平台收没收到,FAILED / ABORTED 根本没提交成功。
+
+仍然欠着两件,别把它们读成"没做":
+
+    真库 seam   从一行真实 PublishAttempt 穿过 platform_service 到驳回关闭,
+                没有一条真库用例走完过(判定与服务接线都有纯测试)
+    旧数据      `draft_id IS NULL` 的历史驳回关联不上尝试,仍然只能人工标记
 
 **发布接口 = 任务 25(A40 定的)。** `REVIEW.md` 12.1 的任务表里 18 一直是
 「Batch Outbox 与异常恢复」,和发布 API 无关。这个号以前被两处占着,

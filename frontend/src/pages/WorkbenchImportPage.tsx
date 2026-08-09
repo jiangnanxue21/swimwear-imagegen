@@ -83,7 +83,7 @@ export default function WorkbenchImportPage() {
   const onCommitError = useWriteError(noRefresh)
 
   const commit = useMutation({
-    mutationFn: (target: File) => batchApi.importCommit(target),
+    mutationFn: (target: File) => batchApi.importCommit(target, preview?.preview_token ?? ''),
     onSuccess: (data) => {
       setCommitted(data)
       setPreview(data)
@@ -285,7 +285,7 @@ export default function WorkbenchImportPage() {
               <Space direction="vertical" size={6}>
                 <Button
                   type="primary"
-                  disabled={!file || counts.will_create === 0}
+                  disabled={!file || !preview.preview_token || counts.will_create === 0}
                   loading={commit.isPending}
                   onClick={() => file && commit.mutate(file)}
                 >

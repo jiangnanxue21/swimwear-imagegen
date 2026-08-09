@@ -359,9 +359,11 @@ def test_smoke_exercises_the_license_gate_instead_of_the_bypass():
 
 
 def test_the_model_reference_bypass_now_leaves_a_trace():
-    """C-10 本轮**不关闭**(docs/STATUS.md 记录在案的取舍:根因是
-    media_assets 缺溯源列,要关得先落迁移)。但在关闭之前,每次走缝
-    必须留下结构化日志 —— "这批图有没有过授权闸"要答得上来。"""
+    """C-10 仍未关闭:溯源列已落,但自由素材尚未解析到等价授权主体。
+
+    在闭环落地之前,每次走缝必须留下结构化日志 —— "这批图有没有过授权闸"
+    要答得上来。
+    """
     src = _be("services/generation_service.py")
     branch = re.search(
         r'if "MODEL_REFERENCE" in roles:(.*?)return', src, re.S

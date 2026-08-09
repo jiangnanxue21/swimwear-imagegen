@@ -808,7 +808,12 @@ def evidence_assets_for(
     ]
 
 
-def usable_asset_count(session: Session, product_id: UUID) -> int:
+def usable_asset_count(
+    session: Session,
+    product_id: UUID | None,
+    *,
+    spu_id: UUID | None = None,
+) -> int:
     """`usable_assets()` 的条数,**不把行读出来**。
 
     存在的理由是一条很窄的需要:`run_extraction` 在证据为空时要把话说准 ——
@@ -823,12 +828,19 @@ def usable_asset_count(session: Session, product_id: UUID) -> int:
     `tests/pure/test_a45_batch14_19_evidence_query.py` 钉着这一条:
     `run_extraction` 里不许出现 `usable_assets`。
     """
+    if product_id is None and spu_id is None:
+        raise ValueError("product_id 与 spu_id 至少要传一个")
+    owner_filter = (
+        MediaAsset.spu_id == spu_id
+        if spu_id is not None
+        else MediaAsset.product_id == product_id
+    )
     return int(
         session.scalar(
             select(func.count())
             .select_from(MediaAsset)
             .where(
-                MediaAsset.product_id == product_id,
+                owner_filter,
                 MediaAsset.status == MediaStatus.READY.value,
             )
         )

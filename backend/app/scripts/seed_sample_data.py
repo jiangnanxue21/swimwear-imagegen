@@ -3,15 +3,16 @@
 幂等:重复执行不会产生重复商品或重复素材(依赖 SKU 唯一约束与文件哈希去重)。
 用法:python -m app.scripts.seed_sample_data
 
-## 两份样例,两条建档路径,**都要播**
+## 两份样例,用途不同
 
-    products.csv   老路径(CSV 导入)。它今天还不写 `products.spu_id` ——
-                   那是阶段 1 的剩余项,这份数据是它的回归样本
+    products.csv   CSV 解析与素材文件的回归样本。阶段 1 收口后导入要求 SPU
+                   与颜色先存在,所以不能再把这份十个旧款号的平表直接灌库
     spus.json      新路径(三步建档)。PRD §13 阶段 1 验收「可构造三颜色
                    九 SKU 的 SPU」要的就是它
 
-只播新的会让老路径失去样本(而它还在服役);只播老的就是本批之前的状态 ——
-验收在样例数据上**没有对象**。
+CSV 仍在 `verify_sample_data.py` 里逐行解析并校验对应图片，但播种只走
+`spu_service.create_spu()`。否则脚本会在找不到 SPU 时得到十条业务错误，
+却打印「商品新增 0」并以退出码 0 结束 —— 看起来像播种成功，实际人工环境是空的。
 
 ## 新结构走 `spu_service.create_spu()`,不另写一条
 
@@ -44,7 +45,7 @@ from app.core.logging import setup_logging
 from app.db.session import SessionLocal
 from app.models.product import Product
 from app.models.spu import ColorVariant, Spu
-from app.services import asset_service, product_service, spu_service
+from app.services import asset_service, spu_service
 from app.services.product_import import parse_csv
 from app.services.storage import build_storage
 
@@ -80,39 +81,10 @@ def main() -> int:
     )
     session = SessionLocal()
     try:
-        result = product_service.import_products(session, parsed, actor="seed-script")
-        session.commit()
-        print(f"商品:新增 {result['created']},已存在跳过 {result['skipped_existing']}")
-
-        images_dir = SAMPLE_DIR / "images"
-        if not images_dir.exists():
-            print("未找到 images/,先运行 python sample-data/generate_images.py")
-            return 0
-
-        uploaded = deduped = 0
-        for row in parsed.rows:
-            products, _ = product_service.list_products(session, search=row["sku"], limit=1)
-            if not products:
-                continue
-            product = products[0]
-            for view, asset_type in VIEW_TO_ASSET_TYPE.items():
-                path = images_dir / f"{row['sku']}_{view}.jpg"
-                if not path.exists():
-                    continue
-                _, was_dup = asset_service.upload_asset(
-                    session,
-                    product=product,
-                    data=path.read_bytes(),
-                    filename=path.name,
-                    asset_type=asset_type,
-                    storage=storage,
-                    actor="seed-script",
-                )
-                deduped += was_dup
-                uploaded += not was_dup
-            session.commit()
-
-        print(f"素材:新增 {uploaded},命中去重 {deduped}")
+        print(
+            f"旧格式 CSV: {len(parsed.rows)} 行解析通过（回归样本，不直接落库；"
+            "导入前须先建 SPU 与颜色）"
+        )
 
         seed_new_structure(session, storage)
         session.commit()

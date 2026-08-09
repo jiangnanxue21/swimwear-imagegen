@@ -5,8 +5,10 @@
 # separately keeps both implementations stable when contributors check them out.
 ifeq ($(OS),Windows_NT)
 PACK_COMMAND = powershell -NoProfile -ExecutionPolicy Bypass -File tools/pack.ps1
+PYTHON = py -3
 else
 PACK_COMMAND = tools/pack.sh
+PYTHON = python3
 endif
 
 help:
@@ -33,14 +35,14 @@ migrate: ## 执行数据库迁移
 revision: ## 生成迁移脚本 make revision M="add xxx"
 	docker compose exec backend alembic revision --autogenerate -m "$(M)"
 
-seed: ## 导入 10 个示例商品与素材
+seed: ## 导入新结构 SPU / 颜色 / SKU 与素材(CSV 平表仅作解析回归样本)
 	docker compose exec backend python -m app.scripts.seed_sample_data
 
 test: ## 容器内运行全部 pytest
 	docker compose exec backend pytest
 
 test-pure: ## 无需任何三方依赖的纯逻辑测试(本机 python3 即可)
-	cd backend && python3 tools/run_pure_tests.py
+	cd backend && $(PYTHON) tools/run_pure_tests.py
 
 lint: ## Ruff
 	cd backend && ruff check app tests
@@ -49,10 +51,10 @@ arch-check: ## 依赖方向契约(取代 test_import_graph.py),需已装后端�
 	cd backend && lint-imports
 
 verify-delivery: ## 交付卫生 + 门禁接线自检(取代 test_delivery_hygiene.py)
-	cd backend && python3 tools/verify_delivery.py
+	cd backend && $(PYTHON) tools/verify_delivery.py
 
 verify-sample-data: ## 样例数据自检(取代 test_stage2_pipeline.py 里的 4 条)
-	cd backend && python3 tools/verify_sample_data.py
+	cd backend && $(PYTHON) tools/verify_sample_data.py
 
 # A29:`tests/test_poll_and_delist_db.py` 里有一条 `from app.models.listing_export
 # import ListingExport`,那个模块全仓不存在。它躺在一个默认 skip 的数据库用例的
@@ -60,7 +62,7 @@ verify-sample-data: ## 样例数据自检(取代 test_stage2_pipeline.py 里的 
 # 顶层 import 一 collect 就会炸,函数体内的要等那一行真的被执行,所以这一类
 # 只能靠静态解析在跑之前抓住。零依赖、秒级,放在离线子集里。
 verify-imports: ## app.* 的 import 是否都指向真实存在的东西(零依赖)
-	cd backend && python3 tools/verify_imports.py
+	cd backend && $(PYTHON) tools/verify_imports.py
 
 # A45-batch14-2 走读:变异脚本的锚点会过期,而**失锚的变异不报错、不变红,
 # 只是安静地什么都没验**。变异脚本自己发现不了 —— 它跑一次要几十份工作树、
@@ -71,16 +73,16 @@ verify-imports: ## app.* 的 import 是否都指向真实存在的东西(零依�
 # 没有 `__main__` 保护 —— import 它就是当场改写真实工作树。审计工具把被审
 # 对象跑起来,本身就是事故。`ast` 只要求语法合法,秒级、零子进程,进离线子集。
 audit-anchors: ## 变异脚本的锚点还对不对(只解析,不执行)
-	cd backend && python3 tools/audit_anchors.py
+	cd backend && $(PYTHON) tools/audit_anchors.py
 
 audit-doc-refs: ## 文档与注释里的路径引用指不指得到东西(活文档拦,历史台账只提示)
-	cd backend && python3 tools/audit_doc_refs.py
+	cd backend && $(PYTHON) tools/audit_doc_refs.py
 
 audit-columns: ## 每一列都答得出「谁写它」(落库无写入路径的列会被点名)
-	cd backend && python3 tools/audit_column_writers.py
+	cd backend && $(PYTHON) tools/audit_column_writers.py
 
 audit-guards: ## 守卫的窗口封不封闭(反向断言不许吃切窄的源码)
-	cd backend && python3 tools/audit_source_guards.py
+	cd backend && $(PYTHON) tools/audit_source_guards.py
 
 # R1-36:开发用 `npm ci` 而不是 `npm install`。
 # 两者装出来的树可以不一样(`install` 会按 semver 悄悄升次版本并改写 lockfile),
@@ -121,18 +123,31 @@ fe-build: ## 只构建前端产物到 frontend/dist
 
 # ---------------------------------------------------------------- 门禁(v4.1 Phase 0)
 #
-# `check` 现在**覆盖全部门禁**,包括前端那四条。
+# `check` 覆盖**离线子集 + 前端全部四条**。
+#
+# **它不覆盖 CI 的全部。** 这里原来写的是「`check` 现在覆盖全部门禁」,
+# 而 check = check-offline + fe-check,两者都不跑 pytest。漏掉的是三个 job:
+#
+#     backend  真库 pytest + Alembic 升降级 + -O 冒烟   要 PostgreSQL + Redis
+#     e2e      Playwright                              要 npx playwright install
+#     images   docker build ×2                         要 docker daemon
 #
 # 方案 4.1 节 G-0 写得很直接:没有 CI 之前,清单写多长都没有意义;
-# 而退而求其次的最低要求是「把 fe-check 并入 make check,让一条命令覆盖全部门禁」。
-# 现在 CI 有了(.github/workflows/ci.yml),但 `make check` 仍然要能一条命令跑全 ——
-# 否则本地与 CI 的门禁范围会分叉,而分叉的方向永远是本地更松。
+# 而退而求其次的最低要求是「把 fe-check 并入 make check」。那件事做到了,
+# 「一条命令跑全部」没有 —— 三个 job 各自要一件本机不一定有的外部依赖。
+# 把这句话写准的理由和写它的理由一样:本地与 CI 的范围分叉时,
+# 分叉的方向永远是本地更松,而人是在本地决定"这版可以推了"的。
 #
 # 想要旧的那个离线子集,用 `check-offline`,它会明说自己漏了什么。
 
-check: check-offline fe-check ## 全部门禁(需联网:前端要装依赖)
+check: check-offline fe-check ## 离线子集 + 前端全部门禁(需联网:前端要装依赖)
 	@echo
-	@echo "全部门禁通过 —— 后端 + 架构 + 交付 + 前端类型/lint/测试/构建。"
+	@echo "通过 —— 后端纯测试 + 架构 + 交付自检 + 前端类型/lint/测试/构建。"
+	@echo
+	@echo "**这不等于 CI 会绿。** 没有跑到的是三个 job:"
+	@echo "  backend  真库 pytest + Alembic 升降级   要 PostgreSQL + Redis(make test)"
+	@echo "  e2e      Playwright                     make fe-e2e"
+	@echo "  images   docker build ×2                本地无等价物"
 
 # ---------------------------------------------------------------- 离线子集(A45 batch12-5 收尾)
 #
@@ -164,6 +179,11 @@ check: check-offline fe-check ## 全部门禁(需联网:前端要装依赖)
 # 不要 node_modules(它自己的文档第一句就是这个用途),此前却只有
 # `fe-check`(需联网装依赖)会跑它 —— 离线环境里它明明跑得动。
 check-offline: test-pure verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-doc-refs ## 离线子集(不需要 node_modules;缺 pip 工具时大声跳过)
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "$$tool = 'backend/.venv/Scripts/ruff.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/ruff.exe' check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command ruff -ErrorAction SilentlyContinue) { Push-Location backend; & ruff check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  lint(ruff 未安装)—— 这一项没有被验证' }"
+	@powershell -NoProfile -Command "$$env:PYTHONUTF8 = '1'; $$tool = 'backend/.venv/Scripts/lint-imports.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/lint-imports.exe'; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command lint-imports -ErrorAction SilentlyContinue) { Push-Location backend; & lint-imports; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  arch-check(lint-imports 未安装)—— 这一项没有被验证' }"
+	@powershell -NoProfile -Command "if (Get-Command node -ErrorAction SilentlyContinue) { Push-Location frontend; & node tools/syntax-check.mjs; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  前端语法体检(node 未安装)—— 这一项没有被验证' }"
+else
 	@if command -v ruff >/dev/null 2>&1; then \
 		cd backend && ruff check app tests; \
 	else \
@@ -179,6 +199,7 @@ check-offline: test-pure verify-delivery verify-sample-data verify-imports audit
 	else \
 		echo "SKIP  前端语法体检(node 未安装)—— 这一项没有被验证"; \
 	fi
+endif
 	@echo
 	@echo "离线子集跑完。上方每一行 SKIP 都是一项**没有被验证**的门禁;"
 	@echo "它**不包含**前端类型、lint、Vitest 与构建 —— 这四条只有 \`make check\`"
@@ -195,7 +216,7 @@ check-offline: test-pure verify-delivery verify-sample-data verify-imports audit
 # 都会因为别的 job 才有的前提而永远报「未验证」—— 一条恒红的门禁会被人加
 # `|| true`。它的读者是准备冻结人工测试版本的那个人,不是每一次提交。
 p0-gate: ## 阶段 P0 清单:逐条跑,跑不动的点名说缺什么(退出码非零 = 未关闭)
-	cd backend && python3 tools/p0_gate.py $(ARGS)
+	cd backend && $(PYTHON) tools/p0_gate.py $(ARGS)
 
 pack: ## 打交付包 make pack V=a20
 	$(PACK_COMMAND) $(V)
@@ -220,7 +241,7 @@ cleanup: ## 人工测试清理 make cleanup TAG=uat-1 CMD=inventory|verify|delis
 		$(if $(APPLY),--apply,)
 
 secret-key: ## 生成一把设置页主密钥,填进 .env 的 SETTINGS_SECRET_KEY
-	@python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+	@$(PYTHON) -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
 
 worker-ping: ## 验证 Celery worker 存活
 	docker compose exec backend python -c "from app.tasks.health_tasks import ping; print(ping.delay().get(timeout=10))"
@@ -237,10 +258,10 @@ psql: ## 进 psql(跟随 POSTGRES_USER / POSTGRES_DB,不写死)
 # 数据 —— 前者要人判断归属,后者不可逆,都不适合做成定时任务。
 
 purge-exports: ## 回收被作废的批量导出对象(C-17,默认干跑)
-	cd backend && python3 -m tools.purge_exports $(ARGS)
+	cd backend && $(PYTHON) -m tools.purge_exports $(ARGS)
 
 repair-variant-owners: ## 列出/归属裸 VARIANT owner(B-07,默认干跑)
-	cd backend && python3 -m tools.repair_variant_owners $(ARGS)
+	cd backend && $(PYTHON) -m tools.repair_variant_owners $(ARGS)
 
 clean:
 	docker compose down -v

@@ -560,21 +560,25 @@ def validate(session: Session, image_set_id: UUID) -> list[rules.Violation]:
 
 
 def variant_coverage(session: Session, row: ListingImageSet) -> dict:
-    """这一版图片集对该 SPU 变体的覆盖情况。**诊断,不阻断。**
+    """这一版图片集对该 SPU 变体的覆盖情况。**这个函数本身只做展示。**
 
-    ## 为什么它不能是一条阻断规则
+    ## 阻断在别处,而且已经生效 —— 这一段原来写反了
 
-    `validate_set` 里的 `MISSING_IMAGE_FOR_VARIANT` 有一条放行:
-    只要集里存在通用图(`variant_id IS NULL`),所有变体都算被覆盖。
-    而实际系统里 **`listing_image_items.variant_id` 从来没有被写过非空值** ——
-    唯一的写入方是接口入参,唯一的调用方(工作台图片集页)把它硬编码成 null,
-    界面上也没有任何设置变体的入口。
+    **本段原文说「诊断,不阻断」,并给了三条理由,今天三条全部失效**
+    (2026-08-09 评审订正)。原文是:`validate_set` 的
+    `MISSING_IMAGE_FOR_VARIANT` 有一条「只要集里存在通用图,所有变体都算
+    被覆盖」的放行;`listing_image_items.variant_id` 从来没被写过非空值;
+    界面上没有任何设置变体的入口。逐条现状:
 
-    也就是说:把真实变体传进 `validate_set` 是必要的,但**不足以**让那条规则
-    在今天生效。要真正生效,得先有人给图打上变体标签。
+        放行     `image_set_rules.coverage()` 已经删掉它(§6.5:通用图只能
+                 进附图位、不得跨色回退、缺图就是 BLOCKED)
+        写入     `ImageSetTab` 的行级颜色选择器(A-26)会写非空 `variant_id`
+        阻断     `validate()` 与 `approve()` 都传 `variant_ids` +
+                 `required_angles`,有问题时抛 409 —— 批准这一步真的拦得住
 
-    改成硬阻断呢?那会让每一个多色 SPU 立刻无法批准 —— 因为它们的图全是通用图。
-    那不是修复,是停产。
+    留着那段反向描述比没有注释更贵:照着它读的人会以为多色 SPU 今天可以
+    带缺图批准,或者去补一个已经存在的门禁。**这个函数不阻断,是因为
+    阻断归 `validate()` 管,不是因为规则不生效。**
 
     ## 于是这里做的事
 

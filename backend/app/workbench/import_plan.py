@@ -21,9 +21,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.services.export_format import escape_formula
 from app.services.product_import import (
@@ -46,6 +48,7 @@ TEMPLATE_COLUMNS: tuple[str, ...] = (
 
 COLUMN_LABELS: Mapping[str, str] = {
     "spu": "SPU(款号,必填)",
+    "variant_code": "颜色编码(多颜色 SPU 必填)",
     "sku": "SKU(唯一,必填)",
     "name": "商品名(必填)",
     # §9.1:导入模板必须有受众列,允许留空。标签写清"留空的去向",
@@ -67,6 +70,7 @@ COLUMN_LABELS: Mapping[str, str] = {
 #: 示例行。给一行真的能导进去的数据,比在文档里写一段说明有用得多。
 SAMPLE_ROW: Mapping[str, str] = {
     "spu": "SW-2026-001",
+    "variant_code": "BLK",
     "sku": "SW-2026-001-BLK-M",
     "name": "高腰三角比基尼",
     # 示例行给一个**显式**受众,不留空:样例的作用是示范正确用法,
@@ -264,6 +268,25 @@ def preview(content: str, existing_skus: Iterable[str]) -> ImportPreview:
     return view
 
 
+def add_row_problems(view: ImportPreview, problems: Iterable[RowError]) -> None:
+    """把依赖数据库事实的错误合并进同一份预览，不另造一套预览口径。"""
+    by_row: dict[int, list[RowError]] = {}
+    for problem in problems:
+        by_row.setdefault(problem.row_number, []).append(problem)
+    if not by_row:
+        return
+    view.rows = [
+        replace(
+            row,
+            plan=RowPlan.ERROR,
+            problems=(*row.problems, *by_row[row.row_number]),
+        )
+        if row.row_number in by_row and row.plan != RowPlan.SKIP_EXISTING
+        else row
+        for row in view.rows
+    ]
+
+
 def _row_number_of(raw_by_row: Mapping[int, Mapping[str, str]], sku: str) -> int:
     """合法行的行号。`parse_csv` 的返回值里没有行号,只能按 SKU 回查。
 
@@ -340,6 +363,25 @@ def serialize(view: ImportPreview) -> dict[str, object]:
         ],
         "error_csv": error_csv(view) if (view.error_rows or view.blocked) else "",
     }
+
+
+def fingerprint(view: ImportPreview) -> str:
+    """预览中会影响提交决定的部分；数据库状态变化会得到另一枚摘要。"""
+    payload = {
+        "blocked": view.blocked,
+        "rows": [
+            {
+                "row_number": row.row_number,
+                "plan": row.plan,
+                "sku": row.sku,
+                "problems": [(p.field, p.message) for p in row.problems],
+            }
+            for row in view.rows
+        ],
+        "header": [(p.field, p.message) for p in view.header_problems],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def sample_content(rows: Sequence[Mapping[str, str]]) -> str:

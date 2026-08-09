@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.orm import Session
@@ -55,7 +55,7 @@ from app.models.media_asset import MediaAsset
 from app.models.product import Product
 from app.services import audit, product_service
 from app.services.product_import import parse_csv
-from app.workbench import audit_view, import_plan
+from app.workbench import audit_view, import_plan, import_token
 from app.workbench import batch as rules
 from app.workbench import batch_service as bs
 from app.workbench import exceptions as exc_rules
@@ -954,6 +954,7 @@ async def _read_csv(file: UploadFile | None) -> str:
 
 @router.post("/import/preview")
 async def preview_import(
+    request: Request,
     session: Session = Depends(db_session),
     file: UploadFile | None = File(default=None),
 ) -> dict[str, Any]:
@@ -974,7 +975,23 @@ async def preview_import(
         if skus
         else set()
     )
-    return import_plan.serialize(import_plan.preview(content, existing))
+    view = import_plan.preview(content, existing)
+    import_plan.add_row_problems(
+        view,
+        product_service.import_validation_errors(
+            session, parsed, existing_skus=existing
+        ),
+    )
+    from app.core.secrets import import_preview_signing_key
+
+    out = import_plan.serialize(view)
+    out["preview_token"] = import_token.issue(
+        import_preview_signing_key(),
+        actor=current_actor(request),
+        content_digest=import_token.digest_text(content),
+        preview_digest=import_plan.fingerprint(view),
+    )
+    return out
 
 
 @router.post("/import/commit")
@@ -982,6 +999,7 @@ async def commit_import(
     request: Request,
     session: Session = Depends(db_session),
     file: UploadFile | None = File(default=None),
+    preview_token: str | None = Form(default=None),
 ) -> dict[str, Any]:
     """落库。**错误行不影响正确行**(FE-305 的验收结果)。
 
@@ -997,6 +1015,31 @@ async def commit_import(
         else set()
     )
     view = import_plan.preview(content, existing)
+    import_plan.add_row_problems(
+        view,
+        product_service.import_validation_errors(
+            session, parsed, existing_skus=existing
+        ),
+    )
+    if not preview_token:
+        raise ValidationError(
+            "提交前必须先预览当前文件", code=ErrorCode.INPUT_INVALID, http_status=409
+        )
+    from app.core.secrets import import_preview_signing_key
+
+    verdict = import_token.verify(
+        preview_token,
+        import_preview_signing_key(),
+        actor=current_actor(request),
+        content_digest=import_token.digest_text(content),
+        preview_digest=import_plan.fingerprint(view),
+    )
+    if not verdict.valid:
+        raise ValidationError(
+            f"预览已失效（{verdict.reason}），请重新预览后再提交",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
 
     if view.blocked:
         # 表头都不对,一行也不该进库

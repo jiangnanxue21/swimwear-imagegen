@@ -20,10 +20,15 @@ from app.api.deps import current_actor, db_session, require_operator
 from app.listings.sku_matrix import SIZE_TEMPLATE_LABELS
 from app.schemas.common import Page
 from app.schemas.spu import (
+    ColorVariantAdd,
+    ColorVariantOut,
+    ColorVariantPatch,
     SizeTemplateOut,
+    SkuBatchCreate,
     SpuCreate,
     SpuDetailOut,
     SpuOut,
+    SpuPatch,
     SpuSkuOut,
     size_template_options,
 )
@@ -79,8 +84,26 @@ def create_spu(
     request: Request,
     session: Session = Depends(db_session),
 ) -> SpuDetailOut:
+    """建档。
+
+    ## `Idempotency-Key`(PRD §9.1 / §12.1)
+
+    读**头**而不是读 body:这是 HTTP 层的语义(RFC draft 的
+    `Idempotency-Key`),与 `api/workbench_batch.py` 那条同源 ——
+    同一件事在两个端点上一个读头一个读 body,调用方会以为它们是两回事。
+
+    带键时:同键同入参返回原来那个 SPU(不建第二个),同键不同入参 409。
+    不带键时行为与从前一字不差。
+
+    **不带键的建档仍然可能双击。** 那时兜底的是 `uq_spus_spu_code`,
+    而它给出的错误是「SPU 编码 X 已存在」—— 在双击这个语境下那句话是假的。
+    所以前端应当带键;这里不强制,是因为 CSV 导入与联调脚本没有键也该能用。
+    """
     spu = spu_service.create_spu(
-        session, payload.model_dump(), actor=current_actor(request)
+        session,
+        payload.model_dump(),
+        actor=current_actor(request),
+        request_key=request.headers.get("Idempotency-Key"),
     )
     skus = spu_service.skus_of(session, spu.id)
     # **这一行不能删。** 事务归调用方所有,而 `deps.get_session` 明确不提交
@@ -119,3 +142,70 @@ def get_spu(
 ) -> SpuDetailOut:
     spu = spu_service.get_spu(session, spu_id)
     return _to_detail(spu, spu_service.skus_of(session, spu.id))
+
+
+@router.patch("/{spu_id}", response_model=SpuDetailOut)
+def update_spu(
+    spu_id: UUID,
+    payload: SpuPatch,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> SpuDetailOut:
+    spu = spu_service.update_spu(
+        session,
+        spu_id,
+        payload.model_dump(exclude_unset=True),
+        actor=current_actor(request),
+    )
+    session.commit()
+    return _to_detail(spu, spu_service.skus_of(session, spu.id))
+
+
+@router.post("/{spu_id}/color-variants", response_model=ColorVariantOut, status_code=201)
+def add_color_variant(
+    spu_id: UUID,
+    payload: ColorVariantAdd,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ColorVariantOut:
+    row = spu_service.add_color_variant(
+        session, spu_id, payload.model_dump(), actor=current_actor(request)
+    )
+    session.commit()
+    return ColorVariantOut.model_validate(row)
+
+
+@router.patch("/{spu_id}/color-variants/{variant_id}", response_model=ColorVariantOut)
+def update_color_variant(
+    spu_id: UUID,
+    variant_id: UUID,
+    payload: ColorVariantPatch,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ColorVariantOut:
+    row = spu_service.update_color_variant(
+        session,
+        spu_id,
+        variant_id,
+        payload.model_dump(exclude_unset=True),
+        actor=current_actor(request),
+    )
+    session.commit()
+    return ColorVariantOut.model_validate(row)
+
+
+@router.post("/{spu_id}/skus:batch", response_model=list[SpuSkuOut], status_code=201)
+def create_skus(
+    spu_id: UUID,
+    payload: SkuBatchCreate,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> list[SpuSkuOut]:
+    rows = spu_service.create_skus(
+        session,
+        spu_id,
+        [item.model_dump() for item in payload.items],
+        actor=current_actor(request),
+    )
+    session.commit()
+    return [SpuSkuOut.model_validate(row) for row in rows]

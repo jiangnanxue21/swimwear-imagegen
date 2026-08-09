@@ -27,6 +27,7 @@ class ExtractionOut(BaseModel):
     image_count: int = 0
     succeeded_count: int = 0
     failed_count: int = 0
+    failed_scopes: list[str] = []
     #: 这次识别算哪一档(§4.6,取值见 `core.enums.ExtractionRunStatus`)。
     #: **由后端派生**(`run_state.terminal_status_for`),前端只展示 ——
     #: 在这一列之前,前端拿两个计数自己判三档,而它判漏了「循环没跑完
@@ -35,7 +36,11 @@ class ExtractionOut(BaseModel):
     #: 模型输出目标清单外字段并被过滤的次数(§6.3)。如实报出来,
     #: 界面才有机会说"模型这次编了 3 个没问它的字段"
     fabricated_field_count: int = 0
+    cancel_requested: bool = False
+    can_cancel: bool = False
     duration_ms: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     created_at: datetime | None = None
 
 
@@ -126,9 +131,8 @@ class ExtractionDetailOut(ExtractionOut):
 class ExtractRequest(BaseModel):
     """触发识别的入参。
 
-    两个集合都有上限(BE-GLOBAL-07)。识别当前是**同步执行真实模型链路**的,
-    一次传 5000 个素材 id 意味着一个跑不完的 HTTP 请求,而调用方看到的
-    只是超时 —— 不指向"你传太多了"这个真正的原因。
+    两个集合都有上限(BE-GLOBAL-07)。即使执行已经异步，范围仍必须在入队前
+    有界：它同时决定本次费用上限、素材快照和幂等键。
     """
 
     #: 只识别这几条素材(增量)。不传则识别该商品全部可用素材

@@ -2,7 +2,7 @@
 
 本批修的四处缺陷是同一类,而那一类不是"文档过期":
 
-    create_product 注释    「CSV 导入从此要求 SPU 先存在」—— 导入路径根本不调它
+    create_product 注释    CSV 导入契约曾与实现相反；现在还要防旧断言残留
     README                 「make check 不需要网络」—— check 依赖 fe-check,要 npm ci
     audit_anchors docstring 「今天只剩 mutate_contract_tests.py 用 CASES」—— 它已退役
     四份纯测试 docstring     「真库层在 tests/test_api_*.py」—— 那些文件从来不存在
@@ -37,125 +37,86 @@ def _function(path: Path, name: str) -> ast.FunctionDef:
     return hits[0]
 
 
-def _names_in(node: ast.AST) -> set[str]:
+def _code_names_in(node: ast.AST) -> set[str]:
+    """只读可执行 AST 的名字；docstring/字符串不能冒充接线证据。"""
     out: set[str] = set()
     for sub in ast.walk(node):
         if isinstance(sub, ast.Name):
             out.add(sub.id)
         elif isinstance(sub, ast.Attribute):
             out.add(sub.attr)
-        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            out.add(sub.value)
+        elif isinstance(sub, ast.keyword) and sub.arg:
+            out.add(sub.arg)
     return out
 
 
 # --------------------------------------------------------------------------
-# 一、CSV 导入路径:实现走不走 SPU 闸,与注释说的必须一致
+# 一、CSV 导入路径:实现接闸后,正向契约与反向旧断言必须一起收口
 # --------------------------------------------------------------------------
 #
-# 这一条**不判缺口开着还是关着**。缺口今天开着(import_products 直构 Product),
-# 而怎么关它是一个决定不是一段代码(§3.41):可以让 SPU 缺席的行计入 errors,
-# 也可以按 CSV 里的 spu 码自动建最简 SPU —— 两种对运营的可感知行为不一样。
+# 旧守卫只问「文件里有没有一句新契约」,所以新 docstring 让它变绿以后,
+# 同文件另一段仍可继续说相反的话。更隐蔽的是 `_names_in()` 把 docstring 的字符串
+# 常量也算成实现标记,一段写着 `spu_id` 的说明就能冒充真正的接线。
 #
-# 守卫钉的是:**哪天有人做了那个决定,这个文件里那几句话得跟着改。**
-# 关缺口 + 改注释 = 绿;关缺口 + 不改注释 = 红;不关缺口 + 不改注释 = 绿。
+# 现在分三层:可执行 AST 证明闸在；`import_products` 自己的 docstring 说清正向
+# 契约；整个文件不得再残留反向断言。三层缺一不可。
 
-#: 判"这条路解析了 SPU"的证据。任一出现即认为闸接上了
-_SPU_GATE_MARKERS = {"Spu", "spu_id", "spu_code", "create_product", "garment_block_reason"}
+_SPU_GATE_MARKERS = {
+    "_resolve_import_identity",
+    "garment_block_reason",
+    "spu_id",
+    "color_variant_id",
+    "audience",
+}
 
-#: 注释里"CSV 导入要求 SPU 先存在"的说法。出现即认为文档声称闸接上了
-_CLAIM_PATTERNS = (
-    r"CSV\s*导入从此\s*要求\s*SPU",
-    r"CSV\s*导入.{0,12}要求\s*SPU\s*先存在",
+_STALE_REVERSE_PATTERNS = (
+    r"老建档路径\(`create_product`\s*/\s*CSV\s*导入\).{0,100}(?:还不写|不写).{0,30}spu_id",
+    r"import_products.{0,100}直接\s*`?Product",
+    r"CSV\s*导入.{0,60}(?:不过|绕过).{0,30}(?:SPU|create_product)",
+    r"CSV\s*导入.{0,120}(?:仍然|今天还).{0,80}spu_id\s*(?:=|落)?\s*NULL",
 )
 
-#: 引述并驳斥的标记。与 `tools/audit_doc_refs.py` 是同一条口径:
-#: **把一句假话原样引出来再驳掉,是本批修法的一部分,不能被自己的守卫拦下。**
-#: 窗口同样是封闭的 —— 标记要挨着那句引文,不能挨着这份文件
-_REFUTATION_MARKERS = ("那句话是错的", "是假的", "并不成立", "原来写的是", "**那句话是错的**")
 
-#: 窗口半径 = 0 行:驳斥必须与引文**在同一行**。
-#:
-#: 这个 0 是变异验证逼出来的,不是一开始就想到的。原来写 2,
-#: 于是 M1(把假注释改回去)不响 —— 那段注释里本来就有一句
-#: 「原来写的是……那句话是错的」,它在 ±2 行内**替另一句假话作了担保**。
-#: 一句驳斥只能管它自己引的那句,管不了邻居。
-_REFUTATION_RADIUS = 0
-
-
-def _claims_csv_requires_spu(source: str) -> list[str]:
-    """返回**没有被当场驳斥**的声称。引文旁边有驳斥标记的不算。"""
-    lines = source.splitlines()
-    live: list[str] = []
-    for pattern in _CLAIM_PATTERNS:
-        for match in re.finditer(pattern, source):
-            line_no = source.count("\n", 0, match.start())
-            lo = max(0, line_no - _REFUTATION_RADIUS)
-            hi = min(len(lines), line_no + _REFUTATION_RADIUS + 1)
-            window = "\n".join(lines[lo:hi])
-            if any(marker in window for marker in _REFUTATION_MARKERS):
-                continue
-            live.append(pattern)
-    return live
+def _import_gate_is_wired() -> bool:
+    nodes = (
+        _function(PRODUCT_SERVICE, "import_products"),
+        _function(PRODUCT_SERVICE, "_resolve_import_identity"),
+    )
+    names: set[str] = set()
+    for node in nodes:
+        names.update(_code_names_in(node))
+    return _SPU_GATE_MARKERS <= names
 
 
 def test_the_csv_import_path_and_the_comment_about_it_tell_the_same_story():
-    """`import_products` 过不过 SPU 闸,与注释里的说法必须一致。
-
-    原文那句「CSV 导入从此要求 SPU 先存在。这是真实的行为变更」是**假的**,
-    而它是这个文件里最贵的一行 —— 它告诉下一个人缺口已经关了。
-    实现里 `import_products` 直接 `Product(**row)`:不解析 spu 码、
-    不抄 audience、不过 C-03 闸,写进去的行 `spu_id` 是 NULL。
-
-    退化回去最省事的路径有两条,这条守卫两条都钉:
-
-        真关了缺口但忘了改注释  → 下一个人以为还开着,重复做一遍
-        没关缺口却写着关了      → 就是本批修的那一条
-    """
+    """接线、正向契约与全文件旧断言必须说同一个答案。"""
     source = PRODUCT_SERVICE.read_text(encoding="utf-8")
     fn = _function(PRODUCT_SERVICE, "import_products")
-    reached = _names_in(fn) & _SPU_GATE_MARKERS
-
-    claims = _claims_csv_requires_spu(source)
-
-    if reached and not claims:
-        raise AssertionError(
-            f"`import_products` 现在碰得到 {sorted(reached)} —— 看起来 SPU 闸接上了,\n"
-            "但这个文件里没有任何一句说明 CSV 导入的新契约。\n"
-            "**关缺口和改说明是同一件事的两半**:只做前一半,\n"
-            "下一个读 `create_product` 那段注释的人会以为 CSV 那条路还开着。"
-        )
-    if claims and not reached:
-        raise AssertionError(
-            "这个文件里写着「CSV 导入要求 SPU 先存在」,而 `import_products` 的函数体里\n"
-            f"找不到 {sorted(_SPU_GATE_MARKERS)} 中的任何一个 —— 它仍然直构 `Product(**row)`。\n"
-            "**这句话在宣告一件没发生的事**,而且宣告的方向是「缺口已关」。\n"
-            "要么把闸接上,要么把这句话改成实话。"
-        )
-
-
-def test_the_import_docstring_names_the_gap_instead_of_implying_it_is_closed():
-    """缺口开着的时候,`import_products` 的 docstring 必须把它说出来。
-
-    上一条守的是"不许说假话",这一条守的是"不许沉默"。两者不能互相替代:
-    一份只写「落库导入结果、重复执行安全」的 docstring 里没有一个字是假的,
-    而它照样让人以为这条路和 `create_product` 走的是同一套校验。
-
-    缺口关上之后这条自动失效(前半个条件不成立),不需要有人回来删它。
-    """
-    fn = _function(PRODUCT_SERVICE, "import_products")
-    if _names_in(fn) & _SPU_GATE_MARKERS:
-        return  # 闸接上了,这条守卫没有对象了
-
     doc = ast.get_docstring(fn) or ""
-    assert "SPU" in doc, (
-        "`import_products` 绕过 SPU 闸,而它的 docstring 一个字没提 —— \n"
-        "读的人没有任何理由怀疑这条路和 `create_product` 不一样。"
+    assert _import_gate_is_wired(), "CSV 导入的 SPU / 颜色身份闸从可执行代码里消失了"
+    for phrase in ("要求 SPU 先存在", "variant_code", "单颜色", "errors"):
+        assert phrase in doc, f"`import_products` 的正向契约漏了 {phrase!r}"
+
+    stale = [
+        pattern
+        for pattern in _STALE_REVERSE_PATTERNS
+        if re.search(pattern, source, flags=re.S)
+    ]
+    assert not stale, (
+        "CSV 身份闸已经接上,但 product_service.py 仍残留反向断言:\n"
+        + "\n".join(stale)
     )
-    assert any(k in doc for k in ("缺口", "绕过", "不过")), (
-        "docstring 提到了 SPU,但没说清这条路**绕过**了闸。\n"
-        "「导入时会处理 SPU」这种含混说法比不提更糟:它读起来像覆盖到了。"
-    )
+
+
+def test_the_import_gate_detector_ignores_docstrings_and_string_literals():
+    """说明文字不能替可执行代码满足接线标记。"""
+    fake = ast.parse(
+        'def import_products():\n'
+        '    """_resolve_import_identity spu_id color_variant_id audience"""\n'
+        '    note = "garment_block_reason"\n'
+    ).body[0]
+    assert isinstance(fake, ast.FunctionDef)
+    assert not (_code_names_in(fake) & _SPU_GATE_MARKERS)
 
 
 # --------------------------------------------------------------------------

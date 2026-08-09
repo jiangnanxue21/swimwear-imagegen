@@ -62,6 +62,37 @@ class SpuCreate(BaseModel):
     size_template: str = Field(..., min_length=1, max_length=32)
 
 
+class SpuPatch(BaseModel):
+    expected_version: int = Field(..., ge=1)
+    internal_name: str | None = Field(None, min_length=1, max_length=255)
+    supplier_ref: str | None = Field(None, max_length=128)
+    notes: str | None = None
+
+
+class ColorVariantAdd(ColorVariantCreate):
+    size_template: str | None = Field(None, min_length=1, max_length=32)
+
+
+class ColorVariantPatch(BaseModel):
+    expected_version: int = Field(..., ge=1)
+    working_name: str | None = Field(None, max_length=128)
+    supplier_color_code: str | None = Field(None, max_length=64)
+    sellable_status: SellableStatus | None = None
+
+
+class SkuCreateItem(BaseModel):
+    color_variant_id: UUID
+    size: str = Field(..., min_length=1, max_length=32)
+    sku: str | None = Field(None, min_length=1, max_length=64)
+    barcode: str | None = Field(None, max_length=64)
+    price: Decimal | None = Field(None, ge=0)
+    inventory: int | None = Field(None, ge=0)
+
+
+class SkuBatchCreate(BaseModel):
+    items: list[SkuCreateItem] = Field(..., min_length=1, max_length=200)
+
+
 class ColorVariantOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -72,6 +103,7 @@ class ColorVariantOut(BaseModel):
     supplier_color_code: str | None = None
     sort_order: int
     sellable_status: SellableStatus
+    row_version: int
 
 
 class SpuSkuOut(BaseModel):
@@ -104,6 +136,7 @@ class SpuOut(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+    row_version: int
     color_variants: list[ColorVariantOut] = Field(default_factory=list)
     sku_count: int = 0
 

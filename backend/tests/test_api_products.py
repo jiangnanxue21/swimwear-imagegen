@@ -137,10 +137,22 @@ def test_list_supports_search_and_pagination(client):
 
 
 def test_csv_import_creates_products(client):
+    for code in ("SPU-I1", "SPU-I2"):
+        response = client.post(
+            "/api/spus",
+            json={
+                "spu_code": code,
+                "internal_name": code,
+                "audience": "WOMEN",
+                "size_template": "ONE_SIZE",
+                "color_variants": [{"variant_code": "BASE"}],
+            },
+        )
+        assert response.status_code == 201, response.text
     csv_text = (
-        "spu,sku,name,garment_type\n"
-        "SPU-I1,SKU-I1,导入商品1,ONE_PIECE\n"
-        "SPU-I2,SKU-I2,导入商品2,TANKINI\n"
+        "spu,variant_code,sku,name,garment_type\n"
+        "SPU-I1,BASE,SKU-I1,导入商品1,ONE_PIECE\n"
+        "SPU-I2,BASE,SKU-I2,导入商品2,TANKINI\n"
     )
     r = client.post(
         "/api/products/import",
@@ -151,7 +163,18 @@ def test_csv_import_creates_products(client):
 
 
 def test_reimport_is_idempotent(client):
-    csv_text = "spu,sku,name\nSPU-R,SKU-R,重复导入\n"
+    response = client.post(
+        "/api/spus",
+        json={
+            "spu_code": "SPU-R",
+            "internal_name": "重复导入",
+            "audience": "WOMEN",
+            "size_template": "ONE_SIZE",
+            "color_variants": [{"variant_code": "BASE"}],
+        },
+    )
+    assert response.status_code == 201, response.text
+    csv_text = "spu,variant_code,sku,name\nSPU-R,BASE,SKU-R,重复导入\n"
     files = {"file": ("p.csv", csv_text.encode("utf-8"), "text/csv")}
     assert client.post("/api/products/import", files=files).json()["created"] == 1
     second = client.post(

@@ -92,6 +92,18 @@ export default function SpuCreatePage() {
   const [created, setCreated] = useState<SpuDetail | null>(null)
 
   /**
+   * 这次建档的 `Idempotency-Key`(PRD §9.1)。**按表单会话生成一次。**
+   *
+   * 在此之前这一页没有键,于是双击提交的第二次请求撞 `uq_spus_spu_code`,
+   * 运营看到的是「SPU 编码 X 已存在」—— 在双击这个语境下那是一句假话。
+   *
+   * 用 `useState` 的惰性初始值而不是每次渲染现算:现算的话每次重渲染都换一把,
+   * 键就退化成一个随机串,一次都不会命中。点「再建一个」时显式换新的 ——
+   * 那确实是另一次请求。
+   */
+  const [requestKey, setRequestKey] = useState(() => crypto.randomUUID())
+
+  /**
    * 尺码模板**从后端拿**(硬规则 4)。
    *
    * 内置一份的话,加一个模板要改两个仓库,而漏改的那一侧不报错 ——
@@ -113,19 +125,22 @@ export default function SpuCreatePage() {
 
   const create = useMutation({
     mutationFn: () =>
-      spusApi.create({
-        spu_code: basics.spu_code.trim(),
-        internal_name: basics.internal_name.trim(),
-        audience: basics.audience!,
-        base_category: basics.base_category.trim() || 'swimwear',
-        supplier_ref: basics.supplier_ref.trim() || null,
-        color_variants: colours.map((c) => ({
-          variant_code: c.variant_code.trim(),
-          working_name: c.working_name.trim(),
-          supplier_color_code: c.supplier_color_code?.trim() || null,
-        })),
-        size_template: sizeTemplate!,
-      }),
+      spusApi.create(
+        {
+          spu_code: basics.spu_code.trim(),
+          internal_name: basics.internal_name.trim(),
+          audience: basics.audience!,
+          base_category: basics.base_category.trim() || 'swimwear',
+          supplier_ref: basics.supplier_ref.trim() || null,
+          color_variants: colours.map((c) => ({
+            variant_code: c.variant_code.trim(),
+            working_name: c.working_name.trim(),
+            supplier_color_code: c.supplier_color_code?.trim() || null,
+          })),
+          size_template: sizeTemplate!,
+        },
+        requestKey,
+      ),
     onSuccess: (spu) => {
       setCreated(spu)
       message.success(`已建档:${spu.spu_code},${spu.skus.length} 个 SKU`)
@@ -278,11 +293,31 @@ export default function SpuCreatePage() {
             ]}
           />
         </Card>
-        <Space>
-          {/* 建完的下一步是**给这个款配生成方案**,不是回到一张列表去找它。
-              这里是全站唯一一处一定拿得到新 SPU 主键的地方(`created.id`),
-              也是运营第一次能走到方案面板的入口 */}
-          <Button type="primary" onClick={() => navigate(`/spus/${created.id}`)}>
+        <Space wrap>
+          {/*
+            AC-01:建档完成之后的下一步是**进七步向导**,不是回到一张列表
+            去找它。这一条是 2026-08-09 评审补的 —— 在此之前建档与向导之间
+            断着一跳:运营建完款,得自己去商品列表里把刚建的 SKU 找出来,
+            再点进向导。AC-01 的原话是"普通运营从建档到形成完整 Draft 的
+            七步全程在向导内完成",而那一跳恰恰落在第 1 步与第 2 步之间。
+
+            落到 `?step=MATERIAL`:建档这一步刚做完,停在它上面等于让运营
+            自己再点一次"下一步"。向导的 `?step=` 是白名单 codec,认不出来
+            会安全退回后端算出的 `current_step`。
+
+            `skus[0]` 一定存在:`expand()` 至少展开一行,零行会在后端 422。
+          */}
+          {created.skus.length > 0 && (
+            <Button
+              type="primary"
+              onClick={() =>
+                navigate(`/wizard/${created.skus[0].id}?step=MATERIAL`)
+              }
+            >
+              进入七步向导(下一步:上传样品)
+            </Button>
+          )}
+          <Button onClick={() => navigate(`/spus/${created.id}`)}>
             去配置生成方案
           </Button>
           <Button onClick={() => navigate('/workbench-spus')}>去 SPU 聚合页</Button>
@@ -293,6 +328,9 @@ export default function SpuCreatePage() {
               setColours([emptyColour()])
               setSizeTemplate(undefined)
               setCurrent(0)
+              // **换一把键。** 不换的话下一次建档会命中上一次的键,
+              // 后端按"同键不同入参"答 409 —— 而运营看到的是"又失败了"
+              setRequestKey(crypto.randomUUID())
             }}
           >
             再建一个

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 from alembic import command
@@ -176,17 +177,30 @@ def _two_spus_with_the_same_variant_key(engine) -> tuple[dict[str, str], dict[st
     with Session(engine) as session:
         for suffix in ("A", "B"):
             code = f"MIG-0046-{suffix}"
-            spu = Spu(
-                spu_code=code,
-                internal_name=f"0046 migration {suffix}",
-                audience="WOMEN",
-                base_category="swimwear",
-                created_by="migration-test",
-            )
-            session.add(spu)
-            session.flush()
+            # 这里刻意不用当前 head 的 Spu ORM。这个用例把数据库停在
+            # 0045 来验证 0046，而 ORM 已经会继续长出 0053 等新列；拿
+            # head ORM 往旧 schema INSERT，会在待测迁移运行之前就因列不
+            # 存在而失败。迁移定向测试只写当时真实存在的列。
+            spu_id = session.execute(
+                text(
+                    """
+                    INSERT INTO spus
+                        (id, spu_code, internal_name, audience, base_category,
+                         status, created_by, row_version)
+                    VALUES
+                        (:id, :code, :name, 'WOMEN', 'swimwear',
+                         'DRAFT', 'migration-test', 1)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "code": code,
+                    "name": f"0046 migration {suffix}",
+                },
+            ).scalar_one()
             variant = ColorVariant(
-                spu_id=spu.id,
+                spu_id=spu_id,
                 variant_code="BLK",
                 working_name="Black",
                 display_name="Black",
@@ -194,7 +208,7 @@ def _two_spus_with_the_same_variant_key(engine) -> tuple[dict[str, str], dict[st
             session.add(variant)
             session.flush()
             product = Product(
-                spu_id=spu.id,
+                spu_id=spu_id,
                 color_variant_id=None,
                 spu=code,
                 sku=f"{code}-BLK-S",
@@ -208,7 +222,7 @@ def _two_spus_with_the_same_variant_key(engine) -> tuple[dict[str, str], dict[st
             session.flush()
             media = MediaAsset(
                 product_id=product.id,
-                spu_id=spu.id,
+                spu_id=spu_id,
                 spu=code,
                 source="MANUAL_UPLOAD",
                 role="PRODUCT_FRONT",
@@ -277,33 +291,38 @@ def test_0046_refuses_ambiguous_working_names(alembic_config, clean_engine):
     """同一 SPU 两个颜色的临时名称相同时,迁移必须失败而不是任选一个。"""
     command.upgrade(alembic_config, "0045")
     with Session(clean_engine) as session:
-        spu = Spu(
-            spu_code="MIG-0046-AMB",
-            internal_name="0046 ambiguous",
-            audience="WOMEN",
-            base_category="swimwear",
-            created_by="migration-test",
-        )
-        session.add(spu)
-        session.flush()
+        spu_id = session.execute(
+            text(
+                """
+                INSERT INTO spus
+                    (id, spu_code, internal_name, audience, base_category,
+                     status, created_by, row_version)
+                VALUES
+                    (:id, 'MIG-0046-AMB', '0046 ambiguous', 'WOMEN', 'swimwear',
+                     'DRAFT', 'migration-test', 1)
+                RETURNING id
+                """
+            ),
+            {"id": uuid.uuid4()},
+        ).scalar_one()
         session.add_all(
             (
                 ColorVariant(
-                    spu_id=spu.id,
+                    spu_id=spu_id,
                     variant_code="A",
                     working_name="Supplier Blue",
                     display_name="A",
                 ),
                 ColorVariant(
-                    spu_id=spu.id,
+                    spu_id=spu_id,
                     variant_code="B",
                     working_name="Supplier Blue",
                     display_name="B",
                 ),
                 Product(
-                    spu_id=spu.id,
+                    spu_id=spu_id,
                     color_variant_id=None,
-                    spu=spu.spu_code,
+                    spu="MIG-0046-AMB",
                     sku="MIG-0046-AMB-S",
                     name="0046 ambiguous product",
                     category="swimwear",

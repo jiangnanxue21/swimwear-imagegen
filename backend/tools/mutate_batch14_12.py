@@ -45,6 +45,7 @@ RS = "app/attributes/run_state.py"
 MODEL = "app/models/attribute.py"
 SVC = "app/attributes/service.py"
 API = "app/api/attributes.py"
+TASKS = "app/tasks/attribute_tasks.py"
 SCHEMA = "app/schemas/attribute.py"
 TAB = "../frontend/src/components/workbench/AttributeTab.tsx"
 
@@ -304,9 +305,9 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     (
         "W2",
         "合并判据退回 `succeeded_count > 0`(判定验得再干净也白验)",
-        API,
-        "    if run_state.run_is_authoritative(extraction.status):",
-        "    if (extraction.succeeded_count or 0) > 0:",
+        TASKS,
+        "        if run_state.run_is_authoritative(extraction.status):",
+        "        if (extraction.succeeded_count or 0) > 0:",
     ),
     (
         "W3",

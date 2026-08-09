@@ -301,6 +301,7 @@ def decrypt(stored: str) -> str:
 
 #: 派生子密钥用的上下文标签。不同用途用不同标签,互相之间不可推导。
 _URL_SIGNING_CONTEXT = b"swimwear-imagegen|media-url-signing|v1"
+_IMPORT_PREVIEW_CONTEXT = b"swimwear-imagegen|import-preview-signing|v1"
 
 
 def url_signing_key() -> bytes:
@@ -315,3 +316,9 @@ def url_signing_key() -> bytes:
     """
     material, _ = _material()
     return hashlib.sha256(material + _URL_SIGNING_CONTEXT).digest()
+
+
+def import_preview_signing_key() -> bytes:
+    """派生一把只用于短期导入预览凭证的密钥。"""
+    material, _ = _material()
+    return hashlib.sha256(material + _IMPORT_PREVIEW_CONTEXT).digest()

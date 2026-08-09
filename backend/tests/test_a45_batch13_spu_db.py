@@ -377,3 +377,54 @@ def test_an_illegal_variant_code_tells_the_form_which_row(client):
     fields = response.json()["error"].get("fields")
     assert fields, f"422 里没有字段位置:{response.json()}"
     assert "color_variants[1]" in fields[0]["loc"], fields
+
+
+def test_stage1_maintenance_endpoints_cover_spu_variant_and_sku(client):
+    """建档后仍能改元数据、补颜色、维护颜色并原子补 SKU。"""
+    created = client.post(
+        "/api/spus",
+        json=_payload(
+            spu_code="SPU-MAINT-1",
+            size_template="ONE_SIZE",
+            color_variants=[{"variant_code": "BLK", "working_name": "黑"}],
+        ),
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    spu_id = body["id"]
+
+    patched = client.patch(
+        f"/api/spus/{spu_id}",
+        json={"expected_version": body["row_version"], "internal_name": "维护后的名称"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["internal_name"] == "维护后的名称"
+
+    added = client.post(
+        f"/api/spus/{spu_id}/color-variants",
+        json={"variant_code": "RED", "working_name": "红"},
+    )
+    assert added.status_code == 201, added.text
+    colour = added.json()
+    detail = client.get(f"/api/spus/{spu_id}").json()
+    assert detail["sku_count"] == 2
+
+    renamed = client.patch(
+        f"/api/spus/{spu_id}/color-variants/{colour['id']}",
+        json={"expected_version": colour["row_version"], "working_name": "供应商红"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["working_name"] == "供应商红"
+
+    extra = client.post(
+        f"/api/spus/{spu_id}/skus:batch",
+        json={"items": [{"color_variant_id": colour["id"], "size": "XL"}]},
+    )
+    assert extra.status_code == 201, extra.text
+    assert extra.json()[0]["sku"] == "SPU-MAINT-1-RED-XL"
+
+    stale = client.patch(
+        f"/api/spus/{spu_id}",
+        json={"expected_version": body["row_version"], "internal_name": "过期覆盖"},
+    )
+    assert stale.status_code == 409

@@ -377,6 +377,7 @@ def celery_eager(monkeypatch, session, storage):
     否则 worker 看不到还没提交的测试数据。
     """
     import app.services.storage as storage_module
+    import app.tasks.attribute_tasks as attribute_tasks
     import app.tasks.generation_tasks as gt
     from app.tasks.celery_app import celery_app
 
@@ -388,6 +389,7 @@ def celery_eager(monkeypatch, session, storage):
             return session
 
     monkeypatch.setattr(gt, "SessionLocal", _SessionProxy())
+    monkeypatch.setattr(attribute_tasks, "SessionLocal", _SessionProxy())
     monkeypatch.setattr(gt, "build_storage", lambda *a, **k: storage)
     monkeypatch.setattr(storage_module, "build_storage", lambda *a, **k: storage)
     # `close` 仍要挡住:任务的 `finally` 会关掉这个 session,而用例后面还要用它。

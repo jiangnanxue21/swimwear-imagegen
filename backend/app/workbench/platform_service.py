@@ -16,6 +16,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core import clock
 from app.core.enums import (
     UNRESOLVED_REJECTION_STATUSES,
     AuditAction,
@@ -89,7 +90,7 @@ def _export_audit_entries(session: Session, draft_id: UUID) -> list[dict[str, An
         # 解析交给 platform.export_entry —— 它和写方 export_audit_payload 同处一个
         # 文件,两边的键名不可能各自漂移(那次漂移让 audit 定位静默失效过一轮)
         entry = pf.export_entry(
-            row.payload, row.created_at.isoformat() if row.created_at else None
+            row.payload, clock.iso_utc(row.created_at)
         )
         if entry is not None:
             out.append(entry)
@@ -198,7 +199,7 @@ def record_rejection(
         current_fingerprint=draft.source_fingerprint,
         current_components=(dict(draft.canonical_snapshot or {}).get("components")),
         current_exported_at=(
-            draft.exported_at.isoformat() if draft.exported_at else None
+            clock.iso_utc(draft.exported_at)
         ),
     )
     if located is None:
@@ -389,7 +390,7 @@ def _publish_attempt_entries(session: Session, draft_id: UUID) -> list[dict[str,
         .limit(50)
     ).all()
     return [
-        {"at": row[0].isoformat() if row[0] else None}
+        {"at": clock.iso_utc(row[0])}
         for row in rows
     ]
 
@@ -403,7 +404,7 @@ def _gate_for(
     return pf.resolve_gate(
         rejected_fingerprint=rejection.export_fingerprint,
         rejected_at=(
-            rejection.created_at.isoformat() if rejection.created_at else None
+            clock.iso_utc(rejection.created_at)
         ),
         entries=entries,
         current_fingerprint=draft.source_fingerprint,
@@ -669,15 +670,15 @@ def serialize_rejection(row: PlatformRejection) -> dict[str, Any]:
         ),
         "platform_note": row.platform_note,
         "export_fingerprint": row.export_fingerprint,
-        "export_at": row.export_at.isoformat() if row.export_at else None,
+        "export_at": clock.iso_utc(row.export_at),
         "component_snapshot": row.component_snapshot or {},
         "located_by": row.located_by,
         "located_by_label": LOCATED_BY_LABELS.get(row.located_by, row.located_by),
         "status": row.status,
         "status_label": REJECTION_STATUS_LABELS.get(row.status, row.status),
-        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "resolved_at": clock.iso_utc(row.resolved_at),
         "resolved_by": row.resolved_by,
         "resolved_note": row.resolved_note,
         "recorded_by": row.recorded_by,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "created_at": clock.iso_utc(row.created_at),
     }

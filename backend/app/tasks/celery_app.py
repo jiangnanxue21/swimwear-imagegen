@@ -10,6 +10,7 @@ celery_app = Celery(
     broker=settings.broker_url,
     backend=settings.result_backend,
     include=[
+        "app.tasks.attribute_tasks",
         "app.tasks.batch_tasks",
         "app.tasks.health_tasks",
         "app.tasks.generation_tasks",
@@ -35,6 +36,14 @@ celery_app = Celery(
 # `tests/pure/test_a45_batch9_fixes.py` 把这条豁免钉成规则:
 # **要么自己重试,要么在 beat 里**,两者都没有的任务会红。
 celery_app.conf.beat_schedule = {
+    "relay-attribute-extractions": {
+        "task": "maintenance.relay_attribute_extractions",
+        "schedule": 30.0,
+    },
+    "reap-attribute-extractions": {
+        "task": "maintenance.reap_attribute_extractions",
+        "schedule": 300.0,
+    },
     # Outbox relay:漏投的任务最多等这么久就会被投出去。
     # 30 秒是"恢复够快"和"空扫描够便宜"之间的折中 —— 空跑只是一次带索引的 SELECT。
     "relay-dispatches": {

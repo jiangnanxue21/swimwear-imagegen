@@ -229,8 +229,8 @@ def test_the_declaration_is_read_from_the_opening_paragraph_only():
     那件事。** 按全文匹配的判据分不开这两者,而分不开的表现是假红 ——
     而假红最省事的消法是把整条门禁删掉。
 
-    收进第一段不是绕开,是把一条**本来就存在**的规矩写下来:仓库里四条
-    欠账守卫的声明全都在第一行。反向也钉一句:范围不许被放回全文。
+    收进第一段不是绕开,是把一条**本来就存在**的规矩写下来:仓库里的
+    欠账守卫声明都在第一行。反向也钉一句:范围不许被放回全文。
     """
     source = _gate_source()
     assert "DEBT_DECLARATION_PARAGRAPHS" in source, (
@@ -244,8 +244,8 @@ def test_the_declaration_is_read_from_the_opening_paragraph_only():
     assert "DEBT_REPAID_MARKER in head" in body
 
 
-def test_the_four_open_debts_all_declare_a_stage_that_has_not_arrived():
-    """今天欠着的那四条,还款日都解析得出来、都还没到期。
+def test_open_debts_all_declare_a_stage_that_has_not_arrived():
+    """今天仍欠着的守卫，还款日都解析得出来、都还没到期。
 
     **这条钉的是"门禁真的读到了东西"。** 上面那些断言证明的是门禁有那几段
     判定;这一条证明它们在真实数据上跑得通 —— 一个正则写错、一个全角冒号
@@ -276,7 +276,7 @@ def test_the_four_open_debts_all_declare_a_stage_that_has_not_arrived():
             assert due, f"{path.name}::{node.name} 的还款日解析不出来"
             found.append((node.name, int(due.group(1))))
 
-    assert len(found) >= 3, (
+    assert found, (
         f"只找到 {len(found)} 条欠账守卫 —— 正则认不出声明时,"
         "门禁的表现和「欠账全还清了」一模一样"
     )
@@ -329,7 +329,7 @@ def test_the_gate_offers_exactly_one_form_of_due_date():
     """还款日只有「阶段 N」一种写法。
 
     第一版有第二种「条件式」,意思是"某件事落地那天守卫自己会红"。回头核
-    仓库里那四条欠账时发现**没有一条用得上它** —— 每一条都自称会自翻转,
+    仓库里现存欠账时发现**没有一条用得上它** —— 每一条都自称会自翻转,
     而每一条同时都有真实的阶段死线。
 
     留一个永远不被走的分支,这条门禁的覆盖就有一格是假的。这与「别把明知

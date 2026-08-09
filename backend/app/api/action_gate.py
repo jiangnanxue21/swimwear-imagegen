@@ -95,6 +95,7 @@ from app.workbench.flow import NextActionCode
 GATED_ENDPOINTS: Mapping[str, NextActionCode] = {
     # 属性步
     "attributes:extract_attributes": NextActionCode.RUN_EXTRACTION,
+    "attributes:create_spu_extraction_run": NextActionCode.RUN_EXTRACTION,
     "attributes:confirm_attributes": NextActionCode.CONFIRM_ATTRIBUTES,
     # 方案步(SPU 级)
     "generation_plans:create_plan": NextActionCode.CHOOSE_PLAN,
@@ -122,6 +123,7 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "workbench:reject_copy": "快审退回是往回走",
     "workbench:resolve_rejection": "处理平台驳回是纠错回流,前置是驳回本身",
     "generation_tasks:cancel_task": "取消一次生成是往回走",
+    "attributes:cancel_extraction": "取消一次识别是往回走",
     "generation_tasks:retry_task": "重试的前置是上一次失败,不是流程前置",
     "media_library:quarantine": "隔离一张素材是纠错,不是往前走一步",
     "media_library:release": "放行被隔离的素材是纠错,不是往前走一步",
@@ -136,6 +138,10 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "products:create_product": "建档动作本身。此刻还没有 product 可供判定",
     "products:import_products": "建档动作本身,而且是批量入口",
     "spus:create_spu": "建档动作本身(SPU / 颜色 / SKU)",
+    "spus:update_spu": "维护建档元数据，不推进流程",
+    "spus:add_color_variant": "补建颜色与 SKU，属于建档动作",
+    "spus:update_color_variant": "维护颜色元数据，不推进流程",
+    "spus:create_skus": "补建 SKU，属于建档动作",
     "workbench_batch:preview_import": "只读预览,不写库,不改任何状态",
     "workbench_batch:commit_import": "建档动作本身(批量导入落库)",
     "products:update_product": "改的是商品自身字段(受众、品类),不是流程前进",

@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core import audience as audience_rules
 from app.core.enums import AuditAction, ProductStatus, SellableStatus, SpuStatus
 from app.core.errors import (
+    ConcurrentTransition,
     DuplicateError,
     ErrorCode,
     FieldProblem,
@@ -48,10 +49,13 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.field_limits import limit_for
+from app.core.logging import get_logger
 from app.listings import sku_matrix
 from app.models.product import Product
 from app.models.spu import ColorVariant, Spu
 from app.services import audit
+
+logger = get_logger(__name__)
 
 #: 纯层参数名 -> 接口字段名。**只有这一张表知道两边的对应关系。**
 #:
@@ -125,13 +129,65 @@ def _code_taken(session: Session, spu_code: str) -> bool:
     )
 
 
-def create_spu(session: Session, data: dict[str, Any], *, actor: str) -> Spu:
+def _by_request_key(session: Session, key: str) -> Spu | None:
+    """按 `Idempotency-Key` 找已经建好的那个 SPU。"""
+    return session.execute(
+        select(Spu).where(Spu.request_key == key).limit(1)
+    ).scalar_one_or_none()
+
+
+def _reuse_or_conflict(spu: Spu, fingerprint: str) -> Spu:
+    """同键重发:入参一样就复用,不一样就 409(§9.1)。
+
+    与 `batch_service._reuse_or_conflict` 是同一套语义,刻意长得一样 ——
+    两处都是 HTTP 层的 `Idempotency-Key`,做成两种形状只会让人以为
+    它们的规则不同。
+    """
+    if spu.request_fingerprint == fingerprint:
+        logger.info(
+            "spu.create_reused_request_key",
+            extra={"extra_fields": {"spu_id": str(spu.id), "spu_code": spu.spu_code}},
+        )
+        # 瞬态标记,不落库:调用方必须知道这一次**没有建任何东西**。
+        # 与批次那条同理由 —— 存进库等于把一个请求级事实钉在长期存在的行上
+        spu.reused_request = True  # type: ignore[attr-defined]
+        return spu
+    raise ValidationError(
+        "这把 Idempotency-Key 已经用在另一次建档上了。"
+        f"它建的是 SPU {spu.spu_code} —— 要建一个不同的款请换一把键",
+        code=ErrorCode.DUPLICATE_RESOURCE,
+        http_status=409,
+    )
+
+
+def create_spu(
+    session: Session,
+    data: dict[str, Any],
+    *,
+    actor: str,
+    request_key: str | None = None,
+) -> Spu:
     """建档。返回建好的 SPU(颜色与 SKU 已经在 session 里 flush 过)。
 
     `data` 的形状见 `schemas/spu.SpuCreate`。这里再校验一次而不是信任 schema:
     展开规则(编码字符集、重复颜色、行数上限)住在 `listings/sku_matrix`,
     而 schema 只管字段类型 —— 把规则复制进 schema 会让它有两个版本,
     然后其中一个先过期。
+
+    ## `request_key`:建档这条 HTTP 命令的幂等(PRD §9.1)
+
+    不传时行为与从前一字不差。传了的话:
+
+        同键 + 同入参   返回**原来那个 SPU**,不建第二个
+        同键 + 不同入参 409 —— 客户端用同一把键提交了两个不同的款
+
+    这一层与 `uq_spus_spu_code` 不重叠:那条约束挡的是"同一个编码被建了
+    两次"(它是 §9.1 说的最终裁决),这一层挡的是"同一个建档请求被受理
+    两遍"。双击、以及第一次响应在回程丢失后的客户端重发,走的都是这一层。
+
+    **少了它,双击的表现是 `SPU 编码 X 已存在`** —— 一句在这个语境下是假的
+    错误:运营没有建两个 SPU,他只是点了两下。建档是七步向导的第一步,
+    这句假错误落在整条主流程的入口上。
 
     ## 受众在这里被读到,但不在这里被判定
 
@@ -161,12 +217,46 @@ def create_spu(session: Session, data: dict[str, Any], *, actor: str) -> Spu:
     except sku_matrix.SkuPlanError as exc:
         raise _translate(exc) from None
 
+    # ---- §9.1 幂等键 ----
+    #
+    # 顺序是刻意的:**先算完入参、再查键**。反过来的话,一次入参非法的重发
+    # 会先命中键然后返回上一次的结果 —— 客户端拿到 200,而它这次提交的是
+    # 一份错的数据,没有任何地方告诉它。
+    #
+    # 超长报错不截断,与 `batch_service` 同理由(截断后两把只有前缀相同的键
+    # 会被当成同一把,而那种冲突报出来的错和真正的键冲突长得一模一样)
+    key = (request_key or "").strip() or None
+    if key is not None and len(key) > sku_matrix.MAX_IDEMPOTENCY_KEY:
+        raise ValidationError(
+            f"Idempotency-Key 最长 {sku_matrix.MAX_IDEMPOTENCY_KEY} 个字符。"
+            "这一层不截断:截断之后两把只有前缀相同的键会被当成同一把,"
+            "而那种冲突报出来的错和真正的键冲突长得一模一样",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=422,
+        )
+    fingerprint: str | None = None
+    if key is not None:
+        fingerprint = sku_matrix.spu_request_fingerprint(
+            spu_code=spu_code,
+            internal_name=data.get("internal_name"),
+            audience=audience.value,
+            base_category=data.get("base_category") or "swimwear",
+            supplier_ref=data.get("supplier_ref"),
+            variant_codes=[v.get("variant_code", "") for v in variants_in],
+            size_template=data.get("size_template", ""),
+        )
+        existing = _by_request_key(session, key)
+        if existing is not None:
+            return _reuse_or_conflict(existing, fingerprint)
+
     # 先查后插只挡得住"明显重复",挡不住并发 —— 真正的裁判是
     # `uq_spus_spu_code`。查询留作快速路径,好让错误信息说得清是哪个编码
     if _code_taken(session, spu_code):
         raise DuplicateError(f"SPU 编码 {spu_code} 已存在")
 
     spu = Spu(
+        request_key=key,
+        request_fingerprint=fingerprint,
         spu_code=spu_code,
         internal_name=(data.get("internal_name") or "").strip(),
         audience=audience.value,
@@ -247,6 +337,19 @@ def create_spu(session: Session, data: dict[str, Any], *, actor: str) -> Spu:
         savepoint.commit()
     except IntegrityError:
         savepoint.rollback()
+        # ---- §9.1「并发均返回同一对象」----
+        #
+        # 带键时先看是不是**键**撞的:两个并发请求拿同一把键进来,一个插入
+        # 成功、另一个撞 `uq_spus_request_key`。撞的那一路回查赢家并复用 ——
+        # 与 `create_product` / 识别 run 的做法同构(先查后插只挡明显重复,
+        # 数据库才是裁判)。
+        #
+        # 回查放在键分支里、而不是无条件回查:不带键的请求撞的一定是编码或
+        # SKU,那时回查会查到 None 然后落到下面那句,多一次没有意义的查询
+        if key is not None:
+            winner = _by_request_key(session, key)
+            if winner is not None:
+                return _reuse_or_conflict(winner, fingerprint or "")
         # 撞到的只可能是 `uq_spus_spu_code` 或 `uq_products_sku`:前者是并发,
         # 后者是**这个 SPU 编码下的 SKU 已经被别的路径建过**(老 CSV 导入
         # 也写 `products.sku`)。两种都是 409,信息里带上编码好让人去查
@@ -328,3 +431,190 @@ def skus_of(session: Session, spu_id: UUID) -> list[Product]:
             select(Product).where(Product.spu_id == spu_id).order_by(Product.sku)
         )
     )
+
+
+def update_spu(
+    session: Session, spu_id: UUID, data: dict[str, Any], *, actor: str
+) -> Spu:
+    """以 `row_version` 做乐观锁，只允许改非身份元数据。"""
+    expected = int(data.pop("expected_version"))
+    spu = session.scalar(select(Spu).where(Spu.id == spu_id).with_for_update())
+    if spu is None:
+        raise NotFoundError(f"SPU {spu_id} 不存在")
+    if spu.row_version != expected:
+        raise ConcurrentTransition(
+            f"SPU 已被其他人更新（当前版本 {spu.row_version}），请刷新后重试"
+        )
+    changed: dict[str, Any] = {}
+    for field in ("internal_name", "supplier_ref", "notes"):
+        if field in data and getattr(spu, field) != data[field]:
+            if field == "internal_name" and not str(data[field] or "").strip():
+                raise ValidationError("内部名称不能为空", code=ErrorCode.INPUT_INVALID)
+            setattr(spu, field, data[field])
+            changed[field] = data[field]
+    if changed:
+        spu.row_version += 1
+        audit.record(
+            session,
+            actor=actor,
+            action=AuditAction.UPDATE,
+            entity_type="Spu",
+            entity_id=spu.id,
+            payload={"changes": changed, "row_version": spu.row_version},
+        )
+    session.flush()
+    return spu
+
+
+def add_color_variant(
+    session: Session, spu_id: UUID, data: dict[str, Any], *, actor: str
+) -> ColorVariant:
+    """给既有 SPU 加颜色，并按明确或既有尺码模板原子铺开 SKU。"""
+    spu = get_spu(session, spu_id)
+    existing = skus_of(session, spu_id)
+    template = data.get("size_template")
+    if template is None:
+        groups = {row.size_group for row in existing if row.size_group}
+        if len(groups) != 1:
+            raise ValidationError(
+                "无法从现有 SKU 唯一确定尺码模板，请显式传 size_template",
+                code=ErrorCode.INPUT_INVALID,
+                http_status=422,
+            )
+        template = groups.pop()
+    try:
+        code = sku_matrix.normalize_code(
+            data.get("variant_code"), field="variant_code", max_length=sku_matrix.MAX_VARIANT_CODE
+        )
+        planned = sku_matrix.expand(
+            spu_code=spu.spu_code, variant_codes=[code], size_template=template
+        )
+    except sku_matrix.SkuPlanError as exc:
+        raise _translate(exc) from None
+    if any(item.variant_code == code for item in spu.color_variants):
+        raise DuplicateError(f"SPU {spu.spu_code} 已有颜色 {code}")
+    if len(spu.color_variants) >= sku_matrix.MAX_VARIANTS_PER_SPU:
+        raise ValidationError("颜色数量已达上限", code=ErrorCode.INPUT_INVALID)
+
+    variant = ColorVariant(
+        spu=spu,
+        variant_code=code,
+        working_name=(data.get("working_name") or "").strip(),
+        supplier_color_code=data.get("supplier_color_code") or None,
+        sort_order=len(spu.color_variants),
+        sellable_status=SellableStatus.PLANNED.value,
+    )
+    session.add(variant)
+    session.flush()
+    for plan in planned:
+        session.add(
+            Product(
+                spu_id=spu.id,
+                color_variant_id=variant.id,
+                spu=spu.spu_code,
+                sku=plan.sku,
+                name=f"{spu.internal_name} {code} {plan.size}"[: limit_for("name")],
+                category=spu.base_category,
+                audience=spu.audience,
+                size=plan.size,
+                size_group=plan.size_group,
+                status=ProductStatus.DRAFT.value,
+            )
+        )
+    try:
+        session.flush()
+    except IntegrityError:
+        raise DuplicateError(f"颜色 {code} 展开的 SKU 已存在") from None
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.CREATE,
+        entity_type="ColorVariant",
+        entity_id=variant.id,
+        payload={"spu_id": str(spu.id), "variant_code": code, "size_template": template},
+    )
+    return variant
+
+
+def update_color_variant(
+    session: Session, spu_id: UUID, variant_id: UUID, data: dict[str, Any], *, actor: str
+) -> ColorVariant:
+    expected = int(data.pop("expected_version"))
+    row = session.scalar(
+        select(ColorVariant)
+        .where(ColorVariant.id == variant_id, ColorVariant.spu_id == spu_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise NotFoundError("颜色变体不存在")
+    if row.row_version != expected:
+        raise ConcurrentTransition("颜色已被其他人更新，请刷新后重试")
+    changed = False
+    for field in ("working_name", "supplier_color_code", "sellable_status"):
+        if field in data:
+            value = getattr(data[field], "value", data[field])
+            if getattr(row, field) != value:
+                setattr(row, field, value)
+                changed = True
+    if changed:
+        row.row_version += 1
+        audit.record(
+            session,
+            actor=actor,
+            action=AuditAction.UPDATE,
+            entity_type="ColorVariant",
+            entity_id=row.id,
+            payload={"row_version": row.row_version},
+        )
+    session.flush()
+    return row
+
+
+def create_skus(
+    session: Session, spu_id: UUID, items: list[dict[str, Any]], *, actor: str
+) -> list[Product]:
+    """在既有颜色下批量补 SKU；整批原子提交，不留下半批残骸。"""
+    spu = get_spu(session, spu_id)
+    variants_by_id = {row.id: row for row in spu.color_variants}
+    created: list[Product] = []
+    seen: set[tuple[UUID, str]] = set()
+    for item in items:
+        variant = variants_by_id.get(item["color_variant_id"])
+        if variant is None:
+            raise ValidationError("颜色不属于这个 SPU", code=ErrorCode.INPUT_INVALID)
+        size = str(item["size"]).strip().upper()
+        key = (variant.id, size)
+        if key in seen:
+            raise ValidationError("同一批里颜色与尺码重复", code=ErrorCode.INPUT_INVALID)
+        seen.add(key)
+        sku = (item.get("sku") or sku_matrix.sku_code(
+            spu_code=spu.spu_code, variant_code=variant.variant_code, size=size
+        )).strip()
+        row = Product(
+            spu_id=spu.id,
+            color_variant_id=variant.id,
+            spu=spu.spu_code,
+            sku=sku,
+            name=f"{spu.internal_name} {variant.variant_code} {size}"[: limit_for("name")],
+            category=spu.base_category,
+            audience=spu.audience,
+            size=size,
+            status=ProductStatus.DRAFT.value,
+            barcode=item.get("barcode"),
+            price=item.get("price"),
+            inventory=item.get("inventory"),
+        )
+        session.add(row)
+        created.append(row)
+    try:
+        session.flush()
+    except IntegrityError:
+        raise DuplicateError("SKU 编码或颜色尺码组合已存在") from None
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.CREATE,
+        entity_type="Product",
+        payload={"spu_id": str(spu.id), "created": len(created), "batch": True},
+    )
+    return created

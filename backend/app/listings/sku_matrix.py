@@ -57,6 +57,8 @@ PRD v3.1 §13 阶段 1 的第一条验收是「可构造三颜色九 SKU 的 SPU
 """
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 #: SKU 编码的分段分隔符。见模块文档:它**不许**出现在任何一段编码里面。
@@ -297,3 +299,69 @@ def expand(
                 )
             )
     return tuple(rows)
+
+
+#: 建档请求指纹的算法版本。**换算法必须换它** —— 否则旧行存下来的指纹与
+#: 新算出来的混在一列里,而「同键不同入参」与「换过算法」在比较结果上
+#: 长得一模一样(都是不相等),于是一次正常重发会报成 409。
+SPU_REQUEST_VERSION = "1"
+
+#: `Idempotency-Key` 的长度上限。与 `batch_service` 那条同值同理由:
+#: **超长报错,不截断**。截到 64 之后,两把只有前缀相同的键会变成同一把,
+#: 而那种冲突报出来的错和真正的键冲突长得一模一样。
+MAX_IDEMPOTENCY_KEY = 64
+
+
+def spu_request_fingerprint(
+    *,
+    spu_code: str | None,
+    internal_name: str | None,
+    audience: str | None,
+    base_category: str | None,
+    supplier_ref: str | None,
+    variant_codes: Iterable[str],
+    size_template: str | None,
+) -> str:
+    """「创建 SPU」这条 HTTP 命令的入参指纹(PRD §9.1)。
+
+    判据与 `batch.batch_request_fingerprint` 同一条:**改了它,这次请求要
+    建出来的东西会不一样吗?** 会,才进哈希。
+
+    七项里六项显然会改变结果(编码、名称、受众、类目、供应商号、颜色集合与
+    尺码模板共同决定展开出来的 SKU 全集)。`notes` **不在里面**:它不改变
+    建出来的任何对象,把它算进去的话,同一次重发只要备注多一个空格就报 409。
+
+    ## 颜色码为什么排序去重
+
+    与批次那条同理:`[BLK, RED]` 与 `[RED, BLK]` 是同一次建档 ——
+    `expand()` 内部本来就按颜色分组,顺序不改变展开结果。不排序的话,
+    一个把颜色存在 Set 里的前端会因为遍历顺序不稳定算出两个指纹,
+    于是同一次重发被判成 409,而那个 409 没有任何人看得懂。
+
+    **但去重不能悄悄放过重复颜色**:`expand()` 对重复的 `variant_code`
+    是报错的(同一个颜色建两次是入参错误)。这里去重只影响指纹相等性判断,
+    不影响那条校验 —— 两件事分开,是因为「这次请求和上次是不是同一件事」
+    与「这次请求本身合不合法」不该互相掩盖。
+
+    ## 受众为什么按原样进哈希,不先 coerce
+
+    `coerce()` 住在 `core/audience`,那是判定层;这个模块零依赖,
+    导它进来会把一条 import 边加在 §6 契约的反方向上。而指纹要回答的是
+    「入参一样吗」,不是「入参合法吗」—— 后者由 `create_spu` 在算指纹之前
+    就已经抛过了,走到这里的受众必然已经过了那一关。
+    """
+    seen = {str(c or "").strip().upper() for c in variant_codes if str(c or "").strip()}
+    codes = ",".join(sorted(seen))
+    payload = "|".join(
+        (
+            SPU_REQUEST_VERSION,
+            str(spu_code or "").strip().upper(),
+            str(internal_name or "").strip(),
+            str(audience or "").strip().upper(),
+            str(base_category or "").strip(),
+            str(supplier_ref or "").strip(),
+            codes,
+            str(size_template or "").strip(),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

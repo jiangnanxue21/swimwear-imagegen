@@ -40,12 +40,13 @@ export interface ColorVariant {
   working_name: string
   /**
    * 正式颜色名称。**投影列** —— 唯一写入点是属性服务在 VARIANT 层
-   * `standard_color_name` 被确认时(§4.3)。建档时它是空的,别拿它当标题
+   * `primary_color` 被确认时(§4.3)。建档时它是空的,别拿它当标题
    */
   display_name: string
   supplier_color_code: string | null
   sort_order: number
   sellable_status: string
+  row_version: number
 }
 
 /** 一个颜色在表单里的样子。`display_name` 不在这里 —— 它不是人能填的 */
@@ -72,6 +73,7 @@ export interface Spu {
   created_by: string
   created_at: string
   updated_at: string
+  row_version: number
   color_variants: ColorVariant[]
   sku_count: number
 }
@@ -102,6 +104,13 @@ export interface SpuCreate {
   size_template: string
 }
 
+export interface SpuPatch {
+  expected_version: number
+  internal_name?: string
+  supplier_ref?: string | null
+  notes?: string | null
+}
+
 export const spusApi = {
   sizeTemplates: async () =>
     (await apiClient.get<SizeTemplate[]>('/spus/size-templates')).data,
@@ -111,8 +120,63 @@ export const spusApi = {
 
   get: async (id: string) => (await apiClient.get<SpuDetail>(`/spus/${id}`)).data,
 
-  create: async (payload: SpuCreate) =>
-    (await apiClient.post<SpuDetail>('/spus', payload)).data,
+  /**
+   * 建档。`requestKey` 走 `Idempotency-Key` 头(PRD §9.1)。
+   *
+   * ## 为什么调用方必须给键
+   *
+   * 不给的话,双击提交的第二次请求会撞 `uq_spus_spu_code`,后端答的是
+   * 「SPU 编码 X 已存在」—— 一句**在双击这个语境下是假的**错误:运营
+   * 没有建两个 SPU,他只是点了两下。建档是七步向导的第一步,这句假错误
+   * 落在整条主流程的入口上。
+   *
+   * 键由调用方**按表单会话**生成并保持稳定(改了入参再提交时后端答 409,
+   * 那是对的:同一把键只能对应同一次请求)。每次点「再建一个」要换一把。
+   *
+   * 参数可选是给联调脚本留的口子,不是给界面留的 —— 界面必须传。
+   */
+  create: async (payload: SpuCreate, requestKey?: string) =>
+    (
+      await apiClient.post<SpuDetail>('/spus', payload, {
+        headers: requestKey ? { 'Idempotency-Key': requestKey } : undefined,
+      })
+    ).data,
+
+  update: async (id: string, payload: SpuPatch) =>
+    (await apiClient.patch<SpuDetail>(`/spus/${id}`, payload)).data,
+
+  addColorVariant: async (
+    id: string,
+    payload: ColorVariantDraft & { size_template?: string },
+  ) => (await apiClient.post<ColorVariant>(`/spus/${id}/color-variants`, payload)).data,
+
+  updateColorVariant: async (
+    spuId: string,
+    variantId: string,
+    payload: {
+      expected_version: number
+      working_name?: string
+      supplier_color_code?: string | null
+      sellable_status?: string
+    },
+  ) => (
+    await apiClient.patch<ColorVariant>(
+      `/spus/${spuId}/color-variants/${variantId}`,
+      payload,
+    )
+  ).data,
+
+  createSkus: async (
+    id: string,
+    items: Array<{
+      color_variant_id: string
+      size: string
+      sku?: string
+      barcode?: string | null
+      price?: number | null
+      inventory?: number | null
+    }>,
+  ) => (await apiClient.post<SpuSku[]>(`/spus/${id}/skus:batch`, { items })).data,
 }
 
 /**

@@ -262,11 +262,11 @@ def _assert_assets_are_usable(
             model_template_service.assert_usable(template, category_id=category_id)
             return
         if "MODEL_REFERENCE" in roles:
-            # 已知缺口(docs/STATUS.md,A45 独立审查 C-10):这条路径跳过
-            # §10.5 受众、§11 授权/年龄/AI 换装/禁用品类的全部检查 ——
-            # `media_assets` 没有那组列,真要关闭得先落溯源迁移
-            # (docs/DECISIONS.md §3.21),不是在这里加一个 if。
-            # 在迁移落地前,每一次走到这条缝都必须**在日志里留下痕迹**:
+            # 已知缺口(docs/STATUS.md,A45 独立审查 C-10):这条路径仍跳过
+            # §10.5 受众、§11 授权/年龄/AI 换装/禁用品类的全部检查。
+            # 溯源列已由迁移 0038 落地,所以"缺列"不再是前置;尚未完成的是
+            # 用溯源把这份自由素材解析到可执行同等检查的授权主体,或拒绝它。
+            # 在闭环落地前,每一次走到这条缝都必须**在日志里留下痕迹**:
             # 人工测试期间"这批图有没有走过授权闸"要答得上来,
             # 不能等出事之后靠回忆。界面侧已明示该选项跳过 §11。
             logger.warning(

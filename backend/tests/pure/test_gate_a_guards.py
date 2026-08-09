@@ -131,11 +131,12 @@ def test_single_item_extract_skips_apply_evidence_when_all_failed():
     改法与 §3.26 第四节一致:锚在语法结构上。这里用 AST 取那个 `if` 的
     条件本身,而注释在 AST 里根本不存在。
     """
-    tree = ast.parse((APP / "api" / "attributes.py").read_text(encoding="utf-8"))
+    tree = ast.parse((APP / "tasks" / "attribute_tasks.py").read_text(encoding="utf-8"))
     endpoint = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "extract_attributes"
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "run_attribute_extraction"
     )
     guarded = [
         node

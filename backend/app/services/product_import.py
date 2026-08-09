@@ -27,6 +27,7 @@ from app.core.field_limits import (
     limit_for,
     too_long,
 )
+from app.listings.sku_matrix import MAX_VARIANT_CODE
 
 REQUIRED_COLUMNS = ("spu", "sku", "name")
 
@@ -48,7 +49,7 @@ ENUM_COLUMNS: dict[str, type] = {
 
 TEXT_COLUMNS = ("category", "primary_color", "material", "notes")
 
-ALL_COLUMNS = (*REQUIRED_COLUMNS, *TEXT_COLUMNS, *ENUM_COLUMNS, "secondary_colors")
+ALL_COLUMNS = (*REQUIRED_COLUMNS, "variant_code", *TEXT_COLUMNS, *ENUM_COLUMNS, "secondary_colors")
 
 
 @dataclass
@@ -61,6 +62,7 @@ class RowError:
 @dataclass
 class ImportResult:
     rows: list[dict[str, Any]] = field(default_factory=list)
+    row_numbers: list[int] = field(default_factory=list)
     errors: list[RowError] = field(default_factory=list)
 
     @property
@@ -96,6 +98,19 @@ def parse_row(raw: dict[str, Any], row_number: int) -> tuple[dict[str, Any] | No
             )
         else:
             data[col] = value
+
+    variant_code = str(normalized.get("variant_code") or "").strip()
+    if variant_code:
+        if len(variant_code) > MAX_VARIANT_CODE:
+            errors.append(
+                RowError(
+                    row_number,
+                    "variant_code",
+                    f"variant_code 超过 {MAX_VARIANT_CODE} 个字符",
+                )
+            )
+        else:
+            data["variant_code"] = variant_code.upper()
 
     for col in TEXT_COLUMNS:
         value = normalized.get(col)
@@ -232,6 +247,7 @@ def parse_csv(content: str) -> ImportResult:
             result.errors.append(conflict)
             continue
         result.rows.append(row)
+        result.row_numbers.append(index)
 
     return result
 
@@ -261,4 +277,5 @@ def parse_json_rows(rows: list[dict[str, Any]]) -> ImportResult:
             result.errors.append(conflict)
             continue
         result.rows.append(row)
+        result.row_numbers.append(index)
     return result

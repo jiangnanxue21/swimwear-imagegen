@@ -194,14 +194,14 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "R1",
         "去掉保存点(约束冲突让整个事务 aborted,这次识别再也提交不了)",
         SERVICE,
-        "    savepoint = session.begin_nested()\n"
-        "    try:\n"
-        "        session.add(row)\n"
-        "        session.flush()\n"
-        "        savepoint.commit()",
-        "    try:\n"
-        "        session.add(row)\n"
-        "        session.flush()",
+        "        savepoint = session.begin_nested()\n"
+        "        try:\n"
+        "            session.add(row)\n"
+        "            session.flush()\n"
+        "            savepoint.commit()",
+        "        try:\n"
+        "            session.add(row)\n"
+        "            session.flush()",
     ),
     (
         "R2",
@@ -215,8 +215,12 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "S1",
         "建行时不写 RUNNING(跑的过程中键没被占住,第二个请求又打一轮调用)",
         SERVICE,
-        "        status=ExtractionRunStatus.RUNNING.value,\n",
-        "",
+        "            status=(\n"
+        "                ExtractionRunStatus.QUEUED.value\n"
+        "                if prepare_only\n"
+        "                else ExtractionRunStatus.RUNNING.value\n"
+        "            ),\n",
+        "            status=ExtractionRunStatus.QUEUED.value,\n",
     ),
     (
         "S2",

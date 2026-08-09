@@ -474,20 +474,24 @@ def test_the_audience_gate_warnings_have_an_outlet():
 def test_the_model_reference_bypass_is_recorded_as_a_known_gap():
     """审视第 10 条:生成时"不指定模特"绕过受众与授权检查。
 
-    **这一条本轮没有关闭**,所以这里守的是"它必须还写在已知缺口里"。
-
-    根因与 §17 第 2 条是同一个:`media_assets` 没有生成溯源/授权列,
-    一张 MODEL_REFERENCE 素材身上没有 age_verified、没有 license_status、
-    也没有受众。真要关闭它得先落那次迁移。
+    溯源列已经落地,但这条分支仍直接 return；所以这里守的是 STATUS 与正式
+    验收记录都必须说"仍未关闭",不能再把"冒烟改走授权模板"记成关缝。
 
     界面这一半已经改了:下拉不再把它说成一个等价选项,而是明说它跳过
     §11 的检查。后端那一半留在 STATUS 里 —— 一条写进文档的缺口是可追的,
     一条没人记得的不是。
     """
     status = (PROJECT_ROOT / "docs" / "STATUS.md").read_text(encoding="utf-8")
-    assert "MODEL_REFERENCE" in status, (
-        "模特参考图绕过授权检查这条缺口从 STATUS 里消失了 —— "
-        "它还没修好,不该从文档里消失"
+    live_limits = status.split("## 三、已知限制", 1)[1].split("## 四、", 1)[0]
+    assert "MODEL_REFERENCE" in live_limits and "仍未关闭" in live_limits, (
+        "模特参考图绕过授权检查没有如实留在 STATUS 的当前已知限制里"
+    )
+    ac = (PROJECT_ROOT / "docs" / "AC-VERIFICATION.md").read_text(encoding="utf-8")
+    assert re.search(r"不指定模特.{0,12}绕行缝.{0,24}(仍未关闭|未关闭)", ac), (
+        "正式验收记录没有把 MODEL_REFERENCE 绕行缝记为未关闭"
+    )
+    assert not re.search(r"不指定模特.{0,12}绕行缝.{0,12}已关闭", ac), (
+        "正式验收记录仍在把未关闭的 MODEL_REFERENCE 分支记成已关闭"
     )
     # 界面不再把它当作等价选项。
     #

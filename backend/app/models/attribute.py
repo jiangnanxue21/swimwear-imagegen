@@ -48,6 +48,9 @@ class ProductAttributeExtraction(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "product_attribute_extractions"
     __table_args__ = (
         Index("ix_attr_extractions_product", "product_id", "created_at"),
+        # 异步 worker 与兜底重投按状态/时间扫。没有这条索引,队列积压时
+        # 每 30 秒的恢复拍都会全表扫描一次识别历史。
+        Index("ix_attr_extractions_status_created", "status", "created_at"),
         # 归属维度的查询入口。§9.2 的查重按 `idempotency_key` 走下面那条索引,
         # 而「这个 SPU 最近识别过几次」是运营侧的问题,走这条
         Index("ix_attr_extractions_spu", "spu_id", "created_at"),
@@ -107,6 +110,33 @@ class ProductAttributeExtraction(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: 空键不参与上面那条唯一索引(NULL 在唯一索引里互不相等),
     #: 于是「建不出键」的表现是回到本批之前的行为,不是错误地拦住请求
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: API 只负责排队，worker 必须能仅凭 run_id 重建请求。把范围只放在
+    #: Celery 消息里会让 broker 丢消息后的补投拿不到原请求。
+    requested_media_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    requested_variant_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    #: 排队时白名单实际选中的素材快照。worker 只读这份，不把排队期间新传
+    #: 的图静默扩大进一次已经确定了幂等键和费用上限的请求。
+    input_asset_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    #: 每张实际跑过的图只留一条 `{asset_id, scope, succeeded}`。它既是故障重试时
+    #: 跳过已结算图片的 checkpoint，也是失败颜色不能从 evidence 缺席反推的事实来源。
+    image_outcomes: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    failed_scopes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    requested_by: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="system", server_default="system"
+    )
+    #: 协作式取消：接口只写这一位，worker 在每张图之间提交 checkpoint
+    #: 后刷新它。终态不允许再改这一位。
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
     extractor: Mapped[str] = mapped_column(String(32), nullable=False)
     model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)

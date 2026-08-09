@@ -150,24 +150,24 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "W1",
         "失败的图不进成绩单(整批只剩成功的,任何颜色都不会被算成全军覆没)",
         SVC,
-        "            outcomes.append(run_state.image_result(asset, succeeded=False))\n",
-        "",
+        "            image_outcome = run_state.image_result(asset, succeeded=False)\n"
+        "            outcomes.append(image_outcome)\n",
+        "            image_outcome = run_state.image_result(asset, succeeded=False)\n",
     ),
     (
         "W2",
         "成功的图不进成绩单(每个颜色都被算成全军覆没,重试范围是全部)",
         SVC,
-        "        outcomes.append(run_state.image_result(asset, succeeded=True))\n",
-        "",
+        "        image_outcome = run_state.image_result(asset, succeeded=True)\n"
+        "        outcomes.append(image_outcome)\n",
+        "        image_outcome = run_state.image_result(asset, succeeded=True)\n",
     ),
     (
         "W3",
         "归集算了但没人读(判定验得再干净也白验 —— 「算好了没人读」那一类)",
         SVC,
-        "    outcome = run_state.outcome_by_scope(outcomes)\n"
-        "    if outcome.failed_scopes:",
-        "    outcome = run_state.outcome_by_scope(outcomes)\n"
-        "    if False:",
+        "    row.failed_scopes = list(outcome.failed_scopes)\n",
+        "    row.failed_scopes = []\n",
     ),
     (
         "W4",
@@ -180,8 +180,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "W5",
         "成绩单按成败建而不是按图建(失败那条丢掉 asset,作用域信息当场没了)",
         SVC,
-        "            outcomes.append(run_state.image_result(asset, succeeded=False))",
-        "            outcomes.append(run_state.ImageResult(scope=None, succeeded=False))",
+        "            image_outcome = run_state.image_result(asset, succeeded=False)",
+        "            image_outcome = run_state.ImageResult(scope=None, succeeded=False)",
     ),
 ]
 

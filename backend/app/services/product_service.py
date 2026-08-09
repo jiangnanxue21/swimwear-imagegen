@@ -19,7 +19,7 @@ from app.models.product import Product
 from app.models.product_asset import ProductAsset
 from app.models.spu import ColorVariant, Spu
 from app.services import audit
-from app.services.product_import import ImportResult
+from app.services.product_import import ImportResult, RowError
 from app.services.sorting import apply_order
 
 #: 商品列表允许排序的字段 -> 列。白名单放在这里(而不是 API 层),因为「能不能按
@@ -56,15 +56,14 @@ def assert_colour_belongs_to(
 
     两个现象都不指向"上传时选错了颜色",而且发生在两个不同的页面上。
 
-    ## 商品没有 spu_id 时一律拒绝
+    ## 存量商品没有 spu_id 时一律拒绝
 
-    老建档路径(`create_product` / CSV 导入)今天还不写 `products.spu_id`
-    —— 那是阶段 1 的剩余项。这些商品**给不出**"本商品所在 SPU"这个答案,
-    于是没有任何依据判断一个颜色属不属于它。
+    `create_product` 与 CSV 导入现在都会解析并写入 `products.spu_id`；这里的
+    NULL 分支只为升级前已经存在、尚未回填归属的存量行保留。那些行给不出
+    "本商品所在 SPU"这个答案,因此没有依据判断一个颜色属不属于它。
 
     拒绝而不是放行:放行等于允许把图挂到一个查不出关系的颜色上,
-    而那正是上面第二条的来路。代价是老路径建的商品暂时不能按颜色上传 ——
-    它们本来也没有颜色可选(`POST /spus` 才建颜色)。
+    而那正是上面第二条的来路。存量行应先补归属,不能借上传动作猜归属。
     """
     if product.spu_id is None:
         raise ValidationError(
@@ -159,21 +158,11 @@ def create_product(session: Session, data: dict[str, Any], *, actor: str) -> Pro
     # 放行的代价是每一条走老路径的商品继续绕过受众必填,而那批商品
     # 正是将来 `spu_id` 收 NOT NULL 时挡在路上的那批。
     #
-    # **这道闸的作用范围到此为止:CSV 导入不走这个函数。**
-    # 这里原来写的是「CSV 导入从此要求 SPU 先存在」——**那句话是错的**,
-    # 而它是这个文件里最贵的一行:它告诉下一个读代码的人缺口已经关了。
-    # `import_products` 直接 `Product(**row)` 构造,既不解析 `spu` 码、
-    # 不抄 `audience`、也不过 C-03 品类闸,于是 CSV 那条路今天仍然在写
-    # `spu_id = NULL` / `audience = NULL` —— 恰好就是上一段说的"将来收
-    # NOT NULL 时挡在路上的那批"。`test_csv_import_creates_products` 与
-    # `test_reimport_is_idempotent` 照样是绿的,因为它们走的正是这条没关的路。
-    #
-    # 为什么本批不顺手关掉它:关法有两种,而两种对运营的可感知行为不一样 ——
-    # (a) SPU 不存在的行计入 `errors` 跳过;(b) 按 CSV 里的 `spu` 码自动建一个
-    # 最简 SPU 再挂 SKU。这是**决定**不是缺代码(§3.41 那条分界线),
-    # 由产品侧拍板。在拍板之前,这段注释与实现的一致性由
-    # `tests/pure/test_a45_batch16_doc_truth.py` 盯着:哪天 `import_products`
-    # 真的开始解析 SPU 而这段话没跟着改,那条守卫会红。
+    # CSV 导入不调用本函数,但现在遵守同一份身份契约:`import_products` 通过
+    # `_resolve_import_identity` 要求 SPU 先存在,多颜色 SPU 还必须明确给出
+    # `variant_code`;找不到身份的行进入 `errors`,不会自动造最简 SPU。
+    # 两条入口必须同时写 `spu_id` / `color_variant_id` / SPU 权威受众与品类,
+    # 否则同一份商品会因为入口不同而得到两套下游事实。
     spu_code = (data.get("spu") or "").strip()
     if not spu_code:
         raise ValidationError(
@@ -542,26 +531,105 @@ def asset_counts(session: Session, product_ids: list[UUID]) -> dict[UUID, int]:
     return {pid: count for pid, count in session.execute(stmt)}
 
 
+def _import_identity_maps(
+    session: Session, parsed: ImportResult
+) -> tuple[dict[str, Spu], dict[tuple[UUID, str], ColorVariant]]:
+    """一次取齐导入预览与提交共用的 SPU / 颜色事实。"""
+    spu_codes = {str(row["spu"]).strip() for row in parsed.rows}
+    spus = {
+        row.spu_code: row
+        for row in session.scalars(select(Spu).where(Spu.spu_code.in_(spu_codes)))
+    }
+    variants_by_key = {
+        (variant.spu_id, variant.variant_code): variant
+        for variant in session.scalars(
+            select(ColorVariant).where(
+                ColorVariant.spu_id.in_([row.id for row in spus.values()])
+            )
+        )
+    }
+    return spus, variants_by_key
+
+
+def _resolve_import_identity(
+    row: dict[str, Any],
+    row_number: int,
+    *,
+    spus: dict[str, Spu],
+    variants_by_key: dict[tuple[UUID, str], ColorVariant],
+) -> tuple[Spu | None, ColorVariant | None, RowError | None]:
+    spu = spus.get(str(row["spu"]).strip())
+    if spu is None:
+        return None, None, RowError(
+            row_number, "spu", f"SPU {row['spu']} 不存在，请先建档"
+        )
+
+    variant_code = str(row.get("variant_code") or "").strip().upper()
+    candidates = [
+        variant
+        for (owner_id, _code), variant in variants_by_key.items()
+        if owner_id == spu.id
+    ]
+    variant = (
+        variants_by_key.get((spu.id, variant_code))
+        if variant_code
+        else candidates[0]
+        if len(candidates) == 1
+        else None
+    )
+    if variant is None:
+        message = (
+            f"SPU {spu.spu_code} 下不存在颜色 {variant_code}"
+            if variant_code
+            else f"SPU {spu.spu_code} 有多个颜色，请明确填写 variant_code"
+        )
+        return None, None, RowError(row_number, "variant_code", message)
+
+    block = garments.garment_block_reason(spu.audience, row.get("garment_type"))
+    if block is not None:
+        return None, None, RowError(row_number, "garment_type", block)
+    return spu, variant, None
+
+
+def import_validation_errors(
+    session: Session,
+    parsed: ImportResult,
+    *,
+    existing_skus: set[str] | None = None,
+) -> list[RowError]:
+    """只读校验需要数据库事实的导入问题，供预览与提交共享。"""
+    existing = existing_skus or set()
+    spus, variants_by_key = _import_identity_maps(session, parsed)
+    errors: list[RowError] = []
+    for position, row in enumerate(parsed.rows):
+        if row["sku"] in existing:
+            continue
+        row_number = (
+            parsed.row_numbers[position]
+            if position < len(parsed.row_numbers)
+            else position + 1
+        )
+        _spu, _variant, problem = _resolve_import_identity(
+            row,
+            row_number,
+            spus=spus,
+            variants_by_key=variants_by_key,
+        )
+        if problem is not None:
+            errors.append(problem)
+    return errors
+
+
 def import_products(session: Session, parsed: ImportResult, *, actor: str) -> dict[str, Any]:
     """落库导入结果。
 
     已存在的 SKU 视为跳过而非错误 —— 批量导入经常是增量补充,重复执行必须安全(幂等)。
 
-    ## 这条路**不过** `create_product` 的 SPU 闸(已知缺口,batch14-26 起)
-
-    下面是 `Product(**row)` 直构,不是 `create_product(...)`。于是 batch14-26
-    在 `create_product` 里关掉的那条 §4.2 缝,在这条路上**原封不动**:
-
-        spu 码            不解析      → `products.spu_id` 落 NULL
-        audience          不从 SPU 抄 → `products.audience` 可为 NULL,§4.2 受众必填绕过
-        garment_block_reason  不调用   → C-03 受众 × 品类组合校验绕过
-
-    不是疏忽:`create_product` 那段注释里写了两种关法(跳过 / 自动建最简 SPU),
-    两种对运营的可感知行为不一样,属于**决定**而非缺代码,等产品侧拍板。
-
-    在拍板之前,这份 docstring 与实现的一致性有守卫盯着 ——
-    `tests/pure/test_a45_batch16_doc_truth.py`。**改了这里的行为就得改这段话**,
-    反过来也一样。
+    CSV 导入现在要求 SPU 先存在；多颜色 SPU 要求明确给出 `variant_code`，
+    单颜色 SPU 可以无歧义地补上唯一颜色。
+    不自动造最简 SPU：受众、类目和颜色身份都属于建档决策，导入器猜一个值会让
+    错误沿模特、提示词、尺码表和渠道类目一路传播。找不到 SPU 或颜色的行进入
+    `errors`，其余正确行仍在各自保存点里落库。
     """
     created_ids: list[UUID] = []
     skipped = 0
@@ -572,15 +640,42 @@ def import_products(session: Session, parsed: ImportResult, *, actor: str) -> di
         )
     )
 
-    for row in parsed.rows:
+    errors = list(parsed.errors)
+    spus, variants_by_key = _import_identity_maps(session, parsed)
+
+    for position, row in enumerate(parsed.rows):
+        row_number = (
+            parsed.row_numbers[position]
+            if position < len(parsed.row_numbers)
+            else position + 1
+        )
         if row["sku"] in existing:
             skipped += 1
             continue
-        product = Product(**row)
-        # 同 `create_product`:身份在 add 之前定(A44)。
-        #
-        # 导入一批同 SPU 多颜色多尺码的行时,这一句是「红色 S / 红色 M
-        # 落到同一个变体」的全部保证 —— 前一行已经 flush,查得到。
+        spu, variant, problem = _resolve_import_identity(
+            row,
+            row_number,
+            spus=spus,
+            variants_by_key=variants_by_key,
+        )
+        if problem is not None:
+            errors.append(problem)
+            continue
+        if spu is None or variant is None:  # pragma: no cover - helper contract
+            raise RuntimeError("导入身份解析返回了不完整结果")
+        product_data = {
+            key: value
+            for key, value in row.items()
+            if key not in {"variant_code", "audience", "category"}
+        }
+        product_data.update(
+            spu=spu.spu_code,
+            spu_id=spu.id,
+            color_variant_id=variant.id,
+            audience=spu.audience,
+            category=spu.base_category,
+        )
+        product = Product(**product_data)
         variants.assign_variant_key(session, product)
         # 每行一个保存点:某一行撞了约束(并发导入同一批 SKU)只让这一行算跳过,
         # 不该把已经导进去的几百行一起回滚掉。
@@ -602,16 +697,16 @@ def import_products(session: Session, parsed: ImportResult, *, actor: str) -> di
         actor=actor,
         action=AuditAction.IMPORT,
         entity_type="Product",
-        payload={"created": len(created_ids), "skipped": skipped, "failed": len(parsed.errors)},
+        payload={"created": len(created_ids), "skipped": skipped, "failed": len(errors)},
     )
 
     return {
         "created": len(created_ids),
         "skipped_existing": skipped,
-        "failed": len(parsed.errors),
+        "failed": len(errors),
         "errors": [
             {"row_number": e.row_number, "field": e.field, "message": e.message}
-            for e in parsed.errors
+            for e in errors
         ],
         "created_ids": created_ids,
     }

@@ -789,7 +789,7 @@ def test_the_derived_status_property_does_not_come_back():
     assert "status" in columns, "`status` 列不见了"
 
 
-def test_the_api_asks_the_single_verdict_before_merging_evidence():
+def test_the_worker_asks_the_single_verdict_before_merging_evidence():
     """要不要合并证据,判据是单点派生的 `run_is_authoritative`,
     不是在接口里重新数一遍 `succeeded_count`。
 
@@ -797,9 +797,9 @@ def test_the_api_asks_the_single_verdict_before_merging_evidence():
     那次 run 同样会有 `succeeded_count > 0`(前几张已经跑完并付过钱),
     而它的证据不该改写事实。
     """
-    src = _src("api/attributes.py")
+    src = _src("tasks/attribute_tasks.py")
     tree = ast.parse(src)
-    fn = _func(tree, "extract_attributes")
+    fn = _func(tree, "run_attribute_extraction")
     calls = [
         n
         for n in ast.walk(fn)
@@ -807,9 +807,9 @@ def test_the_api_asks_the_single_verdict_before_merging_evidence():
         and isinstance(n.func, ast.Attribute)
         and n.func.attr == "run_is_authoritative"
     ]
-    assert len(calls) == 1, "`extract_attributes` 没有问 `run_is_authoritative`"
+    assert len(calls) == 1, "异步 worker 没有问 `run_is_authoritative`"
     assert "succeeded_count" not in ast.unparse(fn), (
-        "接口里又出现了 `succeeded_count` —— 判据要么在判定里,要么不存在"
+        "worker 又按 `succeeded_count` 重抄判据 —— 判据要么在判定里,要么不存在"
     )
 
 

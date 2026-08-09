@@ -13,7 +13,7 @@
  * 不是「置信度为零」。这两种情况运营要做的事不同(灌校准数据 vs 重拍图),
  * 所以未校准显示「未校准」而不是 0%。
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert, App, Button, Card, Descriptions, Empty, Input, InputNumber, Modal, Popover,
   Progress, Select, Skeleton, Space, Switch, Table, Tag, Tooltip,
@@ -233,6 +233,8 @@ export default function AttributeTab({
     queryKey: ['extraction', lastExtractionId],
     queryFn: () => attributesApi.extraction(lastExtractionId as string),
     enabled: Boolean(lastExtractionId),
+    // 是否还会变化由后端 `can_cancel` 给，不在前端维护第二份终态表。
+    refetchInterval: (query) => query.state.data?.can_cancel ? 2000 : false,
   })
 
   const refresh = useCallback(() => {
@@ -252,7 +254,14 @@ export default function AttributeTab({
   const onWriteError = useWriteError(refresh)
 
   const extract = useMutation({
-    mutationFn: () => attributesApi.extract(productId),
+    mutationFn: () => attributesApi.extract(
+      productId,
+      undefined,
+      lastExtraction.data?.failed_scopes.length
+        ? lastExtraction.data.failed_scopes
+        : undefined,
+      product?.spu_id,
+    ),
     onSuccess: (result) => {
       // 先记批次 id:下面三条分支都要它。**失败的那次也记** ——
       // 「全部失败」和「模型说这些字段看不清」是两回事,后者恰恰
@@ -273,6 +282,20 @@ export default function AttributeTab({
     },
     onError: onWriteError,
   })
+
+  const cancelExtraction = useMutation({
+    mutationFn: () => attributesApi.cancel(lastExtractionId as string),
+    onSuccess: (result) => {
+      message.warning('已请求中止；正在执行的单张调用完成后会停下')
+      queryClient.setQueryData(['extraction', result.id], result)
+    },
+    onError: onWriteError,
+  })
+
+  useEffect(() => {
+    const run = lastExtraction.data
+    if (run && !run.can_cancel) refresh()
+  }, [lastExtraction.data, refresh])
 
   const confirm = useMutation({
     mutationFn: (items: { field_name: string; value: unknown }[]) =>
@@ -652,6 +675,15 @@ export default function AttributeTab({
       {/* 排在冲突之后、结果表之前:它解释的是表里那几行**为什么是空的** */}
       <MissingEvidenceNotice evidence={lastExtraction.data?.evidence ?? []} />
 
+      {Boolean(lastExtraction.data?.failed_scopes.length) && (
+        <Alert
+          type="warning"
+          showIcon
+          message={`${lastExtraction.data?.failed_scopes.length} 个颜色本轮全部失败`}
+          description="再次识别只会重跑这些颜色，不会为已经成功的颜色重复付费。"
+        />
+      )}
+
       <Card
         size="small"
         title="属性识别结果"
@@ -661,10 +693,21 @@ export default function AttributeTab({
               size="small"
               icon={<ThunderboltOutlined />}
               loading={extract.isPending}
+              disabled={Boolean(lastExtraction.data?.can_cancel)}
               onClick={() => extract.mutate()}
             >
               {rows.length ? '重新识别' : '启动属性识别'}
             </Button>
+            {lastExtraction.data?.can_cancel && (
+              <Button
+                size="small"
+                danger
+                loading={cancelExtraction.isPending}
+                onClick={() => cancelExtraction.mutate()}
+              >
+                中止本次识别
+              </Button>
+            )}
             <Tooltip title="只提交状态为「待确认」的项,冲突项需要逐条裁决">
               <Button
                 size="small"
