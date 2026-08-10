@@ -6,9 +6,11 @@ PRODUCT_TO_MODEL,将来加背景替换、批量换色也不用改调用方。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlparse
 
 from app.core.enums import UnitsSource
 
@@ -142,6 +144,32 @@ class ImageGenerationProvider(ABC):
     #: `describe_extractors` 那边就是名单式的,而它的注释自己承认
     #: "接真后端时这一行必须改成问它自己"。这里直接问它自己。
     is_simulator: bool = True
+    #: 能不能把本机对象存储的 ``storage_path`` 直接当作图片输入。
+    #:
+    #: 默认 False:大多数外部 Provider 只认识 URL / data-URI。FASHN 的实现
+    #: 会在 worker 进程里读这个路径并内联成 data-URI,因此它可以覆写为 True。
+    #: 这只对 ``STORAGE_BACKEND=local`` 有效;S3 的路径不在本机文件系统上。
+    accepts_local_storage_paths: bool = False
+    #: Provider 官方、稳定的结果下载域名。这里只允许写精确主机名,不接受通配符。
+    #:
+    #: 某些代理的 fake-IP 模式会把公网域名解析到 ``198.18.0.0/15``。这个网段
+    #: 必须继续被通用 SSRF 防线视为内网;真正知道「这个域名属于谁」的是适配器,
+    #: 所以例外也由适配器逐个声明,不能全局放开整个网段。
+    trusted_result_hosts: frozenset[str] = frozenset()
+
+    def result_download_allowed_hosts(
+        self, image_url: str, configured_hosts: str = ""
+    ) -> str:
+        """把当前结果 URL 对应的 Provider 自有域名并入下载允许清单。
+
+        只在 URL 主机名与声明值**精确相等**时追加;相似后缀、子域名和重定向
+        目的地都不会继承信任,后续每一跳仍由 ``net_safety`` 重新校验。
+        """
+        host = (urlparse(image_url or "").hostname or "").rstrip(".").lower()
+        trusted = {value.rstrip(".").lower() for value in self.trusted_result_hosts}
+        if not host or host not in trusted:
+            return configured_hosts
+        return f"{configured_hosts},{host}" if configured_hosts else host
 
     @abstractmethod
     def capabilities(self) -> ProviderCapabilities:
@@ -227,3 +255,28 @@ class ImageGenerationProvider(ABC):
             raise ProviderInputError(
                 f"{self.provider_name} 不支持指定 seed", provider=self.provider_name
             )
+
+
+def provider_input_reference(
+    provider: ImageGenerationProvider,
+    *,
+    storage_backend: str,
+    storage_path: str,
+    external_url: Callable[[], str],
+) -> str:
+    """为 Provider 选择自有素材的引用形状。
+
+    本地存储与外部 URL 不是一回事。把本地私有素材先签成
+    ``http://localhost/...``、再让同一个 worker 通过 HTTP 读回来,会撞上
+    SSRF 防线(而放行 localhost 又会削弱那道防线)。能直接读本地路径的
+    Provider 应拿 ``storage_path``;其余 Provider 与 S3 仍拿签名 URL。
+
+    ``external_url`` 刻意是惰性构造器:本地 FASHN 路径不需要生成一条马上
+    丢弃的签名 URL,也不该为了读自己的文件而依赖 URL 签名密钥。
+    """
+    if (
+        str(storage_backend).strip().lower() == "local"
+        and provider.accepts_local_storage_paths
+    ):
+        return storage_path
+    return external_url()

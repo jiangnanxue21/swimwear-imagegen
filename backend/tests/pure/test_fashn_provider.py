@@ -10,9 +10,20 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import sys
+import tempfile
+import types
+from pathlib import Path
 
+from app.core import net_safety
 from app.core.errors import ErrorCode
-from app.providers.base import ExternalTaskStatus, GenerationMode, GenerationRequest
+from app.providers.base import (
+    ExternalTaskStatus,
+    GenerationMode,
+    GenerationRequest,
+    provider_input_reference,
+)
 from app.providers.errors import (
     ProviderAuthError,
     ProviderContentSafetyError,
@@ -111,6 +122,51 @@ def test_only_the_api_key_is_required():
     """端点在文档里是确定的,不该因为没填 BASE_URL 就显示未配置。"""
     assert FashnImageGenerationProvider(api_key="k", base_url="").is_configured() is True
     assert FashnImageGenerationProvider(api_key="", base_url="").is_configured() is False
+
+
+def test_official_result_cdn_is_added_to_the_download_allowlist():
+    provider = _provider()
+    assert (
+        provider.result_download_allowed_hosts(
+            "https://cdn.fashn.ai/generated/result.png", "internal.example"
+        )
+        == "internal.example,cdn.fashn.ai"
+    )
+
+
+def test_result_cdn_trust_is_an_exact_hostname_boundary():
+    provider = _provider()
+    configured = "internal.example"
+    assert (
+        provider.result_download_allowed_hosts(
+            "https://cdn.fashn.ai.evil.example/result.png", configured
+        )
+        == configured
+    )
+    assert (
+        provider.result_download_allowed_hosts(
+            "https://sub.cdn.fashn.ai/result.png", configured
+        )
+        == configured
+    )
+
+
+def test_official_result_cdn_survives_proxy_fake_ip_without_opening_the_range():
+    """只放 FASHN 的精确域名;同一个 fake-IP 上的其他域名仍被拦截。"""
+    provider = _provider()
+    official_url = "https://cdn.fashn.ai/generated/result.png"
+    allowed = provider.result_download_allowed_hosts(official_url)
+    original = net_safety._resolve
+    net_safety._resolve = lambda _host: [ipaddress.ip_address("198.18.0.145")]
+    try:
+        assert net_safety.check_download_url(official_url, allowed_hosts=allowed)
+        expect_raises(
+            net_safety.UnsafeDownloadURL,
+            net_safety.check_download_url,
+            "https://untrusted.example/result.png",
+        )
+    finally:
+        net_safety._resolve = original
 
 
 def test_capabilities_reflect_the_documented_features():
@@ -255,6 +311,54 @@ def test_data_uri_carries_the_required_prefix():
 def test_existing_data_uri_is_passed_through_untouched():
     inputs = run(_provider().build_inputs(_req(), TRYON_MAX, count=1, seed=1))
     assert inputs["product_image"] == TINY
+
+
+def test_local_fashn_input_uses_storage_path_without_building_a_loopback_url():
+    """任务编排与 FASHN 的接缝:本地素材不能绕成 localhost 再下载。"""
+    reference = provider_input_reference(
+        _provider(),
+        storage_backend="local",
+        storage_path="uploads/ab/product.png",
+        # 本地分支若误建 URL,这条 lambda 会让测试当场失败。
+        external_url=lambda: (_ for _ in ()).throw(AssertionError("不该构造 localhost URL")),
+    )
+    assert reference == "uploads/ab/product.png"
+
+
+def test_s3_fashn_input_keeps_the_signed_url():
+    reference = provider_input_reference(
+        _provider(),
+        storage_backend="s3",
+        storage_path="uploads/ab/product.png",
+        external_url=lambda: "https://storage.example/signed-product.png",
+    )
+    assert reference == "https://storage.example/signed-product.png"
+
+
+def test_fashn_reads_a_local_storage_path_and_inlines_it():
+    """上一条证明编排会传路径;这一条证明 Provider 真能消费那条路径。"""
+    payload = b"\x89PNG\r\n\x1a\nlocal-image"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        relative = Path("uploads") / "product.png"
+        (root / relative).parent.mkdir(parents=True)
+        (root / relative).write_bytes(payload)
+
+        fake_config = types.ModuleType("app.core.config")
+        fake_config.settings = types.SimpleNamespace(storage_dir=root)
+        missing = object()
+        previous = sys.modules.get("app.core.config", missing)
+        sys.modules["app.core.config"] = fake_config
+        try:
+            provider = FashnImageGenerationProvider(api_key="test-key", base_url="")
+            prepared = run(provider._prepare_image(relative.as_posix()))
+        finally:
+            if previous is missing:
+                sys.modules.pop("app.core.config", None)
+            else:
+                sys.modules["app.core.config"] = previous
+
+    assert prepared == data_uri(payload, "image/png")
 
 
 def test_empty_asset_url_is_rejected():

@@ -152,7 +152,6 @@ class GenerationTask(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
-
     attempts: Mapped[list[GenerationAttempt]] = relationship(
         back_populates="task",
         cascade="all, delete-orphan",

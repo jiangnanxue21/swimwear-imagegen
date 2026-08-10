@@ -36,7 +36,12 @@ from app.core.enums import (
     ReviewReason,
     TaskStatus,
 )
-from app.core.errors import ConcurrentTransition, ErrorCode, ManualReviewRequired
+from app.core.errors import (
+    ConcurrentTransition,
+    ErrorCode,
+    ManualReviewRequired,
+    ValidationError,
+)
 from app.core.hashing import hash_bytes
 from app.core.logging import get_logger
 from app.core.redaction import safe_error_message
@@ -48,7 +53,13 @@ from app.models.model_template import ModelTemplate
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
 from app.providers import call_accounting
-from app.providers.base import GenerationMode, GenerationRequest, settle_billable_units
+from app.providers.base import (
+    GenerationMode,
+    GenerationRequest,
+    ImageGenerationProvider,
+    provider_input_reference,
+    settle_billable_units,
+)
 from app.providers.errors import ProviderError, ResultDownloadError
 from app.providers.registry import get_provider, next_configured_provider
 from app.services import evaluation_service, review_service
@@ -758,14 +769,13 @@ def _run(
 
     # 认领**本身**就是 -> PREPROCESSING 这一步转移,这里不再转第二次
     _check_cancelled(session, task)
-    request = _build_request(session, task)
+    provider = get_provider(task.provider)
+    request = _build_request(session, task, provider)
 
     _check_cancelled(session, task)
     attempt = _new_attempt(session, task, request.seed)
 
     gs.transition(session, task, TaskStatus.SUBMITTING)
-    provider = get_provider(task.provider)
-
     # 提交前先落库。attempt 是"我们向 Provider 发过一次请求"的唯一证据,
     # 如果只 flush 不 commit,worker 在 submit 期间被 kill 时它会随事务一起消失 ——
     # 对方可能已经受理并开始计费,我们这边却查无此事。
@@ -1693,13 +1703,23 @@ def _dispatch_next_round(session, task_id: str) -> None:
     dispatch_service.deliver_pending(session, UUID(task_id))
 
 
-def _build_request(session, task: GenerationTask) -> GenerationRequest:
+def _build_request(
+    session, task: GenerationTask, provider: ImageGenerationProvider
+) -> GenerationRequest:
     storage = build_storage(
         settings.STORAGE_BACKEND,
         settings.storage_dir,
         settings.PUBLIC_BASE_URL,
         settings.API_PREFIX,
     )
+
+    def image_reference(storage_path: str) -> str:
+        return provider_input_reference(
+            provider,
+            storage_backend=settings.STORAGE_BACKEND,
+            storage_path=storage_path,
+            external_url=lambda: asset_url(storage, storage_path),
+        )
 
     assets = list(
         session.query(ProductAsset).filter(
@@ -1731,9 +1751,9 @@ def _build_request(session, task: GenerationTask) -> GenerationRequest:
     if template_id:
         template = session.get(ModelTemplate, template_id)
         if template and template.enabled:
-            model_url = asset_url(storage, template.storage_path)
+            model_url = image_reference(template.storage_path)
     if model_url is None and "MODEL_REFERENCE" in by_type:
-        model_url = asset_url(storage, by_type["MODEL_REFERENCE"].storage_path)
+        model_url = image_reference(by_type["MODEL_REFERENCE"].storage_path)
 
     task.current_round = (task.current_round or 0) + 1
     base = task.base_seed if task.base_seed is not None else 20240101
@@ -1748,7 +1768,7 @@ def _build_request(session, task: GenerationTask) -> GenerationRequest:
 
     return GenerationRequest(
         mode=GenerationMode(task.mode),
-        garment_image_url=asset_url(storage, garment.storage_path),
+        garment_image_url=image_reference(garment.storage_path),
         model_image_url=model_url,
         prompt=prompt,
         negative_prompt=negative_prompt,
@@ -2275,6 +2295,19 @@ def _load_bytes(item) -> bytes:
     # 一次取值供本函数三处共用:三次调用会读三遍缓存,而它们必须是同一份值 ——
     # 中间被改掉的话,校验用旧值、连接用新值,那是一道自己开的缝
     allowed_hosts = provider_setting("DOWNLOAD_ALLOWED_HOSTS")
+    # 候选 metadata 里的 provider 名由适配器写入,不是厂商响应透传。让适配器
+    # 只为自己的精确结果域名补充信任,可兼容代理 fake-IP,同时不削弱其他 URL
+    # 的 SSRF 校验。未知/缺失 Provider 保持原允许清单,即默认拒绝。
+    provider_name = str(item.metadata.get("provider") or "").strip().lower()
+    if provider_name:
+        try:
+            result_provider = get_provider(provider_name)
+        except ValidationError:
+            pass
+        else:
+            allowed_hosts = result_provider.result_download_allowed_hosts(
+                item.image_url, allowed_hosts
+            )
 
     try:
         check_download_url(item.image_url, allowed_hosts=allowed_hosts)
@@ -2299,7 +2332,7 @@ def _load_bytes(item) -> bytes:
             )
         except UnsafeDownloadURL as exc:
             raise ResultDownloadError(f"拒绝下载:{exc}") from exc
-        with response:
+        try:
             response.raise_for_status()
             chunks, total = [], 0
             for chunk in response.iter_bytes():
@@ -2307,4 +2340,9 @@ def _load_bytes(item) -> bytes:
                 if total > MAX_CANDIDATE_BYTES:
                     raise ResultDownloadError("候选图超过下载上限")
                 chunks.append(chunk)
+        finally:
+            # httpx.Response(包括 0.28.x)不是上下文管理器。这里拿到的又是
+            # stream=True 的响应,无论状态检查、迭代还是大小上限在哪一步抛错,
+            # 都必须显式关闭,否则连接池会被失败候选逐个耗尽。
+            response.close()
     return b"".join(chunks)

@@ -244,6 +244,32 @@ def test_running_task_can_still_be_cancelled(client, celery_eager):
     assert client.post(f"/api/generation-tasks/{task_id}/cancel").status_code == 200
 
 
+def test_cancelled_executed_task_can_be_deleted_and_recreated(client, celery_eager):
+    """已取消任务删除后不再可见，同参数可以创建一条全新的任务。"""
+    pid = _product_with_asset(client, "SKU-DELETE-CANCELLED")
+    params = {
+        "provider_params": {"mock_evaluator": {"outcome": "stuck"}},
+        "max_rounds": 1,
+    }
+    first = _create_task(client, pid, **params).json()["task"]
+    task_id = first["id"]
+    assert first["current_round"] == 1
+
+    cancelled = client.post(f"/api/generation-tasks/{task_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["can_delete"] is True
+
+    deleted = client.delete(f"/api/generation-tasks/{task_id}")
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(f"/api/generation-tasks/{task_id}").status_code == 404
+    listed = client.get("/api/generation-tasks", params={"product_id": pid}).json()
+    assert all(row["id"] != task_id for row in listed["items"])
+
+    recreated = _create_task(client, pid, **params).json()
+    assert recreated["deduplicated"] is False
+    assert recreated["task"]["id"] != task_id
+
+
 def test_completed_task_cannot_be_retried(client, celery_eager):
     pid = _product_with_asset(client, "SKU-CANCEL3")
     task_id = _create_task(client, pid, provider_params=_force_grade("a")).json()["task"]["id"]

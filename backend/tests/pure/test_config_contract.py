@@ -12,6 +12,8 @@ from tests.pure._helpers import BACKEND_ROOT, PROJECT_ROOT
 
 CONFIG_PY = BACKEND_ROOT / "app" / "core" / "config.py"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
+PYPROJECT = BACKEND_ROOT / "pyproject.toml"
+REDIS_TRANSPORT_PY = BACKEND_ROOT / "app" / "tasks" / "redis_transport.py"
 
 #: 这些字段有安全默认值,允许不出现在 .env.example
 OPTIONAL_IN_EXAMPLE = {"APP_NAME"}
@@ -129,3 +131,184 @@ def test_all_provider_keys_default_to_empty_so_app_starts_unconfigured():
                         pass
     for key in ("FASHN_API_KEY", "FAL_API_KEY", "COMFYUI_BASE_URL", "VISION_MODEL_API_KEY"):
         assert defaults.get(key) == "", f"{key} 默认值必须为空字符串"
+
+
+# ---------------------------------------------------------------- Celery result backend 钉 RESP2
+#
+# ## 这几条守卫为什么存在
+#
+# redis-py 8.x 把默认 RESP 协议从 2 改成 3。Celery 的 result
+# backend 由 redis-py 建连,会走 RESP3 协商,而项目连的远端 Redis(或前置代理)在
+# `HELLO 3 AUTH` 阶段直接断连 —— 任务做完后结果写不回去。`config.py` 的
+# `result_backend` property 用 `_pin_resp2()` 把协议钉回 RESP2 来绕开那段交互。
+#
+# ## 为什么只钉 result_backend,不钉 broker
+#
+# broker 走的是 **Kombu 自己的 Redis transport**，最终同样由 redis-py 建连；
+# 但 Kombu 没把 `protocol` 暴露为 transport option，而且 Connection 不认 URL 里的
+# 这个 query 参数。`broker_url` 一旦带上它,worker 启动时会在 Kombu 内部直接抛
+# `TypeError: Connection._init_params() got an unexpected keyword argument 'protocol'`。
+# 所以 `broker_url` 必须原样返回，协议由项目的 RESP2RedisTransport 注入。
+#
+# ## 为什么用 AST/exec,而不是 `Settings(...)`
+#
+# 这个文件跑在两条路上:`make test-pure`(只有标准库,`app.core.config` 因为
+# 依赖 pydantic-settings 而 import 不进来)和真实 pytest(CI、容器内)。在顶层
+# `from app.core.config import Settings` 会让整个文件在纯运行器导入期炸掉,
+# 运行器只把它记成一条失败 —— 那是本仓库踩过、并在 `run_pure_tests.py` 顶部写
+# 明的那类坑(`import pytest` 的同构)。
+#
+# `_pin_resp2` 本身只用 `urllib.parse`(标准库),所以能从源码里抽出来直接跑,
+# 不经过 Settings。逻辑钉住了,property 调它由下面一条 AST 断言钉着。
+
+
+def _load_pin_resp2():
+    """从 config.py 源码里抽出 `_pin_resp2`,返回可直接调用的函数对象。
+
+    `_pin_resp2` 只依赖标准库 urllib.parse,exec 出来即等价于运行时的那份。
+    那四个名字(urlsplit / parse_qsl / urlencode / urlunsplit)在 config.py 里是
+    **模块级** import,不在函数体内,所以这里要喂进 exec 的命名空间。
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    source = CONFIG_PY.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    func_node = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_pin_resp2"
+    )
+    func_src = ast.get_source_segment(source, func_node)
+    assert func_src is not None, "抽不出 _pin_resp2 的源码"
+    namespace: dict = {
+        "urlsplit": urlsplit,
+        "parse_qsl": parse_qsl,
+        "urlencode": urlencode,
+        "urlunsplit": urlunsplit,
+    }
+    exec(func_src, namespace)  # noqa: S102 - 测试用,源码来自本仓库
+    return namespace["_pin_resp2"]
+
+
+def test_pin_resp2_adds_protocol_to_plain_url():
+    pin = _load_pin_resp2()
+    assert pin("redis://localhost:6379/0") == "redis://localhost:6379/0?protocol=2"
+
+
+def test_pin_resp2_preserves_password_in_url():
+    """`.env` 里最常见的带密码形状。纯字符串拼接会拼坏 host 段,解析式注入不会。"""
+    pin = _load_pin_resp2()
+    assert pin("redis://:secret@redis:6379/1") == "redis://:secret@redis:6379/1?protocol=2"
+
+
+def test_pin_resp2_does_not_overwrite_explicit_protocol():
+    """用户显式写了 `?protocol=3` 时不覆盖 —— 那是有人刻意选了另一档。
+
+    没有这条,有人想切回 RESP3 做对照实验会被悄悄改回去,而表现是「改了没反应」。
+    """
+    pin = _load_pin_resp2()
+    out = pin("redis://localhost:6379/0?protocol=3")
+    assert "protocol=3" in out
+    assert "protocol=2" not in out
+
+
+def test_pin_resp2_appends_to_existing_query_params():
+    """URL 已有别的 query 参数时,protocol 要追加而不是覆盖整段 query。"""
+    pin = _load_pin_resp2()
+    out = pin("redis://localhost:6379/0?ssl=true")
+    assert "ssl=true" in out
+    assert "protocol=2" in out
+
+
+def test_pin_resp2_leaves_non_redis_backends_unchanged():
+    """显式配置数据库等其他 result backend 时不能塞进 Redis 专属参数。"""
+    pin = _load_pin_resp2()
+    url = "db+postgresql://db.example/imagegen?sslmode=require"
+    assert pin(url) == url
+
+
+def test_redis_dependency_matches_the_runtime_major_version():
+    """项目明确支持运行环境的 redis-py 8.1，不靠开发机偶然解析版本。"""
+    source = PYPROJECT.read_text(encoding="utf-8")
+    assert '"redis>=8.1,<9"' in source
+
+
+def test_custom_broker_transport_pins_plain_and_tls_connections_to_resp2():
+    """Kombu 不透传 protocol option，两种底层连接都必须由项目子类注入。"""
+    source = REDIS_TRANSPORT_PY.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    classes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    for name in ("RESP2Connection", "RESP2SSLConnection"):
+        class_source = ast.get_source_segment(source, classes[name]) or ""
+        assert 'kwargs["protocol"] = 2' in class_source
+        assert "health_check_interval: int = 0" in class_source
+
+    channel_source = ast.get_source_segment(source, classes["RESP2RedisChannel"]) or ""
+    assert "connection_class = RESP2Connection" in channel_source
+    assert "connection_class_ssl = RESP2SSLConnection" in channel_source
+
+    transport_source = ast.get_source_segment(source, classes["RESP2RedisTransport"]) or ""
+    assert "Channel = RESP2RedisChannel" in transport_source
+
+
+def test_only_result_backend_pins_resp2_not_broker():
+    """result_backend 必须调 `_pin_resp2`,broker_url 必须不调。
+
+    两条断言合在一起才封闭:
+
+    - **result_backend 调它**:有人重构时把 property 改回裸
+      `return self.REDIS_URL`,行为测试一条都不会红 —— `_pin_resp2` 还在、还能跑、
+      只是没人调它了。这条挡那个形状。少了它,result backend 在 redis-py 8.x
+      (RESP3 默认)下写不回任务结果 —— broker 能连、任务能跑、但结果落不回去,
+      排查方向永远不会落到这里。
+
+    - **broker_url 不调它**:broker 走 Kombu 的 Redis transport，最终虽然也使用
+      redis-py，但 Kombu 没暴露 `protocol` 参数；URL 带上它会让 worker 启动失败
+      (`TypeError: unexpected keyword argument 'protocol'`)。这条挡的是「为了对称
+      把两个 property 都钉」那个顺手之举 —— 错误信息里那句 TypeError 不会让人
+      联想到 query 参数,排查起来极慢。
+    """
+    source = CONFIG_PY.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    settings_cls = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Settings"
+    )
+    pins: dict[str, bool] = {}
+    for stmt in settings_cls.body:
+        is_target = (
+            isinstance(stmt, ast.FunctionDef)
+            and stmt.name in {"broker_url", "result_backend"}
+        )
+        if not is_target:
+            continue
+        body_src = ast.get_source_segment(source, stmt) or ""
+        pins[stmt.name] = "_pin_resp2(" in body_src
+    assert pins.get("result_backend") is True, (
+        "result_backend property 没有调用 _pin_resp2 —— "
+        "redis-py 8.x 默认 RESP3,远端 Redis 在 HELLO 3 阶段断连,结果写不回去。"
+    )
+    assert pins.get("broker_url") is False, (
+        "broker_url property 调了 _pin_resp2 —— kombu.Connection 不认 ?protocol=,\n"
+        "worker 会启动失败:TypeError: Connection._init_params() got an unexpected "
+        "keyword argument 'protocol'。broker 的 RESP2 兼容由自定义 transport 保证。"
+    )
+
+
+def test_worker_cancels_late_ack_tasks_when_broker_connection_is_lost():
+    """断线后 broker 会重投未 ack 消息，旧任务必须停下以免并行重复付费。"""
+    celery_source = (
+        BACKEND_ROOT / "app" / "tasks" / "celery_app.py"
+    ).read_text(encoding="utf-8")
+    assert "worker_cancel_long_running_tasks_on_connection_loss=True" in celery_source
+
+
+def test_celery_uses_the_resp2_broker_transport():
+    celery_source = (
+        BACKEND_ROOT / "app" / "tasks" / "celery_app.py"
+    ).read_text(encoding="utf-8")
+    expected = 'broker_transport="app.tasks.redis_transport:RESP2RedisTransport"'
+    assert expected in celery_source

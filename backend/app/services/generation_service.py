@@ -630,35 +630,17 @@ def cancel_task(session: Session, task_id: UUID, *, actor: str) -> GenerationTas
     return task
 
 
-def can_delete_unstarted(task: GenerationTask) -> bool:
-    """只有确认没有进入 Provider 阶段的已取消空任务才允许清理。"""
-    return (
-        task.status == TaskStatus.CANCELLED.value
-        and task.current_round == 0
-        and not task.external_task_id
-    )
+def can_delete_task(task: GenerationTask) -> bool:
+    """已取消任务可以从业务界面删除；运行中的任务必须先取消。"""
+    return task.status == TaskStatus.CANCELLED.value
 
 
-def delete_unstarted_task(session: Session, task_id: UUID, *, actor: str) -> None:
-    """删除未执行任务；任何 Provider 调用痕迹都会把删除挡下。
-
-    已执行任务是费用、错误和人工审核的证据，不能当普通 CRUD 行物理删除。
-    """
+def delete_task(session: Session, task_id: UUID, *, actor: str) -> None:
+    """删除已取消任务；费用流水与删除审计不随任务级联清除。"""
     task = get_task(session, task_id, for_update=True)
-    if not can_delete_unstarted(task):
+    if not can_delete_task(task):
         raise ValidationError(
-            "只有在 Provider 调用前取消的任务可以删除；已执行任务必须保留用于费用与错误追踪",
-            code=ErrorCode.INPUT_INVALID,
-            http_status=409,
-        )
-    attempt_count = session.scalar(
-        select(func.count())
-        .select_from(GenerationAttempt)
-        .where(GenerationAttempt.task_id == task.id)
-    ) or 0
-    if attempt_count:
-        raise ValidationError(
-            "任务已有 Provider 调用记录，不能删除",
+            "只有已取消的任务可以删除；请先取消仍在运行的任务",
             code=ErrorCode.INPUT_INVALID,
             http_status=409,
         )
@@ -670,9 +652,11 @@ def delete_unstarted_task(session: Session, task_id: UUID, *, actor: str) -> Non
         entity_type="GenerationTask",
         entity_id=task.id,
         payload={
-            "reason": "cancelled_before_provider_call",
+            "reason": "cancelled_by_user",
             "product_id": task.product_id,
             "provider": task.provider,
+            "current_round": task.current_round,
+            "idempotency_key": task.idempotency_key,
         },
     )
     session.delete(task)

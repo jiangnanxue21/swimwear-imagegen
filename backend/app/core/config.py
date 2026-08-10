@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,30 @@ from app.core.vocab import (
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = BACKEND_ROOT.parent
+
+
+def _pin_resp2(url: str) -> str:
+    """给 Celery 的 result backend URL 钉上 `protocol=2`(RESP2)。
+
+    redis-py 8.x 把默认协议从 RESP2 改成 RESP3。Celery 的 result backend 直接
+    由 redis-py 建连；项目连的远端 Redis(或前置代理)在 `HELLO 3 AUTH` 阶段会
+    直接断连，于是任务做完后结果写不回去。
+
+    **只用在 Redis result backend 上。** broker 虽然最终也用 redis-py 建连，
+    但参数由 Kombu 的 Redis transport 筛选，它没有暴露 `protocol`；把参数写进
+    broker URL 会在 worker 启动时直接抛
+    `TypeError: Connection._init_params() got an unexpected keyword argument 'protocol'`。
+    broker 的协议兼容性因此由 `app.tasks.redis_transport` 保证。
+
+    用户**显式**写了 `?protocol=...` 时不覆盖 —— 那是有人刻意选了另一档。
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in {"redis", "rediss"}:
+        return url
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if "protocol" not in params:
+        params["protocol"] = "2"
+    return urlunsplit(parts._replace(query=urlencode(params)))
 
 
 class Settings(BaseSettings):
@@ -317,11 +342,14 @@ class Settings(BaseSettings):
 
     @property
     def broker_url(self) -> str:
+        # broker 经 Kombu 的 Redis transport 建连；它不把 protocol 暴露成 transport
+        # option，而 URL query 又会落到不接收该参数的 Kombu Connection。因此这里
+        # 不能注入 protocol=2，RESP2 由 celery_app 配置的自定义 transport 注入。
         return self.CELERY_BROKER_URL or self.REDIS_URL
 
     @property
     def result_backend(self) -> str:
-        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
+        return _pin_resp2(self.CELERY_RESULT_BACKEND or self.REDIS_URL)
 
     @property
     def cors_origin_list(self) -> list[str]:

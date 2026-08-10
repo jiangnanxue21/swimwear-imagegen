@@ -49,7 +49,7 @@ def _task_out(task) -> TaskOut:
     out = TaskOut.model_validate(task)
     out.can_cancel = sm.can_cancel(task.status)
     out.can_retry = sm.can_retry(task.status)
-    out.can_delete = gs.can_delete_unstarted(task)
+    out.can_delete = gs.can_delete_task(task)
     return out
 
 
@@ -175,7 +175,7 @@ def cancel_task(
 def delete_task(
     task_id: UUID, request: Request, session: Session = Depends(db_session)
 ) -> Response:
-    gs.delete_unstarted_task(session, task_id, actor=current_actor(request))
+    gs.delete_task(session, task_id, actor=current_actor(request))
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

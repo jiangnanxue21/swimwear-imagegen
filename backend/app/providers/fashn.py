@@ -378,6 +378,12 @@ def aggregate_status(statuses: list[ExternalTaskStatus]) -> ExternalTaskStatus:
 class FashnImageGenerationProvider(ImageGenerationProvider):
     provider_name = "fashn"
     is_simulator = False
+    # `_prepare_image` 的非 HTTP 分支会从 settings.storage_dir 安全读取并
+    # 内联为 data-URI。声明这一点后,编排层不再把本地素材绕成 localhost URL。
+    accepts_local_storage_paths = True
+    # FASHN 的状态响应把生成图放在这个官方 CDN。代理 fake-IP 模式下它可能
+    # 解析到 198.18/15;只信任这个精确域名,不放开网段或任意 *.fashn.ai。
+    trusted_result_hosts = frozenset({"cdn.fashn.ai"})
     display_name = "FASHN"
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:

@@ -90,6 +90,10 @@ celery_app.conf.beat_schedule = {
 }
 
 celery_app.conf.update(
+    # redis-py 8.1 默认使用 RESP3；项目的 Redis 前置代理会在 HELLO 3 阶段断连。
+    # result backend 可用 URL query 指定协议，Kombu broker 不行，所以走自定义
+    # transport 给底层 redis.Connection 显式传 protocol=2。
+    broker_transport="app.tasks.redis_transport:RESP2RedisTransport",
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
@@ -97,6 +101,10 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
+    # broker 断线后，Redis 会重新投递尚未 ack 的消息。继续运行原任务会让新旧两个
+    # worker 并行执行同一次付费调用；取消旧任务后由租约/checkpoint 路径安全恢复。
+    # Celery 6 会把它改成默认值，这里提前显式固定，避免升级时语义暗变。
+    worker_cancel_long_running_tasks_on_connection_loss=True,
     worker_prefetch_multiplier=1,
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
     task_default_queue="default",

@@ -147,7 +147,7 @@ class TaskOut(BaseModel):
     #: 该状态下允许的操作,前端据此决定按钮可用性
     can_cancel: bool = False
     can_retry: bool = False
-    #: 只允许删除从未进入 Provider 调用阶段、随后被取消的空任务。
+    #: 已取消任务可以删除；仍在运行的任务必须先取消。
     can_delete: bool = False
 
 

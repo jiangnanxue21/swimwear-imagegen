@@ -402,6 +402,32 @@ def test_candidate_download_uses_the_per_hop_guard():
     assert called, "下载路径没有实际调用 stream_checked"
 
 
+def test_candidate_stream_is_closed_in_a_finally_block():
+    """httpx.Response 不是上下文管理器,流式响应必须在异常路径也显式关闭。"""
+    source = (APP_DIR / "tasks" / "generation_tasks.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_load_bytes"
+    )
+    guarded = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "response"
+            and call.func.attr == "close"
+            for final_node in node.finalbody
+            for call in ast.walk(final_node)
+        )
+    ]
+    assert guarded, "候选流式响应没有在 finally 中 close,异常会耗尽连接池"
+
+
 def test_csv_export_escapes_formulas():
     source = (APP_DIR / "services" / "export_format.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

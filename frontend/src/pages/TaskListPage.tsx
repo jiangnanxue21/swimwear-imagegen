@@ -1,12 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { App, Button, Card, Empty, Select, Space, Table, Tag, Tooltip } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  generationApi, SUBMIT_RESULT_UNKNOWN, type TaskCreatePayload,
-} from '../api/generation'
+import { generationApi, SUBMIT_RESULT_UNKNOWN } from '../api/generation'
 import { isResultUnknown, readError, readWriteError } from '../api/client'
 import {
   MODE_LABEL, TASK_STATUS_LABEL, listPollInterval, type Task, type TaskStatus,
@@ -48,23 +46,6 @@ export default function TaskListPage() {
   })
   const { status, page } = filters.values
   const [open, setOpen] = useState(false)
-  const [editTarget, setEditTarget] = useState<Task | null>(null)
-  const editInitialValues = useMemo<Partial<TaskCreatePayload> | undefined>(
-    () => editTarget
-      ? {
-          product_id: editTarget.product_id,
-          mode: editTarget.mode,
-          provider: editTarget.provider,
-          routing_mode: editTarget.routing_mode,
-          model_template_id: editTarget.model_template_id,
-          candidate_count: editTarget.candidate_count,
-          max_rounds: editTarget.max_rounds,
-          base_seed: editTarget.base_seed,
-          prompt: editTarget.prompt ?? undefined,
-        }
-      : undefined,
-    [editTarget],
-  )
 
   // 服务端排序。这张表默认按创建时间倒序,但排障时最常要的是「按更新时间」——
   // updated_at 同时是 worker 心跳(reap_stalled 靠它判断进程还活着),
@@ -92,7 +73,6 @@ export default function TaskListPage() {
     mutationFn: generationApi.create,
     onSuccess: (result) => {
       setOpen(false)
-      setEditTarget(null)
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       if (result.deduplicated) {
         message.info('相同参数的任务已存在,已为你打开它')
@@ -142,7 +122,7 @@ export default function TaskListPage() {
   const remove = useMutation({
     mutationFn: generationApi.remove,
     onSuccess: () => {
-      message.success('未执行任务已删除')
+      message.success('任务已删除')
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
     },
     onError: onWriteError,
@@ -183,15 +163,22 @@ export default function TaskListPage() {
       render: (m: keyof typeof MODE_LABEL) => MODE_LABEL[m] ?? m,
     },
     {
-      title: '轮次',
+      title: '已运行轮次',
       key: 'current_round',
-      width: 90,
+      width: 110,
       align: 'center',
       sorter: true,
       sortOrder: sort.orderFor('current_round'),
-      render: (_, row) => `${row.current_round} / ${row.max_rounds}`,
+      // max_rounds 是自动运行上限,重试会让实际轮次超过它。
+      // 拼成 `3 / 1` 看起来像数据坏了,所以表格只展示已运行数,
+      // 计划上限放在解释里。
+      render: (_, row) => (
+        <Tooltip title={`当前自动运行上限 ${row.max_rounds} 轮；重试可能增加实际轮次`}>
+          <span>{row.current_round}</span>
+        </Tooltip>
+      ),
     },
-    { title: '候选数', dataIndex: 'candidate_count', width: 80, align: 'center' },
+    { title: '每轮候选', dataIndex: 'candidate_count', width: 90, align: 'center' },
     {
       title: '状态',
       dataIndex: 'status',
@@ -212,7 +199,7 @@ export default function TaskListPage() {
     },
     {
       title: '操作',
-      width: 330,
+      width: 160,
       render: (_, row) => {
         // FE-TASK-LIST-03:loading 绑到**这一行**。用页面级 isPending 的话,
         // 点一行的重试会让整列按钮一起转圈,运营看不出自己点的是哪一条
@@ -220,30 +207,23 @@ export default function TaskListPage() {
         const retrying = retry.isPending && retry.variables?.id === row.id
         const submitUnknown = row.error_code === SUBMIT_RESULT_UNKNOWN
         return (
-          <Space size={4}>
-            <Button
-              size="small"
-              icon={<EditOutlined />}
-              onClick={() => setEditTarget(row)}
-            >
-              修改参数
-            </Button>
-            <Button
-              size="small"
-              disabled={!row.can_cancel || cancelling}
-              loading={cancelling}
-              onClick={() => cancel.mutate(row.id)}
-            >
-              取消
-            </Button>
-            {submitUnknown ? (
+          <Space size={4} wrap>
+            {row.can_cancel && (
+              <Button
+                size="small"
+                loading={cancelling}
+                onClick={() => cancel.mutate(row.id)}
+              >
+                取消任务
+              </Button>
+            )}
+            {row.can_retry && (submitUnknown ? (
               // FE-TASK-LIST-04:普通重试对这条稳定 409。给它自己的按钮,
               // 而不是让运营点一次失败再去别处找出路
               <Tooltip title="提交结果未知:先到 Provider 后台核对,确认没有产生结果后再强制重试">
                 <Button
                   size="small"
                   danger
-                  disabled={!row.can_retry || retrying}
                   loading={retrying}
                   onClick={() => setForceTarget(row)}
                 >
@@ -253,28 +233,22 @@ export default function TaskListPage() {
             ) : (
               <Button
                 size="small"
-                disabled={!row.can_retry || retrying}
                 loading={retrying}
                 onClick={() => retry.mutate({ id: row.id, force: false })}
               >
                 重试
               </Button>
-            )}
-            <Tooltip
-              title={row.can_delete
-                ? '只删除这条尚未调用 Provider 的空任务'
-                : '已有执行痕迹的任务必须保留，用于费用、错误与审核追踪'}
-            >
-              <span>
+            ))}
+            {row.can_delete && (
+              <Tooltip title="删除任务及其执行明细；已经产生的费用不会撤销">
                 <Button
                   size="small"
                   danger
                   icon={<DeleteOutlined />}
-                  disabled={!row.can_delete || (remove.isPending && remove.variables === row.id)}
                   loading={remove.isPending && remove.variables === row.id}
                   onClick={() => modal.confirm({
-                    title: '删除这条未执行任务？',
-                    content: '只会删除在 Provider 调用前已经取消的空任务，此操作不可撤销。',
+                    title: '删除这条已取消任务？',
+                    content: '任务及其执行明细将被删除；已经产生的费用不会撤销。',
                     okText: '删除',
                     okButtonProps: { danger: true },
                     cancelText: '取消',
@@ -283,8 +257,8 @@ export default function TaskListPage() {
                 >
                   删除
                 </Button>
-              </span>
-            </Tooltip>
+              </Tooltip>
+            )}
           </Space>
         )
       },
@@ -293,7 +267,10 @@ export default function TaskListPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="生成任务" subtitle="AI 出图的执行记录。跑挂的任务在这里重试或换 Provider" />
+      <PageHeader
+        title="生成任务"
+        subtitle="AI 出图的执行记录。失败任务可重试；不再需要的任务请先取消再删除"
+      />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>
         <Space wrap>
@@ -346,15 +323,10 @@ export default function TaskListPage() {
       />
 
       <TaskCreateModal
-        open={open || Boolean(editTarget)}
-        productId={editTarget?.product_id}
-        initialValues={editInitialValues}
-        title={editTarget ? '修改参数并新建任务' : '创建生成任务'}
+        open={open}
+        title="创建生成任务"
         confirmLoading={create.isPending}
-        onCancel={() => {
-          setOpen(false)
-          setEditTarget(null)
-        }}
+        onCancel={() => setOpen(false)}
         onSubmit={(values) => create.mutate(values as never)}
       />
 
