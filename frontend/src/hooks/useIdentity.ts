@@ -3,10 +3,10 @@
  *
  * ## 为什么要抽出来
  *
- * 冷启动横幅要知道"口令被拒了没",菜单要知道"这个浏览器是不是管理员" ——
+ * 冷启动横幅要知道"口令被拒了没",顶栏身份区要知道"这个浏览器是不是管理员" ——
  * 两件事都只能由后端回答,而且答案来自同一个请求。各自写一遍 `useQuery` 的后果
  * 不是多一次请求(react-query 按 key 去重),是**两处 `enabled` 条件会分叉**:
- * 横幅那份刻意在"后端连不上"时不问,菜单那份没有这个条件,于是同一个 key 上
+ * 横幅那份刻意在"后端连不上"时不问,身份区那份没有这个条件,于是同一个 key 上
  * 挂了两组互相矛盾的开关,谁先挂载谁说话。所以判断只留一份,在这里。
  *
  * ## 拿不到答案时按什么显示
@@ -14,27 +14,29 @@
  *     后端答了            用 `is_admin`。这是唯一权威的答案
  *     还没答 / 答不了     退回"本浏览器填了管理口令吗"
  *
- * 第二行是计划里点名的降级实现。它可以被骗(在 localStorage 里塞个假口令就能
- * 让菜单长出「系统管理」),但那一栏点进去每个请求都会被后端 `require_admin`
- * 挡回来 —— **这是显示层收敛,不是权限边界**。真正的边界在后端,而且只在后端。
+ * 第二行是计划里点名的降级实现。它可以被骗(在 localStorage 里塞个假口令,
+ * 顶栏就会挂上「管理员」标、那几处管理员限定的提示也会显示出来),但凡是
+ * 真的要动数据的请求都会被后端 `require_admin` 挡回来 ——
+ * **这是显示层的判断,不是权限边界**。真正的边界在后端,而且只在后端。
  *
- * ## 一个必须留着的后门
+ * ## 这里的 `is_admin` 现在真的决定看得见什么
  *
- * 菜单收敛之后,非管理员看不到「设置」入口。但新人第一次打开系统时恰恰
- * **既不是管理员、又必须进设置页填口令** —— 冷启动横幅里那个链接是他唯一的路。
- * 所以 `/settings` 等路由对所有人保持注册(见 App.tsx),这里收敛的只是菜单。
- * 删掉那条路由,或者给它加个前端守卫,新人就会被锁在门外。
+ * A8 计划里的「菜单按角色收敛」在 a46 之前一直没有落地,理由是"新人第一次
+ * 打开系统时既不是管理员、又必须进设置页填口令"。**浏览器登录上线之后这个
+ * 前提消失了**:密码在 `.env` 里,没有任何人需要先进设置页把自己变成管理员。
+ * 所以本轮显式撤掉那条约束 —— `NAV` 的「系统管理」组标了 `adminOnly`,
+ * `AppLayout` 按 `isAdmin` 过滤,`nav-and-url-filters.test.tsx` 反过来钉着
+ * 「operator 看不到 /settings」。
+ *
+ * **路由仍然全部注册。** operator 手输 `/settings` 打得开,页面上是一句 403;
+ * 真正的边界仍然只在后端 `require_admin`。菜单收敛是可发现性,不是权限。
+ * 给路由加前端守卫之前先想清楚这两件事的区别。
  */
-import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { authApi, type WhoAmI } from '../api/auth'
 import { healthApi } from '../api/health'
-import {
-  TOKEN_CHANGED_EVENT,
-  isAuthError,
-  readAdminToken,
-  readOperatorToken,
-} from '../api/client'
+import { isAuthError, onSessionExpiredChange } from '../api/client'
 
 export interface Identity {
   /** 后端确认过的身份。没确认到就是 null,别拿它当"不是管理员"用 */
@@ -45,13 +47,30 @@ export interface Identity {
   backendDown: boolean
   /** 探活还在路上。首屏据此避免闪一下再改 */
   loading: boolean
-  /** 口令被后端拒过(401/403) */
+  /** 身份探测被后端拒过(401/403) */
   authFailed: boolean
-  /** 正在拿管理口令跑日常业务(C-04)。界面应当提示配一个运营口令 */
-  usingAdminFallback: boolean
+  /**
+   * 这个部署走浏览器登录(后端 `/health` 的 `auth_mode`)。
+   *
+   * 界面上有三处按它分岔,而三处的**错法各不相同**,所以它必须是后端答的:
+   *
+   *     AppLayout          未登录时跳 /login 还是原地显示空页
+   *     ColdStartBanner    说"去填口令"还是什么都不说(登录页会接手)
+   *     顶栏身份区          给"退出登录"还是"更换口令"
+   */
+  sessionAuth: boolean
+  /**
+   * 会话模式下当前**没有**有效登录态。`AppLayout` 据此跳登录页。
+   *
+   * 三个条件缺一不可:是会话模式、探测已经有结论、结论是"没有身份"。
+   * 少了第二条的后果是首屏那一帧还没答案就把人踢走 —— 已登录的人每次刷新
+   * 都会先闪一下登录页;而后端连不上时也不能踢(那是另一件事,横幅在说)。
+   */
+  needsLogin: boolean
 }
 
 export function useIdentity(): Identity {
+  const queryClient = useQueryClient()
   /*
    * A-09:后端恢复之后,红色横幅必须自己消失。
    *
@@ -82,74 +101,79 @@ export function useIdentity(): Identity {
     setBackendWasDown(health.isError)
   }, [health.isError])
 
-  // 从 localStorage 同步读,**不是响应式的**:存完口令之后这个组件不会因为
-  // 存储变了而重渲染,`enabled` 也就不会自己翻转。所以 SettingsPage 存完口令
-  // 必须显式 `invalidateQueries(['auth-probe'])` —— 那一步是这个判断的配套,
-  // 不是可选的优化。
   /*
-   * A-10:口令的存在性必须是**响应式**的。
+   * 会话模式下**凭据是 Cookie,不是 localStorage 里的字符串**。
    *
-   * 原来这里是一次同步读,注释自己写着"不是响应式的",并把责任推给
-   * 设置页去 `invalidateQueries` —— 一个靠"记得手动同步"维持的不变量。
-   * 漏一处的表现是:口令存好了,界面仍然说没登录。
+   * 上一版的 `enabled` 除了后端活着,还挂着「本地存了口令没有」,旧的 `enabled` 读的是
+   * localStorage 里那两把口令。浏览器登录落地之后那个条件会把整条链路掐死在
+   * 起点:登录成功、Cookie 也发了,而 那两把本地口令仍然是空 ——
+   * whoami 一次都不发,顶栏永远停在"未登录",菜单永远按非管理员渲染。
+   * 而**没有任何请求失败**,所以横幅也不会说话。这是 §3.43 那一族的又一次:
+   * 上游全对,断在最后一跳。
    *
-   * 现在订阅两个来源:本标签页的 `TOKEN_CHANGED_EVENT`(`storage` 事件在
-   * 同一个标签页里**不触发**,这是它最容易被漏掉的地方),以及跨标签页的
-   * `storage`。设置页那次 invalidate 保留 —— 它现在是加速,不是必需。
+   * 本轮 localStorage 口令链整个退役,`enabled` 因此**只依赖 `!health.isError`**。
+   * 这一条不能再挂任何别的条件:`enabled: false` 时 react-query 的
+   * `isLoading` 是 **false**(v5 里 `isLoading === isPending && isFetching`),
+   * 于是 `RequireAuth` 那一侧不会停在 Loading,而是直接判成未登录 ——
+   * 表现是"已登录的人刷新时先闪一下登录页"。
    */
-  const [tokenTick, setTokenTick] = useState(0)
-  useEffect(() => {
-    const bump = () => setTokenTick((n) => n + 1)
-    window.addEventListener(TOKEN_CHANGED_EVENT, bump)
-    window.addEventListener('storage', bump)
-    return () => {
-      window.removeEventListener(TOKEN_CHANGED_EVENT, bump)
-      window.removeEventListener('storage', bump)
-    }
-  }, [])
+  const sessionAuth = health.data?.auth_mode === 'session'
 
-  const hasToken = useMemo(
-    () => Boolean(readOperatorToken() || readAdminToken()),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tokenTick 是刷新信号,不是值
-    [tokenTick],
-  )
-
-  /**
-   * C-04(部分):没有运营口令时,普通请求会带上**管理口令**。
+  /*
+   * 会话在**用着的过程中**过期,这里是唯一会发现它的地方。
    *
-   * 这是 A5 刻意留的回落 —— 只配了 admin 的部署照样能用,而后端本来就认
-   * admin 包含 operator。去掉它会让那类部署整站 401。
+   * 探测查询挂着 `staleTime: 60_000` 且 `refetchOnWindowFocus: false` ——
+   * 这两条对首屏是对的(别为了一个不会变的答案反复打请求),但它们也意味着:
+   * 后端那边 Cookie 过期之后,前端手里那份"我是 operator"能继续有效整整一分钟,
+   * 甚至更久。运营在这段时间里点什么都失败,而**界面从头到尾不会把他送去登录页**
+   * —— 他只会看到一串"请重新登录"的提示,和一个没有登录入口的页面。
    *
-   * 但代价是真的:**每一次列表 GET 都在发送能改 API Key 的那把口令**。
-   * 所以这里不删回落,只把它变成**看得见的** —— 界面据此提示配一个运营口令。
-   * 真正消除它要账号体系(C-05'),不是一个前端改动。
+   * 所以 401 要能把这份缓存作废。`resetQueries` 而不是 `invalidateQueries`:
+   * 后者在重新请求失败时**保留旧数据**(React Query 的既定行为),于是
+   * `probe.data` 还在,`needsLogin` 还是假 —— 等于什么都没做,而且这种"做了
+   * 但没生效"比没做更难查。`reset` 把数据一并丢掉,再由 whoami 的回答定去留。
+   *
+   * 判定仍然只有一处:`needsLogin` 读的是重新探测的**结果**,不是这个信号本身。
+   * 一次偶发 401 不会把登录态完好的人踢出去 —— 它只是让人再问一遍。
    */
-  const usingAdminFallback = useMemo(
-    () => !readOperatorToken() && Boolean(readAdminToken()),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tokenTick],
+  useEffect(
+    () =>
+      onSessionExpiredChange((expired) => {
+        if (expired) queryClient.resetQueries({ queryKey: ['auth-probe'] })
+      }),
+    [queryClient],
   )
 
   const probe = useQuery({
     queryKey: ['auth-probe'],
     queryFn: () => authApi.whoami(),
-    // 后端都没起来、或一把口令都没填时不必问:那两种情况横幅另有说法
-    enabled: !health.isError && hasToken,
+    enabled: !health.isError,
     retry: false,
     refetchOnWindowFocus: false,
     staleTime: 60_000,
   })
 
+  // 探测有没有**结论**。`isLoading` 只在"正在跑第一次"时为真;
+  // `enabled: false` 的查询它是 false(见上面 `enabled` 那段),
+  // 所以"还没答案"必须用这个显式判据,不能拿 `isLoading` 凑合
+  const probeSettled = probe.isSuccess || probe.isError
+
   return {
     who: probe.data ?? null,
-    // `??` 而不是 `||`:后端明确说了 `is_admin: false` 时要**听它的**,
-    // 不能因为本地存着一把(已经失效的)管理口令就把系统管理菜单亮回来
-    isAdmin: probe.data?.is_admin ?? Boolean(readAdminToken()),
+    // **只认后端。** 上一版这里有个「后端没答就看本地存没存管理口令」的降级,
+    // 在 localStorage 里塞一把假口令就能把管理菜单点亮。菜单现在真的按角色
+    // 收敛了(§30),这个降级于是从"显示层的猜测"变成"能骗出一整组入口"——
+    // 骗出来的入口点进去仍然 403,但那是后端在兜底,不是这里做对了
+    isAdmin: probe.data?.is_admin === true,
     backendDown: health.isError,
     loading: health.isLoading || probe.isLoading,
     // 只有 401/403 算"口令被拒"。超时、502 也会让 probe 变 isError,
     // 而把那些也算成口令问题,横幅会在后端抽风时指着运营的口令说错话
     authFailed: probe.isError && isAuthError(probe.error),
-    usingAdminFallback,
+    sessionAuth,
+    // **不看 `authFailed`。** 探测失败的原因可能是 502 或超时,而那时把人踢去
+    // 登录页是错的:他登得进去,然后回到同一个坏掉的后端。判据只有一条 ——
+    // 后端活着、探测已经有结论、而结论里没有身份
+    needsLogin: sessionAuth && !health.isError && probeSettled && !probe.data,
   }
 }

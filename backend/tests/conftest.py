@@ -434,6 +434,78 @@ def guarded_client(client, monkeypatch):
     return client
 
 
+# ---------------------------------------------------------------- 浏览器登录
+#
+# 上面两个夹具(admin_client / guarded_client)走的是 **Legacy Header Token**,
+# 本轮**原样保留** —— §37 要求那条路继续为 CLI / 脚本 / pytest 工作,而这两个
+# 夹具正是它唯一的回归保护。把它们改成 Session 版等于把那条路的覆盖删掉,
+# 而删掉的覆盖不会自己叫。
+#
+# 下面两个是新增的浏览器路线。
+
+
+#: 测试用的两个密码。**必须互不相同** —— Settings._check_browser_auth 拦这件事,
+#: 而如果夹具自己用了相同的密码,"两个角色形同一个"这个缺陷在测试里就不可见了。
+BROWSER_ADMIN_PASSWORD = "test-admin-password"
+BROWSER_OPERATOR_PASSWORD = "test-operator-password"
+
+
+@pytest.fixture
+def browser_auth(monkeypatch):
+    """把浏览器登录配上,并把环境设成"必须要凭据"。
+
+    ## 为什么打模块属性而不是设环境变量
+
+    `settings` 是 `@lru_cache` 的 `get_settings()` 产出的**模块级单例**,
+    进程起来时就构造完了。这时候再设 `os.environ` 一个字都不会生效。
+    `deps.settings` / `auth.settings` / `config.settings` 是同一个对象,
+    所以打其中任意一个即可 —— admin_client 一直是这么写的,照抄那个惯例。
+
+    ## 这里**不**配 ADMIN_TOKEN / OPERATOR_TOKENS
+
+    刻意的:这就是本轮之后最常见的部署形态(只有浏览器登录,没有机器凭据)。
+    `rejection()` 对这种形态必须回 401「未登录」而不是 403「服务器没配口令」,
+    而只有在夹具里把 Legacy Token 也留空,那条路径才走得到。
+    """
+    from app.api import deps
+
+    monkeypatch.setattr(deps.settings, "APP_ENV", "production", raising=False)
+    monkeypatch.setattr(
+        deps.settings, "ADMIN_PASSWORD", BROWSER_ADMIN_PASSWORD, raising=False
+    )
+    monkeypatch.setattr(
+        deps.settings, "OPERATOR_PASSWORD", BROWSER_OPERATOR_PASSWORD, raising=False
+    )
+    monkeypatch.setattr(deps.settings, "ADMIN_TOKEN", "", raising=False)
+    monkeypatch.setattr(deps.settings, "OPERATOR_TOKENS", "", raising=False)
+    return deps.settings
+
+
+def _login(client, username: str, password: str):
+    resp = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert resp.status_code == 200, f"{username} 登录失败:{resp.status_code} {resp.text}"
+    return resp
+
+
+@pytest.fixture
+def session_admin_client(client, browser_auth):
+    """已经以 admin 身份登录的浏览器。
+
+    TestClient 自带 cookie jar,所以登录之后后续请求会自动带上 Session Cookie ——
+    不需要(也**不应该**)手工把 Cookie 抄进请求头:手抄会绕过 Set-Cookie 的
+    属性(HttpOnly / SameSite / max-age),于是那些属性错了测试也不会知道。
+    """
+    _login(client, "admin", BROWSER_ADMIN_PASSWORD)
+    return client
+
+
+@pytest.fixture
+def session_operator_client(client, browser_auth):
+    """已经以 operator 身份登录的浏览器。"""
+    _login(client, "operator", BROWSER_OPERATOR_PASSWORD)
+    return client
+
+
 # ---------------------------------------------------------------- 会话末尾复查
 
 

@@ -37,6 +37,12 @@ const identity = vi.hoisted(() => ({
     backendDown: false,
     loading: false,
     authFailed: false,
+    // 显式写出来,而不是靠 `undefined` 恰好是假 —— 靠巧合成立的默认值,
+    // 下一个人往这个对象里加字段时不会知道自己动了什么。
+    // (phase2 时这行注释还说"默认按口令模式渲染,下面那几条说的都是口令的事";
+    // phase6 把口令那几条删了,横幅在后端活着时一律沉默,模式只影响
+    // backendDown 那句话的措辞)
+    sessionAuth: false,
   },
 }))
 
@@ -46,7 +52,6 @@ vi.mock('../../src/hooks/useIdentity', () => ({
 
 const { default: ErrorNotice } = await import('../../src/components/ErrorNotice')
 const { default: ColdStartBanner } = await import('../../src/components/ColdStartBanner')
-const { writeAdminToken, writeOperatorToken } = await import('../../src/api/client')
 
 function setIdentity(patch: Partial<typeof identity.value>) {
   identity.value = { ...identity.value, ...patch }
@@ -66,7 +71,7 @@ function apiError(status: number, code: string, message: string, requestId?: str
 }
 
 beforeEach(() => {
-  setIdentity({ isAdmin: false, backendDown: false, loading: false, authFailed: false })
+  setIdentity({ isAdmin: false, backendDown: false, loading: false, authFailed: false, sessionAuth: false })
   window.localStorage.clear()
 })
 
@@ -151,12 +156,15 @@ describe('ColdStartBanner：三种状态说三句不同的话', () => {
     expect(container.textContent).toContain('docker compose up -d')
   })
 
-  it('后端活着但一把口令都没填：指到设置页', () => {
-    setIdentity({ backendDown: false, isAdmin: false })
+  it('后端活着时横幅一句话都不说 —— 未登录由 /login 处理,不由横幅', () => {
+    // 这里原来有三条:「还差一步:填入操作口令」「口令填了也没被拒时不打扰」
+    // 「会话模式下整条让位给登录页」。三条都建立在"浏览器手里有一把口令"上,
+    // 随 localStorage 口令链一起退役(PRD §32)。剩下的不变量只有一句:
+    // **后端活着的时候,横幅不出声**
+    setIdentity({ backendDown: false, isAdmin: false, sessionAuth: false })
     const { container } = renderBanner()
 
-    const link = container.querySelector('a[href="/settings"]')
-    expect(link).not.toBeNull()
+    expect(container.textContent).toBe('')
   })
 
   it('已经在设置页上就不显示 —— 那一页自己会说该填什么', () => {
@@ -166,12 +174,10 @@ describe('ColdStartBanner：三种状态说三句不同的话', () => {
     expect(container.textContent).toBe('')
   })
 
-  it('口令填了也没被拒时不打扰：横幅让位给页面', () => {
-    writeOperatorToken('op-1')
-    writeAdminToken('')
-    setIdentity({ backendDown: false, authFailed: false, who: { name: 'alice' } })
-    const { container } = renderBanner()
+  it('会话模式下后端连不上,仍然要说那一句 —— 那时登录页也进不去', () => {
+    setIdentity({ backendDown: true, sessionAuth: true, isAdmin: false })
+    renderBanner()
 
-    expect(container.textContent).toBe('')
+    expect(screen.getByText('连不上后端服务')).toBeInTheDocument()
   })
 })

@@ -59,6 +59,7 @@ from app.workbench import audit_view, import_plan, import_token
 from app.workbench import batch as rules
 from app.workbench import batch_service as bs
 from app.workbench import exceptions as exc_rules
+from app.workbench import flow as flow_rules
 from app.workbench import spu as spu_rules
 from app.workbench.batch import BatchAction
 
@@ -646,6 +647,18 @@ def list_spus(
                     completion=ctx.result.completion,
                     blocking_count=ctx.result.blocking_count,
                     next_action_label=ctx.result.next_action.label,
+                    # a47 §8.1:这一只卡在哪几步。**级别判定在 `flow.py`**,
+                    # 这里只是把 BLOCKING 那一档的 `target_step` 收集起来 ——
+                    # 在取数层重判一次级别就是给"什么算阻断"造第二个答案
+                    blocked_steps=tuple(
+                        sorted(
+                            {
+                                issue.target_step.value
+                                for issue in ctx.result.issues
+                                if issue.level is flow_rules.IssueLevel.BLOCKING
+                            }
+                        )
+                    ),
                 ),
             )
         )

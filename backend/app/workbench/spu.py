@@ -69,6 +69,12 @@ class SkuRow:
     completion: int = 0
     blocking_count: int = 0
     next_action_label: str = ""
+    #: 这一只**卡在哪几步**:有 BLOCKING 问题的步骤名(`FlowStep` 的值)。
+    #:
+    #: 一只 SKU 可以同时卡在两步(属性没确认 + 图片集缺角度),所以这是个
+    #: 集合而不是单值。取数层从 `FlowResult.steps[].issues` 现算,
+    #: **这一层不判定 issue 的级别** —— 那是 `flow.py` 的事。
+    blocked_steps: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.attributes is None:
@@ -151,6 +157,45 @@ class SpuGroup:
         if not self.skus:
             return 0
         return min(s.completion for s in self.skus)
+
+    @property
+    def blocked_steps(self) -> Mapping[str, int]:
+        """卡点分布:`{步骤: 卡在该步的 SKU 数}`(a47 §8.1)。
+
+        ## 为什么是分布,而不是一个款级「下一步」
+
+        v2.0 的 PRD 要求聚合出款级 `next_action_label`,规则是"取阻断数最大
+        的那只 SKU 的下一步"。那和明令禁止的"拿第一个 SKU 的 next_action
+        当款级"**只差在任意性的形式**,本质一样 —— 把一个没有真实语义的
+        推导从前端搬到后端,并不会让它变成事实。
+
+        款级"下一步"在这套状态机里**没有定义**:不同 SKU 卡在不同步骤时,
+        任何单选都是编的。所以给分布,让运营自己看"这款有 3 只卡在图片集、
+        1 只卡在文案",然后自己决定先动哪一只。
+
+        **纪律的对象不是"哪一侧写代码",是"这个值有没有真实定义"。**
+
+        ## 口径:数的是 SKU,不是问题条数
+
+        一只 SKU 同时卡在两步时,两步各记它一次。因此
+
+            sum(blocked_steps.values()) >= 有阻断的 SKU 数
+            sum(blocked_steps.values()) != blocking_count
+
+        后一条容易被拿去对账,所以写在这里:`blocking_count` 数的是**问题
+        条数**(一只 SKU 在一步里可以有三条阻断),这里数的是**SKU 个数**。
+        两个数字回答两个不同的问题,不该相等。
+
+        没有任何 SKU 卡住的步骤**不出现在结果里**,不给 0 —— 一张全是 0
+        的表会让真正有值的那一格淹掉。
+        """
+        counts: dict[str, int] = {}
+        for row in self.skus:
+            # 同一只 SKU 在同一步里的多条阻断只算一次:去重在这里,
+            # 而不是指望取数层送进来的已经是集合
+            for step in set(row.blocked_steps):
+                counts[step] = counts.get(step, 0) + 1
+        return counts
 
 
 def aggregate(
@@ -250,6 +295,10 @@ def serialize(groups: Iterable[SpuGroup]) -> list[dict[str, object]]:
             "sku_count": g.sku_count,
             "completion": g.completion,
             "blocking_count": g.blocking_count,
+            # a47 §8.1:卡点分布。**没有款级 next_action**,理由见
+            # `SpuGroup.blocked_steps` 的文档 —— 那个值在这套状态机里
+            # 没有定义,编一个出来只会让运营照着它做错事
+            "blocked_steps": dict(g.blocked_steps),
             "variants": {k: list(v) for k, v in g.variants.items()},
             "common": [
                 {"field_name": c.field_name, "value": c.value} for c in g.common
@@ -274,6 +323,7 @@ def serialize(groups: Iterable[SpuGroup]) -> list[dict[str, object]]:
                     "completion": s.completion,
                     "blocking_count": s.blocking_count,
                     "next_action_label": s.next_action_label,
+                    "blocked_steps": list(s.blocked_steps),
                 }
                 for s in g.skus
             ],

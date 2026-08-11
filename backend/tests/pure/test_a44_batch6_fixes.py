@@ -269,49 +269,33 @@ def test_orphan_exports_have_a_reclaimer_with_three_guards():
 # ==========================================================
 
 
-def test_the_token_presence_is_reactive():
-    """A-10:存完口令,界面必须自己跟上。
-
-    原来靠设置页记得 `invalidateQueries` 来维持,漏一处的表现是
-    "口令存好了、界面仍说没登录"。**同一个标签页里 `storage` 事件不触发**,
-    所以自定义事件那一路是必需的,不是冗余。
-    """
-    client = _code_only(_read(FRONTEND / "api" / "client.ts"))
-    assert "TOKEN_CHANGED_EVENT" in client, "写口令时没有广播(A-10)"
-    write_fn = client[
-        client.index("function write(") : client.index("export function readAdminToken")
-    ]
-    assert write_fn.count("announceTokenChange()") == 2, (
-        "写不进 localStorage 的那一路没有广播 —— 而它最需要界面立刻跟上"
-    )
-
-    hook = _code_only(_read(FRONTEND / "hooks" / "useIdentity.ts"))
-    assert "addEventListener(TOKEN_CHANGED_EVENT" in hook, "没有订阅同标签页的变更"
-    assert "addEventListener('storage'" in hook, "没有订阅跨标签页的变更"
-    assert "不是响应式的" not in hook, "那句自承还在,说明改了实现没改说法"
-
-
-def test_the_admin_fallback_is_visible_to_the_operator():
-    """C-04(部分):不删回落,但要让它看得见。
-
-    回落是刻意的(只配 admin 的部署照样能用),但代价是每一次列表 GET 都在
-    发送能改 API Key 的口令,而运营完全不知道。真正消除它要账号体系(C-05')。
-    """
-    hook = _code_only(_read(FRONTEND / "hooks" / "useIdentity.ts"))
-    assert "usingAdminFallback" in hook, "没有把回落状态暴露出来(C-04)"
-
-    banner = _code_only(_read(FRONTEND / "components" / "ColdStartBanner.tsx"))
-    assert "identity.usingAdminFallback" in banner, "界面上看不到这件事正在发生"
-
-    client = _code_only(_read(FRONTEND / "api" / "client.ts"))
-    assert "readAdminToken()" in client, (
-        "回落被整个删掉了 —— 只配 admin 的部署会整站 401,那不是修复"
-    )
-
-
-# ==========================================================
-# R1-36:开发与生产装依赖的方式要一致
-# ==========================================================
+# ============================================================================
+# 这里原来有两条守卫,随浏览器登录一起退役(PRD §41.6 / §41.7)
+#
+#     test_the_token_presence_is_reactive
+#         钉 `TOKEN_CHANGED_EVENT` 广播 + `useIdentity` 订阅。被守的那条链
+#         (localStorage 双口令 + 自定义事件)本轮整个删掉了,它没有对象了。
+#
+#     test_the_admin_fallback_is_visible_to_the_operator
+#         钉"没有 operator 口令时回落带 admin 口令,并且界面要说出来"。
+#
+# **不要照着它们的失败信息把代码改回去。** 第二条的失败信息原文是:
+#
+#     "回落被整个删掉了 —— 只配 admin 的部署会整站 401,那不是修复"
+#
+# 那句话在口令时代是对的。今天它是错的:浏览器不再持有任何 Token,
+# "整站 401"的正确解法是**登录**,不是往 localStorage 里塞一把能改 API Key
+# 的口令。两条都用 `.index()` 切窗口,删掉被测代码之后它们是**抛 ValueError**
+# 而不是断言失败 —— 排查成本比普通红灯高得多,这也是必须整条删而不是留着的原因。
+#
+# 它们守的两件事今天由别处接住:
+#
+#     身份变化要让界面跟上   `useIdentity` 的 `onSessionExpiredChange` 订阅
+#                            (401 -> resetQueries -> 重新探身份),
+#                            由 test_a46_phase2_browser_login_seam.py 钉着
+#     只配一种凭据也能用     后端 `resolve_identity` 的三级回落,
+#                            由 tests/test_auth_session.py 的 Legacy 那几条钉着
+# ============================================================================
 
 
 def test_the_dev_install_matches_the_image_build():

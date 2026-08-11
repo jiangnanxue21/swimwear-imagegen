@@ -64,7 +64,28 @@ def _assets(session, product_id) -> list[ProductAsset]:
 
 def _launch(session, *, product, assets, provider: str, mode: str, candidates: int,
             max_rounds: int, seed: int) -> GenerationTask:
-    """用完全相同的输入创建任务。seed 固定,让两边的差异只来自 Provider 本身。"""
+    """用完全相同的输入创建任务。seed 固定,让两边的差异只来自 Provider 本身。
+
+    ## `override_plan=True` 不是可选项,是这个脚本成立的前提(a48)
+
+    a47 之后 `create_task` 会用**方案**的 provider / 模特模板 / 一轮张数 /
+    场景姿势覆盖调用方传的值。对线上出图那是修复;对这个脚本是致命的 ——
+    只要这只 SKU 所属 SPU 有一份 ACTIVE 方案,两条腿的 `provider=` 会**双双**
+    被换成方案里那一个,而脚本照旧打印一张对比表。**不报错,答案是假的**,
+    而且假在「上面写着 mock、下面写着 fashn」的那一栏里。
+
+    `LOCAL_MANUAL_TEST.md` §4.6 的 §5 验收第一步正是「给一个 SPU 配一份
+    ACTIVE 方案」,所以这不是一个要等很久才会撞上的场景:照着文档走一遍,
+    `make baseline` 就废了。
+
+    绕过方案**不绕过预算**(`_assert_budget` 排在 `plan_applied` 判定之前),
+    也不绕过 §10.5 / §11 那两道闸 —— 它只让「参数由调用方给」这件事重新成立,
+    而那正是基线对比唯一需要的东西。绕过之后任务的 `generation_plan_id` 与
+    `plan_fingerprint` 两列留空,这是对的:这批图确实不是按哪份方案出的。
+
+    这里能直接绕,是因为走的是 service 层;HTTP 那一侧 `override_plan` 是
+    管理员专属(非管理员 403)。基线脚本本来就只有能进库的人跑得动。
+    """
     task, _ = gs.create_task(
         session,
         product_id=product.id,
@@ -78,6 +99,7 @@ def _launch(session, *, product, assets, provider: str, mode: str, candidates: i
         base_seed=seed,
         # 幂等键必须区分 Provider,否则第二个任务会被判成重复
         idempotency_key=f"baseline-{product.sku}-{provider}-{seed}",
+        override_plan=True,
         actor="baseline-script",
     )
     # 和线上路径一样走 Outbox:基准脚本要测的就是真实链路,

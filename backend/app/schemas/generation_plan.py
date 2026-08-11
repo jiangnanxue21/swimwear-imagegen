@@ -55,6 +55,44 @@ class GenerationPlanOut(BaseModel):
     note: str | None = None
 
 
+class EffectivePlanOut(BaseModel):
+    """**这件商品出图会按哪份方案跑**(a47 / PRD §7)。
+
+    ## 为什么这个端点必须存在
+
+    §7 要求运营版建任务弹窗把 Provider 与模特显示成「方案解析出来的只读结果」。
+    前端凑得出这个答案吗?凑得出 —— 拉 `/generation-plans?spu_id=`,
+    再自己实现一遍"颜色覆盖优先、回落 SPU 默认、只认 ACTIVE"。
+    **而那正是硬规则 4 明令禁止的**:前端不许推测状态。更实际的是,
+    那份解析规则一旦有两个实现,建任务用一份、界面显示另一份,
+    运营会看着一份不是他即将执行的方案点下付费按钮。
+
+    所以判定仍在 `workflows.generation_plan.resolve_plan` 一处,
+    这个端点只是把它的答案送出去。
+
+    ## 字段的口径
+
+        plan                  解析结果。**没有生效方案时为 null,不是空对象**
+        scope                 这份方案是颜色级覆盖还是 SPU 默认回落
+        candidates_per_round  一轮要出几张(`gp.total_candidates`)。
+                              前端不做这个加法 —— 它是"点下去要花几次钱"的因数
+        required_angles       验收要覆盖的角度集合(`gp.required_angles`),已排序
+        problems              这份方案能不能拿去建任务(`gp.plan_problems`)。
+                              有问题也照样返回方案本身:藏起来的话运营看到的是
+                              "没有方案",然后会去建第二份
+    """
+
+    product_id: UUID
+    spu_id: UUID | None = None
+    color_variant_id: UUID | None = None
+    plan: GenerationPlanOut | None = None
+    #: COLOR = 这个颜色自己的覆盖;SPU_DEFAULT = 从 SPU 默认回落来的
+    scope: str | None = None
+    candidates_per_round: int | None = None
+    required_angles: list[str] = Field(default_factory=list)
+    problems: list[str] = Field(default_factory=list)
+
+
 class GenerationPlanEffectOut(BaseModel):
     """启用一份方案会让哪些颜色的图片集过期(§8.1 第 7 行)。
 

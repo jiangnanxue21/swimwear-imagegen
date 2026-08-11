@@ -29,7 +29,7 @@ import { describe, expect, it } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { MemoryRouter, useNavigate, useSearchParams } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { NAV, router } from '../../src/App'
+import { NAV, OPERATOR_NAV_ITEM_COUNT, router } from '../../src/App'
 import {
   enumParam, flagParam, intParam, oneOfParam, useUrlFilters,
 } from '../../src/hooks/useUrlFilters'
@@ -64,15 +64,79 @@ describe('侧栏导航', () => {
     expect(new Set(labels).size).toBe(labels.length)
   })
 
-  it('「系统管理」不按账号隐藏，所有设置入口都可以被发现', () => {
+  it('「系统管理」标了 adminOnly —— 运营看不到这一组入口', () => {
     const system = NAV.find((g) => g.label === '系统管理')
-    const visible = NAV.flatMap((g) => g.items.map((i) => i.key))
 
     expect(system).toBeDefined()
-    expect(NAV.some((g) => 'adminOnly' in g)).toBe(false)
-    for (const entry of ['/settings', '/providers', '/prompts', '/audit', '/system', '/dashboard']) {
-      expect(visible).toContain(entry)
+    expect(system?.adminOnly).toBe(true)
+    // 收敛的只有这一组。日常动线那三组任何账号都必须看得见,
+    // 否则运营会以为系统坏了
+    for (const label of ['今日工作', '商品生产', '导出与上架']) {
+      expect(NAV.find((g) => g.label === label)?.adminOnly).toBeUndefined()
     }
+  })
+
+  it('operator 的侧栏里没有管理入口,admin 的有', () => {
+    const forRole = (isAdmin: boolean) =>
+      NAV.filter((g) => !g.adminOnly || isAdmin).flatMap((g) => g.items.map((i) => i.key))
+
+    // 这一条在 a46 之前是**反过来**写的:「不按账号隐藏,所有设置入口都可以被
+    // 发现」,并且明令禁止 NavGroup 上出现 adminOnly。撤掉它的理由是那条约束的
+    // 前提消失了 —— 密码在 .env 里之后,没有人需要"先进设置页把自己变成管理员"。
+    //
+    // a47 往这份清单里加了 `/tasks`:它整个移进「系统管理」组,对运营是消失
+    // 而不是降级。前提是工作台详情能回答"我这件商品的任务跑到哪了",
+    // 下面那条 `工作台详情答得出任务状态` 钉着这个前提。
+    for (const entry of [
+      '/settings', '/providers', '/prompts', '/audit', '/system', '/dashboard', '/tasks',
+    ]) {
+      expect(forRole(false)).not.toContain(entry)
+      expect(forRole(true)).toContain(entry)
+    }
+    // 反向:运营该有的一个都不能少
+    for (const entry of ['/today', '/workbench', '/workbench-review', '/publish']) {
+      expect(forRole(false)).toContain(entry)
+    }
+  })
+
+  it('运营菜单收敛到目标项数 —— 这个数只写在这里(a47 §4.4)', () => {
+    const operatorKeys = NAV
+      .filter((g) => !g.adminOnly)
+      .flatMap((g) => g.items.map((i) => i.key))
+
+    // 仓库规矩「数字不写死」:会变的数写进门禁做一致性断言,别抄进散文。
+    // 这条断言的价值不在 7 这个数,在于**它和 NAV 是同一份事实的两次读取** ——
+    // 加一项菜单而不来改这里,它会红
+    expect(operatorKeys).toHaveLength(7)
+    expect(OPERATOR_NAV_ITEM_COUNT).toBe(operatorKeys.length)
+  })
+
+  it('撤出菜单的六条路由全部还在 —— 手输地址、书签、深链一条都没断', () => {
+    // a47 §4.2 撤出菜单的六项。**撤出菜单 ≠ 删路由**:删掉会把一个
+    // 说得清楚的页面变成 404,而运营手里那些聊天窗里发过的链接会集体失效。
+    // 这条断言故意用字面量清单而不是从 NAV 反推 —— 反推的话,
+    // 哪天有人连路由一起删掉,清单跟着变空,断言照样绿
+    const paths = declaredPaths()
+    for (const withdrawn of [
+      '/reviews', '/products', '/spus/new', '/workbench-import', '/workbench-spus', '/tasks',
+    ]) {
+      expect(paths).toContain(withdrawn)
+    }
+  })
+
+  it('同一件事不留两个入口 —— 收敛之后运营看不到重复动线', () => {
+    const operatorKeys = NAV
+      .filter((g) => !g.adminOnly)
+      .flatMap((g) => g.items.map((i) => i.key))
+
+    // 两套商品入口、两条并列审核入口、独立 SPU 聚合、独立任务排障入口:
+    // 这四组重复正是 §4 收敛要解决的问题
+    expect(operatorKeys).not.toContain('/products')
+    expect(operatorKeys).not.toContain('/reviews')
+    expect(operatorKeys).not.toContain('/workbench-spus')
+    expect(operatorKeys).not.toContain('/tasks')
+    expect(operatorKeys).toContain('/workbench')
+    expect(operatorKeys).toContain('/workbench-review')
   })
 
   it('同一个 key 不出现在两个组里 —— 否则侧栏会同时点亮两处', () => {
@@ -80,9 +144,10 @@ describe('侧栏导航', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 
-  it('路由本身不按角色裁剪：/settings 必须能被还没成为管理员的人打开', () => {
-    // 权限边界在后端 require_admin。前端再加一份判断只会多一处能与后端不一致的地方，
-    // 而它的代价是新人被挡在填口令的那一页外面
+  it('路由本身不按角色裁剪：operator 手输 /settings 得到 403,不是 404', () => {
+    // 菜单收敛了,路由**没有**。权限边界在后端 require_admin;前端再加一道
+    // 路由守卫只会多一处能与后端不一致的地方,而代价是把一个说得清楚的 403
+    // 变成一个看不懂的 404(PRD §31)
     expect(declaredPaths()).toContain('/settings')
   })
 

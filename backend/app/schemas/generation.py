@@ -57,6 +57,14 @@ class TaskCreate(BaseModel):
         ),
     )
     idempotency_key: str | None = Field(None, max_length=128)
+    override_plan: bool = Field(
+        False,
+        description=(
+            "绕过生成方案,完全按本请求的参数出图。**仅管理员可用** —— "
+            "非管理员传 true 返回 403,不是静默忽略。绕过之后任务上的 "
+            "generation_plan_id 与 plan_fingerprint 均为空。"
+        ),
+    )
 
     @model_validator(mode="after")
     def _bound_provider_params(self) -> TaskCreate:

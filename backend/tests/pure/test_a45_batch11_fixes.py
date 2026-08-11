@@ -347,13 +347,29 @@ def test_make_pack_uses_the_native_windows_entrypoint():
 
 def test_smoke_exercises_the_license_gate_instead_of_the_bypass():
     """冒烟以前不传 model_template_id,任务走 MODEL_REFERENCE 那条已知缝:
-    §10.5/§11 四道检查在"端到端"脚本里一次都没被执行过 —— 假绿的具体形状。"""
+    §10.5/§11 四道检查在"端到端"脚本里一次都没被执行过 —— 假绿的具体形状。
+
+    **a48 补一条:光传进去已经不够了。** a47 之后方案会接管
+    `model_template_id`,所以「冒烟验的是这个已授权模特」这句话变成了
+    **有条件成立** —— 条件是那只 SKU 所属 SPU 上没有 ACTIVE 方案。
+    传参那半边不变(不传就是走回绕行缝),但脚本必须**回读出参**并在
+    被接管时说出来,否则这条守卫会一直绿着,而它的文档字符串在说一件
+    不一定成立的事。判据与"为什么是 note 不是 fail"在 `smoke_test.create_task`
+    的函数文档里,结论在 `DECISIONS.md` §3.73 第二节。
+    """
     smoke = _read(BACKEND_ROOT / "app" / "scripts" / "smoke_test.py")
     assert "def create_model_template" in smoke
     assert '"license_status": "LICENSED"' in smoke
     assert '"age_verified": "true"' in smoke
     assert '"model_template_id": model_template_id' in smoke, (
         "任务创建又不带模特模板了 —— 冒烟重新走回合规绕行缝(C-11/C-10)"
+    )
+    assert 'task.get("model_template_id")' in smoke, (
+        "回读没了 —— 方案接管时冒烟会拿一个自己都不知道换过的模板继续跑,"
+        "而报告仍写着「已授权模特那条闸走过了」"
+    )
+    assert "由生成方案接管" in smoke, (
+        "被接管时不再出声 —— 一次沉默的替换正是 a47 §5 修的那个错位的镜像版本"
     )
     assert "不覆盖" in smoke, "覆盖边界的声明没了 —— 脚本不许再自称完整闭环"
 

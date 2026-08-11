@@ -175,14 +175,19 @@ check: check-offline fe-check ## 离线子集 + 前端全部门禁(需联网:前
 # 用它们时,缺工具就该炸。宽松的只有 check-offline 这一个入口,
 # 而它的每一次宽松都会打印出来。
 #
-# 顺带把前端语法体检收进来:`tools/syntax-check.mjs` 只要 node,
+# 顺带把前端离线体检收进来:`tools/syntax-check.mjs` 只要 node,
 # 不要 node_modules(它自己的文档第一句就是这个用途),此前却只有
 # `fe-check`(需联网装依赖)会跑它 —— 离线环境里它明明跑得动。
+#
+# **a48 起它是三遍**:语法 + 死 import + 断 import。加后两遍的理由是那两类缺陷
+# 在离线时没有任何东西在看 —— `noUnusedLocals` 归 tsc 管,而 tsc 要
+# node_modules。a46-phase6 自审专门找死 import 都漏了一处,跟着 a47
+# 一起交付了出去。判据与它仍验不到什么,写在那个脚本顶部。
 check-offline: test-pure verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-doc-refs ## 离线子集(不需要 node_modules;缺 pip 工具时大声跳过)
 ifeq ($(OS),Windows_NT)
 	@powershell -NoProfile -Command "$$tool = 'backend/.venv/Scripts/ruff.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/ruff.exe' check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command ruff -ErrorAction SilentlyContinue) { Push-Location backend; & ruff check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  lint(ruff 未安装)—— 这一项没有被验证' }"
 	@powershell -NoProfile -Command "$$env:PYTHONUTF8 = '1'; $$tool = 'backend/.venv/Scripts/lint-imports.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/lint-imports.exe'; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command lint-imports -ErrorAction SilentlyContinue) { Push-Location backend; & lint-imports; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  arch-check(lint-imports 未安装)—— 这一项没有被验证' }"
-	@powershell -NoProfile -Command "if (Get-Command node -ErrorAction SilentlyContinue) { Push-Location frontend; & node tools/syntax-check.mjs; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  前端语法体检(node 未安装)—— 这一项没有被验证' }"
+	@powershell -NoProfile -Command "if (Get-Command node -ErrorAction SilentlyContinue) { Push-Location frontend; & node tools/syntax-check.mjs; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  前端离线体检:语法 + 死/断 import(node 未安装)—— 这一项没有被验证' }"
 else
 	@if command -v ruff >/dev/null 2>&1; then \
 		cd backend && ruff check app tests; \
@@ -197,7 +202,7 @@ else
 	@if command -v node >/dev/null 2>&1; then \
 		cd frontend && node tools/syntax-check.mjs; \
 	else \
-		echo "SKIP  前端语法体检(node 未安装)—— 这一项没有被验证"; \
+		echo "SKIP  前端离线体检:语法 + 死/断 import(node 未安装)—— 这一项没有被验证"; \
 	fi
 endif
 	@echo

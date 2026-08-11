@@ -14,7 +14,8 @@
  *
  * ## 为什么不需要 jsdom
  *
- * `client.ts` 只在函数体里碰 `window.localStorage`,模块加载期不碰。
+ * `client.ts` 自 phase6 起不再碰 `window.localStorage`(口令链已退役);
+ * 假 localStorage 留给仍要覆盖"隐私模式写不进去"历史行为的旧用例。
  * 所以在 node 环境里临时塞一个假的 `globalThis.window` 就够,
  * 不必为这几条用例背上一个 DOM 实现。少一个依赖,少一次 `npm ci` 变慢。
  *
@@ -53,11 +54,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import {
   apiClient,
+  clearSessionExpired,
   describeError,
   isAuthError,
+  onSessionExpiredChange,
   readError,
-  writeAdminToken,
-  writeOperatorToken,
 } from '../../src/api/client'
 
 // ---------------------------------------------------------------- 假 localStorage
@@ -138,11 +139,19 @@ describe('describeError:失败判定只有这一份', () => {
     expect(view.technical.hint).toContain('docker compose ps')
   })
 
-  it('401 / 403:指到设置页,且判定为不可重试', () => {
+  it('401 / 403:不再指向设置页,且判定为不可重试', () => {
+    // 这条只测得到**免登录那一支**:单测环境里 `/health` 一次都不会返回,
+    // 模块级 authMode 停在默认的 'token'。会话那一支的「请重新登录」钉在
+    // 纯层守卫上(test_a46_phase2_browser_login_seam.py),因为在这里翻转
+    // authMode 只能伸进 axios 拦截器内部 —— 那种写法比不写更糟。
+    // phase6 自审:第一版把这条改成 toContain('重新登录'),在这个环境里必红。
     for (const status of [401, 403]) {
-      const view = describeError(axiosError({ status, data: { error: { code: 'UNAUTHORIZED', message: '口令缺失或不正确' } } }))
-      expect(view.text).toContain('系统设置')
-      // 口令是手填的,重试一百次也不会变对 —— P1-5 的 retry 判断依赖这个字段
+      const view = describeError(axiosError({ status, data: { error: { code: 'UNAUTHORIZED', message: '登录状态已失效' } } }))
+      expect(view.text).toContain('开发模式')
+      // 口令时代的指路牌一个都不许剩:设置页上那张录入卡已经不存在了
+      expect(view.text).not.toContain('系统设置')
+      expect(view.text).not.toContain('核对口令')
+      // 凭据问题重试一百次也不会变对 —— P1-5 的 retry 判断依赖这个字段
       expect(view.technical.retriable).toBe(false)
       expect(isAuthError(axiosError({ status }))).toBe(true)
     }
@@ -211,89 +220,115 @@ describe('describeError:失败判定只有这一份', () => {
 
 // ================================================================ 口令注入
 
-describe('请求拦截器:两把口令的优先级', () => {
-  let captured: InternalAxiosRequestConfig | null = null
+/*
+ * 这里原来是 `describe('请求拦截器:两把口令的优先级')` —— 四条用例钉
+ * "有 operator 口令就用它、只有 admin 口令就回落"。请求拦截器与两把 localStorage
+ * 口令随浏览器登录整个退役(PRD §26),这一组因此删除,不是"暂时跳过"。
+ *
+ * 今天等价强度的不变量在两处:`withCredentials: true`(下面那条),
+ * 以及纯层 `test_a45_batch8_fixes.py::test_no_frontend_call_site_carries_an_admin_token`
+ * ——它反过来钉"正常前端一处都不许带 X-Admin-Token"。
+ */
+
+describe('会话失效信号:只在该重新探身份的时候响一次', () => {
+  /**
+   * ## 这一组补的是自审时发现的洞
+   *
+   * a46-phase2 第一版把信号算出来了,而**没有任何人订阅**。后果不是少一个
+   * 功能,是"用着用着会话过期"这条路径整个不生效:探测查询挂着 60 秒
+   * `staleTime`,前端手里那份身份能继续有效一分多钟 —— 运营在这段时间里点
+   * 什么都失败,而界面**从头到尾不会把他送去登录页**,页面上也没有登录入口。
+   *
+   * 当时两侧的用例全绿。`browser-login.test.tsx` 把 `useIdentity` 整个 mock
+   * 掉了,它验的是"拿到 `needsLogin` 之后怎么办",而洞在"`needsLogin` 永远
+   * 不会变成真"。这正是本仓 §3.43 那一族:上游全对,断在最后一跳。
+   *
+   * 所以这一组**一个 mock 都不用**,让真实的响应拦截器自己跑一遍。
+   */
+  let seen: boolean[] = []
+  let off: (() => void) | null = null
+
+  /** 让适配器直接抛一个 axios 形状的失败。写法沿用本文件上面那个 `axiosError` */
+  const failWith = (status: number, code?: string) =>
+    async (config: InternalAxiosRequestConfig) => {
+      throw {
+        isAxiosError: true,
+        message: 'boom',
+        config,
+        response: {
+          data: code ? { error: { code, message: 'x' } } : {},
+          status,
+          statusText: 'ERR',
+          headers: {},
+          config,
+        } as AxiosResponse,
+      }
+    }
 
   beforeEach(() => {
     installFakeStorage()
-    captured = null
-    apiClient.defaults.adapter = async (config) => {
-      captured = config
-      return {
-        data: {},
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config,
-      } as AxiosResponse
-    }
+    seen = []
+    off = onSessionExpiredChange((v) => seen.push(v))
   })
 
   afterEach(() => {
-    // 口令要**通过公开接口**清掉,而不是只拆掉假 localStorage。
-    // client 现在多了一层内存兜底(隐私模式下 localStorage 写不进去时用),
-    // 那层是模块级的,`removeStorage()` 碰不到它,活到模块卸载为止。
-    // 不清的话,上一条用例写的 op-1 会漏进下一条,
-    // 而下一条断言的正是"一个头都不带"。
-    writeOperatorToken('')
-    writeAdminToken('')
+    off?.()
+    off = null
+    // 模块级状态,不清会漏进下一条用例 —— 而下一条断言的正是"响了几次"
+    clearSessionExpired()
     apiClient.defaults.adapter = undefined
     removeStorage()
   })
 
-  const header = (name: string): unknown => captured?.headers?.get?.(name)
+  it('业务接口 401 会通知订阅者', async () => {
+    apiClient.defaults.adapter = failWith(401)
+    await expect(apiClient.get('/products')).rejects.toBeTruthy()
+    expect(seen).toEqual([true])
+  })
 
-  it('只配了 operator:带 operator,不带 admin', async () => {
-    writeOperatorToken('op-1')
+  it('403 不通知 —— 身份是有效的,重新探也探不出新东西', async () => {
+    // operator 点了一个 require_admin 的接口。把他踢去登录页的话,他会重新登
+    // 一次、回来看到同样的 403 —— 一个能无限循环的动线
+    apiClient.defaults.adapter = failWith(403, 'AUTH_FORBIDDEN')
+    await expect(apiClient.get('/settings')).rejects.toBeTruthy()
+    expect(seen).toEqual([])
+  })
+
+  it('匿名接口的 401 不通知 —— 那条路本来就不带身份', async () => {
+    apiClient.defaults.adapter = failWith(401)
+    await expect(apiClient.post('/auth/login', {})).rejects.toBeTruthy()
+    expect(seen).toEqual([])
+  })
+
+  it('连着两次 401 只通知一次 —— 否则订阅者会被自己触发的请求无限唤醒', async () => {
+    apiClient.defaults.adapter = failWith(401)
+    await expect(apiClient.get('/products')).rejects.toBeTruthy()
+    await expect(apiClient.get('/tasks')).rejects.toBeTruthy()
+
+    // 订阅者收到通知后会重新探一次身份,而那次探测**自己也会撞 401**。
+    // 每次都通知的表现是浏览器里整页卡死,而不是一条红用例
+    expect(seen).toEqual([true])
+  })
+
+  it('登录成功后清掉,下一次 401 才会重新响', async () => {
+    apiClient.defaults.adapter = failWith(401)
+    await expect(apiClient.get('/products')).rejects.toBeTruthy()
+    clearSessionExpired()
+    await expect(apiClient.get('/products')).rejects.toBeTruthy()
+    expect(seen).toEqual([true, false, true])
+  })
+
+  it('带身份的请求成功之后信号自己会落下来', async () => {
+    apiClient.defaults.adapter = failWith(401)
+    await expect(apiClient.get('/products')).rejects.toBeTruthy()
+
+    apiClient.defaults.adapter = async (config) =>
+      ({ data: {}, status: 200, statusText: 'OK', headers: {}, config }) as AxiosResponse
     await apiClient.get('/products')
-    expect(header('X-Operator-Token')).toBe('op-1')
-    expect(header('X-Admin-Token')).toBeUndefined()
-  })
 
-  it('只配了 admin:回落带 admin(A5 修的那个缺陷)', async () => {
-    // 上一版只在有 operator 时才带头,于是只配了 admin 的浏览器一个头都不带,
-    // 后端如实回 401 —— 而后端本来是允许 admin 访问业务接口的
-    writeAdminToken('ad-1')
-    await apiClient.get('/products')
-    expect(header('X-Admin-Token')).toBe('ad-1')
-  })
-
-  it('两把都配了:只带 operator —— 顺序不能反', async () => {
-    // 免得日常拉列表也把能改 API Key 的那把口令送出去
-    writeOperatorToken('op-1')
-    writeAdminToken('ad-1')
-    await apiClient.get('/products')
-    expect(header('X-Operator-Token')).toBe('op-1')
-    expect(header('X-Admin-Token')).toBeUndefined()
-  })
-
-  it('请求已显式带了 admin 头:不覆盖,也不追加 operator', async () => {
-    writeOperatorToken('op-1')
-    writeAdminToken('ad-1')
-    await apiClient.post('/settings', {}, { headers: { 'X-Admin-Token': 'ad-1' } })
-    expect(header('X-Admin-Token')).toBe('ad-1')
-    expect(header('X-Operator-Token')).toBeUndefined()
-  })
-
-  it('一把都没有:一个头都不带,且不抛异常', async () => {
-    await apiClient.get('/health')
-    expect(header('X-Operator-Token')).toBeUndefined()
-    expect(header('X-Admin-Token')).toBeUndefined()
-  })
-
-  it('localStorage 不可用(隐私模式):请求照常发出,不抛异常', async () => {
-    removeStorage()
-    await expect(apiClient.get('/products')).resolves.toBeDefined()
-  })
-
-  it('隐私模式下写口令:如实回报没持久化,但本次会话仍然带得上', async () => {
-    // 上一版这里是把异常吞掉就算完,于是设置页提示"口令已记住",
-    // 而后续每一个请求都不带口令 —— 提示和事实相反,比没有提示更糟。
-    removeStorage()
-
-    expect(writeOperatorToken('op-mem')).toBe(false)
-
-    await apiClient.get('/products')
-    expect(header('X-Operator-Token')).toBe('op-mem')
+    // 一次成功的带身份请求就是"会话还活着"的证据。不落下来的话,
+    // 下一次真的过期时它已经是 true,`setSessionExpired` 那条防抖就把
+    // 真正该响的那一次吃掉了
+    expect(seen).toEqual([true, false])
   })
 })

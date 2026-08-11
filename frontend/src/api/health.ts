@@ -21,6 +21,18 @@ export interface HealthOut {
   status: string
   app: string
   env: string
+  /**
+   * 这个部署认哪种凭据。**未登录时它是前端唯一的信息来源** ——
+   * 那一刻手上只有一个 401,而两种模式的 401 长得一模一样。
+   *
+   *     session   浏览器登录。401 = 登录失效,把人送到 /login
+   *     token     Legacy Header Token。401 = 口令没填或填错,指向 /settings
+   *
+   * 可选是因为旧后端不返回这个字段。缺席时按 `token` 处理(见 client.ts):
+   * 会话模式下最坏是多说一句设置页,而反过来会把口令模式的人送进一个
+   * 永远登不进去的登录页。
+   */
+  auth_mode?: 'session' | 'token'
 }
 
 export const healthApi = {

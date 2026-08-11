@@ -45,6 +45,32 @@ $ForbiddenDirs = @(
 # must never be shipped. This implementation does not emit empty directory rows.
 $ContentOnlyDirs = @('storage')
 
+# Ship the directory, but never the images inside it. `data/` is a scratch area
+# on the developer machine: the previous package carried a 5.8 MB `data/s1.jpg`
+# that nothing in the repository references, and no rule stopped it.
+#
+# The rule keys on the extension, not on the whole subtree, so a future
+# `data/README.md` still ships. PowerShell's `-like` is case-insensitive, which
+# is why this side needs no character-class expansion; the shell side does.
+$ImageFreeDirs = @('data')
+
+$ImageExtensions = @(
+    'jpg'
+    'jpeg'
+    'png'
+    'gif'
+    'bmp'
+    'webp'
+    'tif'
+    'tiff'
+    'heic'
+    'heif'
+    'avif'
+    'svg'
+    'psd'
+    'ico'
+)
+
 $ForbiddenFiles = @(
     '.env'
     '*.env'
@@ -99,11 +125,34 @@ function Test-AllowedEnvExample {
     return $EnvExamples -contains $ArchivePath
 }
 
+function Test-ImageUnderImageFreeDir {
+    param([Parameter(Mandatory = $true)][string]$ArchivePath)
+
+    $parts = $ArchivePath.Split('/')
+    if ($parts.Count -lt 2) {
+        return $false
+    }
+    $extension = [System.IO.Path]::GetExtension($ArchivePath).TrimStart('.')
+    if (-not $extension -or ($ImageExtensions -notcontains $extension.ToLowerInvariant())) {
+        return $false
+    }
+    foreach ($part in $parts[0..($parts.Count - 2)]) {
+        if ($ImageFreeDirs -contains $part) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Test-ForbiddenFile {
     param([Parameter(Mandatory = $true)][string]$ArchivePath)
 
     if (Test-AllowedEnvExample -ArchivePath $ArchivePath) {
         return $false
+    }
+
+    if (Test-ImageUnderImageFreeDir -ArchivePath $ArchivePath) {
+        return $true
     }
 
     $name = [System.IO.Path]::GetFileName($ArchivePath)
@@ -228,6 +277,15 @@ try {
         $archive.Dispose()
     }
 
+    # Parity with the Bash side (DECISIONS 3.69): the listing is durable
+    # evidence for *every* run, not just failures -- the package may be
+    # deleted or shipped away, this file stays. The Bash side additionally
+    # needed the file to fix a SIGPIPE x pipefail false negative in its
+    # required-file grep; this side compares in memory and never had that
+    # failure mode, so the file here is evidence only.
+    $listingFile = "$Out.listing.txt"
+    [System.IO.File]::WriteAllLines($listingFile, $listing)
+
     $failed = $false
     foreach ($path in $listing) {
         if (Test-ForbiddenArchivePath -ArchivePath $path) {
@@ -235,9 +293,17 @@ try {
             $failed = $true
         }
     }
+    # Same reasoning as the Bash side: "required file missing" has two very
+    # different causes -- the file was genuinely excluded, or the archive listing
+    # came back short -- and the fixes are opposite. Print what tells them apart.
     foreach ($path in $Required) {
         if ($listing -notcontains $path) {
             Write-Error "Required file missing from delivery package: $path" -ErrorAction Continue
+            Write-Host "   diagnostic: listing had $($listing.Count) entries"
+            Write-Host "   diagnostic: listing saved to $listingFile (the package gets deleted, this file does not)"
+            if (Test-Path (Join-Path $RepoRoot $path)) {
+                Write-Host "   note: the file DOES exist in the work tree -- it was excluded, or the listing was short"
+            }
             $failed = $true
         }
     }

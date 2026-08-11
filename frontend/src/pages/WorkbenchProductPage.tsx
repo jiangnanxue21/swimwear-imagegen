@@ -52,7 +52,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
  *
  * 四个标签没有 `step`,因为它们不是流程步骤:
  *   总览      「问题都在哪」的答案,徽标会和它自己汇总的数字重复
- *   生成任务   只读观察窗,不产生阻断
+ *   生成任务   出图不产生阻断:上架不要求有 AI 图,拍摄的正面图同样走得完
  *   导出       闸门清单在页内逐项可见,不进 flow.steps
  */
 const TABS: { key: WorkbenchTab; label: string; step?: FlowStep }[] = [

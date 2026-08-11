@@ -380,6 +380,126 @@ def plan_is_usable(plan: PlanView, *, raw_angle_count: int | None = None) -> boo
     return not plan_problems(plan, raw_angle_count=raw_angle_count)
 
 
+# ---------------------------------------------------------------- 方案决定出图参数
+
+
+#: 方案说了算的那几个参数。**清单只有这一份**,`generation_service.create_task`
+#: 与冲突留痕都读它 —— 各写一份的表现是"审计说按方案执行,而某个字段其实没换"。
+#:
+#: 不在这张表里的(`candidate_count` / `max_rounds` / `base_seed` / `prompt`)
+#: 由调用方给,理由是方案里根本没有这几个字段。**唯一的例外是张数**:
+#: `angles` 决定一轮出几张,所以有方案时 `candidate_count` 是**算出来的**,
+#: 不是调用方给的 —— 见 `governed_candidate_count()`。
+PLAN_GOVERNED_FIELDS: tuple[str, ...] = ("provider", "model_template_id")
+
+
+@dataclass(frozen=True)
+class PlanOverride:
+    """调用方传的与方案不同的一处。**按方案执行,并且说出来。**
+
+    静默覆盖是这条规则最容易写出来的形状,也是最坏的一种:排障的人拿着
+    请求体对着出参,两边对不上,而没有任何地方解释为什么。
+    """
+
+    field: str
+    requested: str
+    plan: str
+
+    def as_payload(self) -> dict[str, str]:
+        """进审计 payload 的形状。`applied` 恒为 `plan` —— 见模块文档。"""
+        return {
+            "field": self.field,
+            "requested": self.requested,
+            "plan": self.plan,
+            "applied": "plan",
+        }
+
+
+def plan_overrides(plan: PlanView, requested: Mapping[str, Any]) -> tuple[PlanOverride, ...]:
+    """方案与请求哪几处不同(§5.2 硬约束 3)。
+
+    **调用方没传的不算冲突。** `requested` 里为 None 或空串的键表示"我没意见",
+    而不是"我要求它是空的" —— 把没传算成冲突会让每一次正常的建任务都在审计里
+    留下两条噪音,而真正的冲突会淹没在里面。
+
+    比较一律走 `_text()`:`UUID` 与它的字符串形式是同一个值,
+    而调用点两侧恰好一边是 ORM 列、一边是接口入参。
+    """
+    out: list[PlanOverride] = []
+    for field_name in PLAN_GOVERNED_FIELDS:
+        asked = _text(requested.get(field_name))
+        if not asked:
+            continue
+        mine = _text(getattr(plan, field_name, None))
+        if asked != mine:
+            out.append(PlanOverride(field=field_name, requested=asked, plan=mine))
+    return tuple(out)
+
+
+def governed_candidate_count(plan: PlanView, *, fallback: int) -> int:
+    """有方案时一轮出几张。
+
+    §5.2:`angles_json` 决定角度集合与张数。**方案没配角度时回落到调用方的值**
+    而不是回落到 0 —— `plan_problems()` 已经把"没有角度"报成方案本身的问题,
+    在这里再判一次会让一份坏方案的表现从"报错"变成"提交了一个不出图的任务"。
+    """
+    total = total_candidates(plan.angles)
+    return total if total > 0 else fallback
+
+
+def compose_prompt(
+    base_prompt: Any,
+    *,
+    scene: Any = None,
+    pose: Any = None,
+    angles: Iterable[AngleRequirement] = (),
+) -> str | None:
+    """把方案的场景 / 姿势 / 角度并进提示词。
+
+    ## 为什么走提示词,而不是给 `GenerationRequest` 加字段
+
+    `GenerationTask` 现有 32 列里没有 scene / pose / angles,而本轮**禁止加列**
+    (PRD §2)。同样重要的是:出图 Provider(FASHN / ComfyUI / mock)的请求里
+    也没有"角度"这个参数 —— 对一个文生图 / 试穿接口来说,"要正面和背面"
+    这件事**只能**经由提示词表达。所以这不是一条绕路,它就是那条路。
+
+    追溯靠已有的 `generation_plan_id` + `plan_fingerprint` 两列:
+    "这批图是按哪份方案出的"答得出来,而那正是那两列该有的用途。
+
+    ## 三条写法上的讲究
+
+    1. **调用方的提示词排在最前**,方案的补充跟在后面。反过来的话,
+       运营特意写的那句话会被一串固定后缀推到模型注意力的末尾。
+    2. **空值一律跳过,不留下"场景:"这种空标签。** 空标签会被模型
+       当成一个真实约束去满足,而它背后什么都没有。
+    3. **角度按 `ImageAngle` 定义序输出**(`normalize_angles` 已经排好),
+       不按输入序 —— 否则同一份方案换个键序就得到不同的提示词,
+       而提示词进幂等键。
+
+    全空时返回**原样**(含 None),不返回空串:None 与 "" 在
+    `build_idempotency_key` 里被归一成同一个值,但在 `GenerationTask.prompt`
+    列上不是 —— 一个是"没写",一个是"写了个空的"。
+    """
+    parts: list[str] = []
+    head = _text(base_prompt)
+    if head:
+        parts.append(head)
+    scene_text = _text(scene)
+    if scene_text:
+        parts.append(f"场景:{scene_text}")
+    pose_text = _text(pose)
+    if pose_text:
+        parts.append(f"姿势:{pose_text}")
+    wanted = tuple(angles)
+    if wanted:
+        parts.append(
+            "拍摄角度:" + "、".join(f"{a.angle}×{a.count}" for a in wanted)
+        )
+    if not parts:
+        return base_prompt if base_prompt is None else head
+    return ";".join(parts)
+
+
 # ---------------------------------------------------------------- 小工具
 
 

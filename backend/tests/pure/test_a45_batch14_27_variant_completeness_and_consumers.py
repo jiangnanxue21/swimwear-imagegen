@@ -306,11 +306,27 @@ def test_the_frontend_reads_the_attribution_column_not_the_hint():
     第四次拒绝同一件事(前三次在 14-9 / 14-10 / `run_state.scope_of`)。
     hint 是模型猜的,拿它分组的表现是:界面按 A 色显示的一张图,
     在门禁和指纹眼里属于共享作用域 —— 三处对同一张图有两种答案。
+
+    ## 定位串跟着实现搬过一次(a46-phase2 订正)
+
+    `groupByColour` 后来从 `MaterialTab.tsx` 抽到了 `materialUtils.ts`,
+    而这条守卫仍在 `MaterialTab.tsx` 里找它 —— `window()` 因此抛
+    「起点出现 0 次」,这条守卫红了不知道多久。**它红得对**:定位串失效时
+    切出来的窗口没有意义,`window()` 宁可炸也不肯把空窗口交给反向断言
+    (空窗口会让 `not in` 平凡为真 —— 那才是真正危险的那一种)。
+
+    所以修的是定位串,不是断言。**不变量一个字没变。**
+    另外补一句正向的:`MaterialTab` 必须用这个共享实现,不许自己再分一次组 ——
+    否则这条守卫盯着 utils、界面用的是另一份,又回到"守卫看的不是那个位置"。
     """
-    tab = _fe("components/workbench/MaterialTab.tsx")
-    grouping = window(tab, "function groupByColour", "export default", what="分组")
+    utils = _fe("components/workbench/materialUtils.ts")
+    grouping = window(utils, "export function groupByColour", what="分组")
     assert "variant_hint" not in grouping, (
         "分组读了 variant_hint —— 模型猜的值决定了运营看到的归属"
+    )
+    tab = _fe("components/workbench/MaterialTab.tsx")
+    assert "groupByColour" in tab and "from './materialUtils'" in tab, (
+        "素材页没有用共享的分组实现 —— 这条守卫会盯着一份没人用的函数"
     )
 
 

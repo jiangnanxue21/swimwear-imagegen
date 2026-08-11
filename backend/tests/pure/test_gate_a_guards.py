@@ -274,32 +274,58 @@ def test_refresh_draft_dry_run_writes_nothing():
 # ==========================================================
 
 
-def test_request_interceptor_falls_back_to_the_admin_token():
-    """A5-1:只配了管理口令时,业务请求也要带口令。
-
-    后端早就允许 admin 访问 operator 接口(`deps.resolve_identity`),
-    是前端把这件事浪费掉了:没有 operator 口令时它一个头都不带,于是 401。
-    """
-    source = _read(FRONTEND / "api" / "client.ts")
-    interceptor = source[source.index("interceptors.request.use") :]
-    interceptor = interceptor[: interceptor.index("interceptors.response.use")]
-    assert "readAdminToken()" in interceptor, "请求拦截器没有回落到管理口令"
-    # 顺序不能反:两把都配了还是走 operator,免得拉个列表也把管理口令送出去
-    assert interceptor.index("readOperatorToken()") < interceptor.index(
-        "readAdminToken()"
-    ), "回落顺序反了,日常请求会带上管理口令"
+# 这里原来是 `test_request_interceptor_falls_back_to_the_admin_token`:钉请求
+# 拦截器在没有 operator 口令时回落带 admin 口令。拦截器随浏览器登录整个删掉
+# (PRD §25/§26),这条也就没有对象了。它用 `source.index("interceptors.request.use")`
+# 切窗口,拦截器一没就抛 ValueError —— 留着的话下一个人看到的是一个异常堆栈,
+# 而不是"这条守卫过时了"。浏览器今天带的是 HttpOnly Cookie,后端那侧
+# "admin 天然包含 operator"的回落仍然在 `deps.resolve_identity` 里,没有丢。
 
 
 def test_anonymous_success_does_not_clear_the_auth_banner():
-    """A5-3:匿名接口成功不能证明口令是好的。
+    """A5-3:匿名接口成功不能证明凭据是好的。
 
-    `/health` 走同一个 apiClient,而响应拦截器对**任何**成功响应执行
-    `setAuthRejected(false)` —— 横幅刚被 401 点亮,下一次探活成功就把它清掉,
-    口令错的时候提示反而看不见。
+    `/health` 走同一个 apiClient,而响应拦截器对**任何**成功响应复位鉴权
+    状态 —— 状态刚被 401 点亮,下一次探活成功就把它清掉,凭据坏掉的时候
+    提示反而看不见。(口令时代复位的是 `authRejected`,a46-phase6 之后是
+    `sessionExpired`;被守的形状一模一样。)
+
+    ## 锚点从整行字面量改成了窗口内判定(a46-phase2 订正)
+
+    上一版钉的是**一整行源码**:
+
+        if (!isAnonymousPath(response.config?.url)) setAuthRejected(false)
+
+    phase2 往那个 if 里加了第二句(会话失效标记也要跟着清),单行 if 因此变成
+    带花括号的块 —— 守卫当场红,而**不变量一个字没变**。这和同一批订正的
+    `groupByColour` 是同一个形状:按整行字面量定位的守卫,在任何一次无关的
+    格式变化上都会假红,而假红最省事的消法是把守卫删掉。
+
+    改成"在成功分支这个窗口里,`setAuthRejected(false)` 必须被
+    `isAnonymousPath` 守着"。它挡得住真正要挡的那次退化(把判断去掉、
+    让匿名成功也清横幅),而不再对花括号有意见。
     """
     source = _read(FRONTEND / "api" / "client.ts")
     assert "ANONYMOUS_PATHS" in source, "没有匿名路径白名单"
-    assert "if (!isAnonymousPath(response.config?.url)) setAuthRejected(false)" in source
+
+    # 成功回调那一段。终点取错误回调的第一行,免得把它一起切进来 ——
+    # 那边也有 `isAnonymousPath`,不分开的话下面的断言会被它喂成平凡真
+    success = source[source.index("apiClient.interceptors.response.use") :]
+    success = success[: success.index("(error) => {")]
+    # a46-phase6:被守的那件事没变,换了主语。`authRejected` 那一组随口令链
+    # 退役,今天承接它的是 `sessionExpired` —— 一次成功的**带身份**请求才是
+    # "会话还活着"的证据。`/health` 在没登录时也回 200,拿它当证据的后果比
+    # 从前更硬:登录态已经没了,而前端永远不会把人送去登录页。
+    assert "setSessionExpired(false)" in success, (
+        "成功响应不再把会话标记复位了 —— 一次 401 之后前端会一直以为会话是坏的"
+    )
+    guard_at = success.index("isAnonymousPath(response.config?.url)")
+    assert guard_at < success.index("setSessionExpired(false)"), (
+        "复位那一句跑到了匿名判断前面 —— 一次匿名探活成功就会把 401 的结论抹掉"
+    )
+    assert "!isAnonymousPath(response.config?.url)" in success, (
+        "匿名判断被反过来写或去掉了 —— 匿名接口的成功会被当成登录态有效"
+    )
 
     # 白名单要和后端 main.PUBLIC_PREFIXES 对齐,否则两边各说各话
     main_src = _read(APP / "main.py")
@@ -315,24 +341,36 @@ def test_anonymous_success_does_not_clear_the_auth_banner():
     )
 
 
-def test_cold_start_banner_probes_with_a_token():
-    """A5-2:"口令填对了没有"只能由一次带口令的请求回答。
+def test_the_cold_start_banner_only_speaks_when_the_backend_is_down():
+    """冷启动横幅只剩一件事:后端不可用(PRD §32)。
 
-    上一版用 `readOperatorToken() || readAdminToken()` 判断"已配置"来隐藏引导,
-    于是口令复制时多带一个空格,它的结论仍然是"没问题"。
+    ## 这条守的不是"少了三个分支"
 
-    A8 之后这次探测搬进了 `useIdentity` —— 菜单要问同一件事,两处各写一份
-    `useQuery` 会让 `enabled` 条件分叉。要守的东西一个没变,只是换了地方:
-    探测仍然存在、401 仍然算口令被拒、"填了没有"仍然由 localStorage 单独回答。
+    横幅原来有四支:后端不可用 / 还差一步填口令 / 正在用管理口令 / 口令被拒。
+    后三支都建立在"浏览器手里有一把口令"上,随 localStorage 口令链一起退役。
+
+    真正要守住的是**别让它把未登录这件事抢回来**。未登录已经由 `/login` 处理,
+    而一条横幅说不清楚"你没登录"该怎么办 —— 上一版就是这样:它引导人去设置页
+    填一把口令,填完仍然是未登录,横幅还在。同一件事有两个地方在说、说的还不
+    一样,是这个仓库反复踩过的形状。
+
+    ## 身份探测本身仍然要在
+
+    探测搬进 `useIdentity` 是 A8 的结论(菜单和横幅问的是同一件事,两处各写
+    一份 `useQuery` 会让 `enabled` 分叉),那一条不因本轮改变。
     """
     hook = _read(FRONTEND / "hooks" / "useIdentity.ts")
-    assert "authApi.whoami()" in hook, "没有做带口令的探测"
-    assert "isAuthError(probe.error)" in hook, "没有把探测的 401 算成口令被拒"
+    assert "authApi.whoami()" in hook, "没有做身份探测"
+    assert "isAuthError(probe.error)" in hook, "没有把探测的 401 算成身份被拒"
 
     banner = _read(FRONTEND / "components" / "ColdStartBanner.tsx")
     assert "useIdentity()" in banner, "横幅没有用那次探测的结论"
-    # "填了没有"仍然由 localStorage 回答,这两件事分开
-    assert "readOperatorToken()" in banner
+    assert "identity.backendDown" in banner, "横幅不再说「后端不可用」了 —— 那是它剩下的唯一职责"
+    for retired in ("readOperatorToken", "readAdminToken", "isAuthRejected", "usingAdminFallback"):
+        assert retired not in banner, (
+            f"`{retired}` 回到横幅里了。浏览器不再持有任何 Token,"
+            "横幅要么在说一件不可能发生的事,要么在引导人去填一把不会被读的口令"
+        )
 
 
 def test_whoami_is_guarded_and_not_public():
@@ -343,9 +381,22 @@ def test_whoami_is_guarded_and_not_public():
     main_src = _read(APP / "main.py")
     match = re.search(r"PUBLIC_PREFIXES:[^=]*=\s*\(([^)]*)\)", main_src)
     public = set(re.findall(r'"([^"]+)"', match.group(1)))
-    assert not any(
-        "/auth" == p or "/auth".startswith(p + "/") for p in public
-    ), "/auth 被放进匿名白名单了,探测会永远成功"
+
+    # 这两条直接点名,不再用"有没有哪条前缀盖住 /auth"那个绕弯的写法。
+    #
+    # 原来那句是 `not any("/auth" == p or "/auth".startswith(p + "/") ...)`。
+    # 它在 `/auth` 整段进白名单时会红,但登录接口进来之后
+    # (`/auth/login`、`/auth/logout`)它**仍然通过** —— 而它想守的从来
+    # 不是"别放 /auth",是"别放 whoami"。断言和意图之间隔着一层推理,
+    # 那一层在白名单形状变化时就断了,而断了不会有任何人知道。
+    assert "/auth/whoami" not in public, (
+        "whoami 进了匿名白名单 —— 身份探测会永远成功,"
+        "冷启动横幅那套「没填 / 填错了 / 后端挂了」的区分整个失效"
+    )
+    assert "/auth" not in public, (
+        "/auth 整段进了匿名白名单,会把 whoami 一起放开。"
+        "匿名接口要按精确路径段逐条加(见 main.PUBLIC_PREFIXES)"
+    )
 
 
 # ==========================================================

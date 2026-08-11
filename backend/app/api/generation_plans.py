@@ -26,12 +26,16 @@ from sqlalchemy.orm import Session
 
 from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
+from app.core.errors import NotFoundError
+from app.models.product import Product
 from app.schemas.generation_plan import (
+    EffectivePlanOut,
     GenerationPlanCreate,
     GenerationPlanEffectOut,
     GenerationPlanOut,
 )
 from app.services import generation_plan_service as svc
+from app.workflows import generation_plan as gp
 
 router = APIRouter(
     prefix="/generation-plans",
@@ -46,6 +50,63 @@ def list_plans(
     session: Session = Depends(db_session),
 ) -> list[GenerationPlanOut]:
     return [GenerationPlanOut.model_validate(r) for r in svc.list_plans(session, spu_id)]
+
+
+@router.get("/effective", response_model=EffectivePlanOut)
+def effective_plan(
+    product_id: UUID = Query(..., description="按这一行 SKU 的 SPU 与颜色解析"),
+    session: Session = Depends(db_session),
+) -> EffectivePlanOut:
+    """这件商品出图会按哪份方案跑。**只读,不提交。**
+
+    ## 路径必须排在 `/{plan_id}` 前面
+
+    FastAPI 按声明顺序匹配,`/{plan_id}` 会把字面量 `effective` 也吃掉,
+    然后在 `UUID("effective")` 上给出一个 422 —— 而错因指向"plan_id 格式不对",
+    一条完全查不到真因的报错。今天 `/{plan_id}` 只在 POST 上出现,所以
+    顺序反过来也不会撞;写成这个顺序是为了让加 `GET /{plan_id}` 的下一个人
+    不必先踩一次。
+
+    作用域推导与 `create_task` **同一条**:颜色从商品行上取,不由调用方传。
+    两处各推一次的表现是界面显示 A 颜色的方案、任务按 B 颜色的方案跑。
+
+    ## 出参一次构造完,不逐个属性赋值
+
+    `tools/audit_column_writers.py` 按**属性名**宽认列写入(理由写在
+    `generation_plan_service._update_draft` 上)。写成 `out.scope = ...`
+    会被算成 `MediaConsent.scope` 的写入点,于是那笔真实欠账当场从台账里
+    消失 —— 一条本轮亲手撞上的、不报错只让账目失真的形状。
+    """
+    product = session.get(Product, product_id)
+    if product is None:
+        raise NotFoundError("商品不存在")
+
+    spu_id = getattr(product, "spu_id", None)
+    variant_id = getattr(product, "color_variant_id", None)
+    # 没有 SPU 归属就没有方案可解析。**这不是错误** —— 老建档路径建的行
+    # 今天仍是这个形状,而它们照样要能出图(`create_task` 那条"解析不到
+    # 方案不拦")。给一个空壳而不是 404,界面才说得出"这件商品没有方案"
+    row = (
+        svc.resolve_for(session, spu_id=spu_id, color_variant_id=variant_id)
+        if spu_id is not None
+        else None
+    )
+    if row is None:
+        return EffectivePlanOut(
+            product_id=product_id, spu_id=spu_id, color_variant_id=variant_id
+        )
+
+    view = svc.to_view(row)
+    return EffectivePlanOut(
+        product_id=product_id,
+        spu_id=spu_id,
+        color_variant_id=variant_id,
+        plan=GenerationPlanOut.model_validate(row),
+        scope="COLOR" if row.color_variant_id is not None else "SPU_DEFAULT",
+        candidates_per_round=gp.total_candidates(view.angles),
+        required_angles=sorted(gp.required_angles(view.angles)),
+        problems=[p.message for p in gp.plan_problems(view)],
+    )
 
 
 @router.post("", response_model=GenerationPlanOut, status_code=status.HTTP_201_CREATED)
@@ -125,8 +186,6 @@ def _same_scope_active(candidate, target) -> bool:
 
 def _as_active(row):
     """把这一份当成已启用来算效果。**不写库。**"""
-    from app.workflows import generation_plan as gp
-
     view = svc.to_view(row)
     return gp.PlanView(
         plan_id=view.plan_id,

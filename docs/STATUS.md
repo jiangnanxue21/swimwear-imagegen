@@ -2713,7 +2713,7 @@
 | 平台状态轮询 | ✅ 可用 | 到期轮询 + 指数退避(封顶 1 小时,**不通往放弃** —— 轮询是读,停下来等于本地与平台永久分叉)。404 绝不当作已下架。平台驳回自动进既有驳回台账,`located_by=publish_attempt` |
 | 下架与测试清理 | ✅ 可用 | `DELIST` 不看草稿状态、不带报文内容;4.1 节 H 清理预案见 `make cleanup`,必须限定作用域,默认只看不做,`verify` 未清干净时退出码 1 |
 | 发布接口 | ✅ 可用 | 六个端点(提交/清单/详情/刷新状态/下架/清理清单)。状态派生只有一份,在 `workflows/publish_view.py`:后端给 `display_status` / `next_action` / `blocking_reasons` / `allowed_actions`,前端只展示和触发。多一个状态机里没有的 `STALLED` —— listing 说在途而 outbox 已 DEAD 的组合,少了它界面会一直显示「提交中」。前端在 `pages/PublishPage.tsx`(**任务 20-A**,B-02 已关闭;浏览器未实测,Playwright 在任务 24) |
-| 身份与权限提示 | ✅ 可用 | `AUTH_FORBIDDEN` 与 `AUTH_FAILED` 分开:「口令不对」与「口令对但角色不够」在前端是两句不同的话。口令写入失败时如实提示仅本次会话有效 |
+| 身份与权限提示 | ✅ 可用 | `AUTH_FORBIDDEN` 与 `AUTH_FAILED` 分开:「登录态失效」与「权限不足」在前端是两句不同的话,且 403 不清登录态、不跳登录页。a46-phase6 之后浏览器不持有任何 Token,「口令写入失败」一族已随录入卡退役 |
 | 付费调用花费台账 | ✅ 可用 | 按月/provider/天汇总,预算档位与耗尽日外推;金额取整数微单位。**是本系统台账不是厂商余额**,未配价的调用单独计数不计入金额 |
 | 导出 | ✅ 可用 | 单件与批量,JSON + CSV + XLSX;CRLF + utf-8-sig;批量上限 1000 行 |
 | 属性识别与确认 | ✅ 可用 | 一图一字段一条证据;未校准品类不自动确认;逐字段确认,批量确认排除冲突项 |
@@ -2731,7 +2731,11 @@
 | 今日待办首页 | ✅ 可用 | `/today`(默认落点),七张待办卡片 + 其余动作码收成一行;每张卡带筛选参数跳转,计数全部来自后端 |
 | 快审退回 | ✅ 可用 | A10。九个受控原因 + 可选说明(选「其他」必填),退回后由后端按原因推出唯一下一步——「其他」与认不出的原因码按**被退回的对象**兜底,不按原因猜。图片集与文案各一个退回接口,原因清单走 `GET /workbench/reject-reasons`,中文与下一步只有后端一份。两个编辑页都有退回回执(原因/说明/时间),文案的 `REJECTED` 按 `reject_reason` 分「快审退回」与「校验失败」两种显示 |
 | 未保存离开保护 | ✅ 可用 | A11。六个编辑面(属性/图片集/文案/草稿/设置/提示词)统一挂 `<UnsavedGuard>`;站内导航靠 `useBlocker`,刷新与关标签靠 `beforeunload` |
-| 运营菜单收敛 | ✅ 可用 | 四组分区,「系统管理」只对管理员显示;**是显示层收敛,不是权限边界** |
+| 运营菜单收敛 | ✅ 可用 | 四组分区。**「只对管理员显示」这半句已过期**(a46-phase2 订正):侧栏「系统管理」整组(adminOnly: true)只对管理员显示;顶栏用户菜单的「系统设置」也只给管理员。operator 手输 /settings 打得开,页面上是一句 403 —— 路由不按角色裁剪,只有菜单裁。真正的权限边界在后端 require_admin。a46-phase6 落地;a46-phase2 曾经把始终可见的设计写进代码,phase6 撤掉了它。**a47 又收了一轮**:运营那三组按「同一件事只留一个入口」收敛,`/reviews`(并进审核中心)、`/products`、`/spus/new`、`/workbench-import`、`/workbench-spus` 五项撤出菜单,`/tasks` 移进「系统管理」组(对运营即消失)——前提是工作台详情的生成任务页签先能答出状态/轮次/失败原因,那一步同轮落地。**六条路由一条都没删**,手输仍可打开。项数不写在文档里,判据是 `App.tsx` 的 `OPERATOR_NAV_ITEM_COUNT` + `nav-and-url-filters.test.tsx` 那条一致性断言 |
+| 出图按方案执行 | ✅ 可用 | **a47 唯一一处业务正确性修复。** 此前六个 `GenerationPlan` 参数里只有 `budget_cap` 生效:`provider` / `model_template_id` 取调用方传的,`scene` / `pose` / `angles_json` 在建任务与执行链路里一次都没被读过 —— 而验收链路按 `gp.required_angles` 检查,于是「配了方案 → 出图不按它 → 验收按它判不完整」,运营看到不完整而他没做错任何事。现在方案解析后由后端决定 provider / 模板 / 一轮张数,scene+pose+angles 进提示词,幂等键用解析后的值,冲突在审计里记「请求 X,方案 Y,按 Y 执行」。**没有给 `generation_tasks` 加列**,追溯靠已有的 `generation_plan_id` + `plan_fingerprint`。管理员可传 `override_plan` 绕过(非管理员 403,不是静默忽略),绕过后两个 plan 列留空、**但预算照查**。四条等式的真验证在 `tests/test_a47_plan_governs_db.py` —— **写了、一次都没跑过**(无 PostgreSQL) |
+| 建任务入口分层 | ✅ 可用 | a47 §7。运营版只看:商品、模特、出图方案(只读解析结果,来自 `GET /generation-plans/effective`)、角度、张数、预计付费调用次数。Provider / 每轮候选数 / 最多轮次 / 基础 seed / 提示词 / `provider_params` / `override_plan` 收进「高级选项」,默认收起且仅 `isAdmin` 可见。方案指定了 Provider 或模特时那两项在界面上**只读** —— 后端已按方案执行,再摆一个可选下拉是在界面上撒谎。**浏览器未实测**(无 node_modules) |
+| 工作台按款视图 | ✅ 可用 | a47 §8。`[按 SKU] [按款]` 切换,**默认按 SKU,本轮不切默认**(切默认的判据是测 10~20 款后的使用数据)。状态写进 URL,跟这一页另外七个筛选同一规矩。按款显示 SPU 码、款名、SKU 数、颜色数、完成度(旗下最小值)、阻断数(求和)、**卡点分布**、可展开 SKU 明细。**没有款级 `next_action`,而且不该有** —— 不同 SKU 卡在不同步骤时任何单选都是编的,理由见 `DECISIONS.md` §3.72 第四节。口径提醒:`blocking_count` 数问题条数,`blocked_steps` 数 SKU 个数,两者不相等。**后端 `/workbench/spus` 只认搜索词与分页**,另外六个筛选在按款下不生效,界面上明说 |
+| 审核中心 | ✅ 可用 | a47 §6。`/workbench-review` 改名,顶部四条计数入口(候选图审核 / 图片集待批准 / 文案待批准 / 属性冲突),点进去仍是各自现有页面。**只做入口,不动模型**:没有统一审核表、统一 DTO、统一 mutation,三套审核语义一个都没改。计数全部来自后端已有接口(`/reviews?status=PENDING` 的 total、`summary.by_next_action` 两条),**读不到的整块不显示** —— 一个「0」和一个「没查到」在界面上长得一样,而运营会按前者理解 |
 | 仪表盘 | ✅ 可用 | `/dashboard`,需求第十四章点名的全部指标。A9 之后它不再是首页,归到「系统管理」组 |
 | 生成链路冒烟 | ✅ 可用 | `make smoke`,健康检查 → 素材 → **已授权模特模板** → 异步任务 → 评分 → 成品图 → 导出 → 仪表盘,走 Mock 不花钱。**不覆盖审核之后的链路(6.5–6.10:人工审核/图片集/文案/草稿/发布/轮询/下架)** —— 那段由真库 pytest(`test_publish_flow_db.py`、`test_poll_and_delist_db.py` 等)做集成验证,交互路径按 `LOCAL_MANUAL_TEST.md` 手工走。此行以前写"端到端",A45 独立审查 C-11 指出那是高估,已更正;同轮起冒烟改走已授权模板,不再借道 MODEL_REFERENCE 绕行缝 |
 | 评分器校准 | ✅ 可用 | `make calibrate`,模型分档 vs 人工结论的混淆矩阵;样本不足 20 条拒绝给结论 |
@@ -2797,8 +2801,9 @@
 | 发布页没跑过浏览器 | 界面已补齐(B-02 关闭,`PublishPage.tsx` + 侧栏「发布上架」+ 导出页跳转)。**「没有 tsc、没有 vitest」这半句已过期**(A45-batch24 订正):`npm run typecheck` 与 `node tools/syntax-check.mjs` 从阶段 4 起就覆盖全部 89 个前端文件,`PublishPage.tsx` 在内。仍然成立的是最后半句 —— **没有一条用例点开过它**:Vitest 的 78 条覆盖 saveBlob、路由拦截、草稿页图片预览等,不含发布页;Playwright 未开工。门禁验到"入口存在且不自建第二份判定",验不到"点下去这一步真的发生了" |
 
 | ~~集成测试有 15 条真实失败~~ **A42 已全部修** | 第一次把 `requires_db` 那批真的跑起来:1652 条 0 跳过,**最初 15 条失败**。根因是三件事:(1)产品缺陷:`POST /api/reviews/{id}/approve|reject|regenerate` 三个接口无条件 500 —— `_basic_review_out` 签名被改而三处调用没改,**这是生产 bug,非测试杂项**;(2)既有夹具缺陷:`celery_eager` 把 `commit` 换成 `flush`,导致应用代码的 `rollback()` 回到用例开头,同一任务被派发两次,第二次抢不到、rollback 全清 —— 改用 `savepoint` 模式;(3)过期断言:人工通过后任务继续走完出图,不停在中间态。修后:1652 全绿,含批次并发 8 条、生成链路 21 条、审核链路 17 条,全部真库双 session/Celery eager 跑过 |
-| 菜单按角色收敛不是权限 | A8 的「系统管理」组只对管理员**显示**;路由对所有人保持注册(新人要能顺着冷启动横幅走进设置页填口令)。真正的边界是后端 `require_admin` |
-| 角色判定可被本地伪造 | 后端 `/auth/whoami` 答不上时降级看"本浏览器填了管理口令没"。往 localStorage 塞个假口令就能让菜单长出管理项,但那一栏的每个请求仍会被后端挡回 403 |
+| ~~菜单按角色收敛不是权限~~ **菜单不再按角色收敛(a46-phase2 订正)** | 原文写「A8 的「系统管理」组只对管理员**显示**」。那次翻转之后 `NAV` 里已经没有 `adminOnly`,`nav-and-url-filters.test.tsx` 反过来钉着「不按账号隐藏」——而纯层还留着两条断言 `adminOnly` 必须存在的守卫,两边**互为反面**,红的那条一直没人看。本轮删掉纯层那两条(依据 `frontend/CLAUDE.md` 第三条:菜单可见性不是跨语言契约),判定只留 Vitest 一份。真正的边界仍然是后端 `require_admin` |
+| ~~角色判定可被本地伪造~~ **a46-phase6 关闭** | 后端 `/auth/whoami` 答不上时降级看"本浏览器填了管理口令没"。往 localStorage 塞个假口令就能让菜单长出管理项,但那一栏的每个请求仍会被后端挡回 403。**浏览器登录模式下这条降级不再生效**:`is_admin` 由 Session 决定,a46-phase6 删掉了 localStorage 口令链 —— isAdmin 现在只认 probe.data?.is_admin === true,后端不答就是 false。行为已关闭;条目保留供历史追溯 |
+| 浏览器登录与 Token UI 退役 | ✅ 可用(**前端用例未在浏览器里跑过**) | a46-phase2。`/login` 页 + 401 跳登录并带 `?next=` + 顶栏退出登录;`apiClient` 开 `withCredentials`,身份探测不再要求本地口令。部署认哪种凭据由 `/health` 的 `auth_mode` 说(`session` / `token`),前端三处分岔都读它。**新增的 Vitest、Playwright 与 `auth_mode` 那两条 pytest 一次都没执行过** —— 打包机器没有网络,装不上 `node_modules` 与 Playwright 浏览器。**条数不写在这里**(这一栏原先写「12 条 Vitest」,那是 phase2 自审时当场就改掉的第一版数,而订正只落在 HANDOVER,没有回流到这里 —— 正是第五节那条规矩要防的形状):逐文件清单与复跑命令见 `HANDOVER.md` 的 a46-phase2 与 a46-phase6 两节 |
 | 刷新弹窗文案改不了 | `beforeunload` 只能触发浏览器自己的原生弹窗,文案由浏览器决定。站内导航那条路径是自绘 Modal,措辞可控 |
 | 前端已改为数据路由 | `main.tsx` 用 `RouterProvider` + `createBrowserRouter`,**不是**为了用 loader/action,只因为 `useBlocker` 只在数据路由下可用。路由仍用 JSX 声明 |
 | ~~首页筛选不进 URL~~ **A45-batch14-17 已修(GAP-033 关闭)** | 筛选状态改为住在 URL 里(`useUrlFilters`,URL 是唯一真相),工作台列表 / 生成任务 / 逐件快审 / 操作审计四页搬完,`useUrlSeed` 已删除。PRD §8.2 的四条要求现在全满足:URL 可复制、刷新保留、后退保留、点进来带条件。**代价与新风险各一条**:改筛选走 push,连点五个筛选要按五次后退(那是筛选类界面的正常行为,也是运营唯一能撤销一次误点的手段);后退/前进会改筛选却不经过任何 setter,所以清空勾选改挂在 `filters.signature` 上 —— 不这么做的话 BLOCK-09(越界批量)会从那扇门原样回来。**这一批的行为覆盖(Vitest 13 条)一次都没跑过**,被执行过的只有 12 条读源码的 Python 守卫 |
@@ -2892,12 +2897,15 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 
 ## 七、文档地图
 
-一共 13 份。**每份都写明「什么时候看」** —— 如果一份文档回答不了「谁会在什么情况下
-打开它」,它就不该留下。
+一共 19 份。**每份都写明「什么时候看」** —— 如果一份文档回答不了「谁会在什么情况下
+打开它」,它就不该留下。这个数和下表的行数由
+`tests/pure/test_a46_phase5_doc_truth.py` 钉在一起:漏收一份活文档、或者加了行
+不改这句话,都会变红(a46-phase5 之前它写着 13,而表里已经是 15 行)。
 
-地图**不含** `docs/MERGE-A45-*.md` 与 `docs/REVIEW-A4x-*.md` 那批按批次留档的
-过程结论(眼下 29 份):它们的检索入口是本文各版本块里的链接,读者是"要查某一批
-当时为什么这么改"的人。要收编时按老规矩走 —— 结论沉 `DECISIONS.md`,再删原件;
+地图**不含** `docs/MERGE-A45-*.md`、`docs/REVIEW-A4x-*.md` 与
+`docs/REVIEW-STAGE*-CONCLUSION.md` 那批按批次/阶段留档的过程结论(眼下 9 份):
+它们的检索入口是本文各版本块里的链接,读者是"要查某一批当时为什么这么改"的人。
+要收编时按老规矩走 —— 结论沉 `DECISIONS.md`,再删原件;
 别只删不沉(A44-BATCH8 那份是刻意不留的,见 `MERGE-A44-BATCH8-PATCH.md`)。
 
 | 文档 | 什么时候看 |
@@ -2917,6 +2925,10 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 | `docs/REVIEW-A28-TRACKING.md` | 要回答「a28 那份检视报告的 20 条阻断项现在还剩几条」。**下次复核只需核 4 条**,其余每条都绑了一条会红的测试 |
 | `CLAUDE.md`(根 / backend / frontend) | 用 Claude Code 开工前。写的是约定与踩过的坑,不是目录说明 |
 | `docs/AC-VERIFICATION.md` | 要回答「AC-01~AC-22 在本机真环境里到底哪几条跑过、哪几条没」 —— P0 6 项逐项结论、22 条 AC 状态表、复现命令合集都在这里 |
+| `LOCAL_MANUAL_TEST.md` | 要在本机手工走一遍。Docker 启动、初始化、口令、**浏览器登录的六步验收(§4.5)**、6.1~6.10 逐步操作 |
+| `docs/MANUAL-ACCEPTANCE.md` | 要做发布候选的完整 UAT 验收 —— 人员分工、两套库、配置清单、五个阶段的通过标准与证据要求 |
+| `HANDOVER.md` | 想知道最近一轮改了什么、验了什么、**哪些没验**。顶部是最新一轮,往下是历史交接 |
+| `AGENTS.md`(根 / backend / frontend) | 读 `AGENTS.md` 的 agent 工具用。内容与同级 `CLAUDE.md` **逐字一致**,由守卫钉着不许分叉 —— 要改约定改 `CLAUDE.md`,再同步过去 |
 
 另有 `docs/vendor/fashn-skill/` 是 FASHN 官方文档的存档,不是本项目文档,
 不计入上表也不要改动 —— `docs/PROVIDER-FASHN.md` 的实现依据全部指向它。

@@ -21,16 +21,18 @@
 backend/          FastAPI + Celery + SQLAlchemy2 + Alembic   → backend/CLAUDE.md
 frontend/         React18 + Vite + antd + Vitest + Playwright → frontend/CLAUDE.md
 comfyui/          ComfyUI 工作流模板与配置样例
-sample-data/      10 个示例商品 + 30 张示例图(首次演示用)
+sample-data/      示例商品与示例图(首次演示用;条数问 verify_sample_data.py)
 docs/             REVIEW.md(施工方案)、vendor/(第三方接口参考)
 tools/pack.sh     交付打包:先按黑名单排除,打完再解开复验
 .github/workflows/ci.yml   门禁执行者
 HANDOVER.md       最近交接。过程文档不留档 —— 结论进 docs/DECISIONS.md
+AGENTS.md         与同级 CLAUDE.md **逐字一致**的副本,给读 AGENTS.md 的工具。
+                  改约定只改 CLAUDE.md,再同步过去 —— 两边分叉过一次,
+                  根 AGENTS.md 停在「一条命令跑全部」那版被订正掉的文案上,
+                  而全仓没有任何东西盯着(a46-phase5 补了守卫)
 ```
 
 ## 门禁
-
-一条命令跑全部:
 
 ```bash
 make check          # = check-offline + fe-check,需联网(前端要装依赖)
@@ -42,6 +44,21 @@ CI(`.github/workflows/ci.yml`)跑六个 job:`gates` / `backend` / `frontend` /
 
 **`make check-offline` 跑绿 ≠ 全都过了。** 它不含前端类型、lint、Vitest 与构建;
 目标自己会在末尾打印这句话。改了前端还只跑 offline,等于没验。
+
+**`make check` 跑绿也 ≠ CI 会绿。** 这里原来写的是「一条命令跑全部」,
+而 `check = check-offline + fe-check`,两者都**不跑 `pytest`**。
+`make check` 覆盖不到的是整整三个 CI job:
+
+```
+backend  真库 pytest + Alembic 升降级 + -O 冒烟   ← 要 PostgreSQL + Redis
+e2e      Playwright                              ← 要 npx playwright install
+images   docker build ×2                         ← 要 docker daemon
+```
+
+也就是说本地能跑的那一份**结构上就比 CI 窄**,而窄的方向永远是更松。
+`verify_delivery.py` 里那条检查的措辞是「make check **覆盖前端门禁**」——
+它是准确的,被夸大的是这一段。要在本地逼近 CI,得自己起库与 Redis 跑
+`make test`,再加 `make fe-e2e`;docker 那两条本地没有等价物。
 
 ### 本地真实基础设施验证须由用户明确触发
 
@@ -109,6 +126,46 @@ Phase 0(门禁与工程基线)**代码侧已清空**:CI 建立、Vitest 接线(0
 
 Phase 3 起步:任务 17 / 18(批次租约与异常恢复)已落地,见下面单独一节。
 
+**PRD §13 的阶段 5 已开工**(注意:是 PRD 的阶段划分,**不是** `REVIEW.md` 的
+P5 那一格 —— 那里只有任务 24 Playwright)。两个批次已落码:
+
+```
+5-1  草稿的颜色维上游快照:两列 + 迁移 0049 + 零依赖判定层   A45-batch19
+5-2B 接线:build_draft 写快照、refresh_draft 读、READY 门禁    A45-batch20
+5-3  文案幂等单元(不含尺码)+ 迁移 0050                       A45-batch21
+5-5  导出预览读同一份已存映射                                 A45-batch22
+5-4  颜色投影与确认流(`display_name` 的唯一写入点)           A45-batch23
+```
+
+**五项交付到此全部落码。** 排期、五项与批次的对应、AC 证据与仍欠的账在
+`docs/REVIEW-STAGE5-5-1-CONCLUSION.md`。
+
+**PRD §13 的阶段 6(一体化向导)也已全部落码**,五批:
+
+```
+6-1  判据重述签认 + 颜色子态判定层                      A45-batch25
+6-2 前置 步骤表的四条穷举守卫 + 权重常量改表            A45-batch26
+6-2  七步增维 + 完成度口径迁移(**口径变过一次**)      A45-batch27
+6-3  聚合工作流 API(AC-15)+ 总览页颜色维              A45-batch28
+6-4  七步向导 UI + 刷新恢复 + **AC-05 服务端门禁**      A45-batch29
+6-5  费用预估 + 上游变化影响提示(AC-17)               A45-batch30
+```
+
+分批理由、AC-05 为什么原来不属于任何一批、以及**五批之后仍然欠着的四件事**
+在 `docs/REVIEW-STAGE6-CONCLUSION.md` §六 / §七。那四件里最要紧的两件:
+**浏览器一次都没实测**(Playwright 在任务 24),**真库一次都没跑**。
+
+阶段 6 带来过两次运营看得见的口径变更,都记在 `docs/STATUS.md`:
+完成度五步等权变七步不等权(batch27);没配生成方案的商品阻断数从 0 变 1
+(batch29 —— 那条阻断本来就在,只是被一个位置参数吞进了 `summary`,
+见 `DECISIONS.md` §3.59 第一节)。
+
+**而 `DELIVERY_STAGE` 仍然是 4 —— 这一次不是因为没做完。**
+`还款日:阶段 N` 的语义是「推进到 N 之前必须还清」,推到 5 会让
+11 条列写入欠账 + 3 条欠账守卫当场逾期变红,而**那 14 条都不是阶段 5 的
+交付项**(识别侧 token 计量、原始响应留存、几个缺入口的 UI 字段)。
+「五项落码完毕」与「标记可以推进」是两件事,别把它们合并计算。
+
 Phase 2 进行中:任务 11(三张发布域表 + 迁移 `0022` + 幂等键)、任务 12
 (渠道 API Simulator,九种行为,**无状态** —— 场景编码在 external_spu_id 里)、
 任务 13(`generic.build_request`)、任务 14(幂等创建与更新)、任务 15
@@ -154,12 +211,18 @@ app/workbench/platform_service.py 驳回台账(`record_api_rejection` 是轮询�
    **注意这里原来写着「全仓只有这一份『现在几点』」,那句话不成立** ——
    还剩 14 处直接 `datetime.now(UTC)`,清单与影响评估在 `core/clock.py`
    的「收敛没有做完」一节。这条是对**新代码**的要求,不是对现状的描述。
-   **这个数字改过三次(18 → 17 → 14),别照抄下游文档里的旧值** ——
-   `core/clock.py` 那一节写了怎么用 AST 重新数,手数漏过一次。
-   A34 收掉了其中**唯一一处原样写着上面那个被点名禁止的形式**的地方
-   (`batch_service.py:1007`);A41 收掉 `batch_service.py` 的 3 处
+   **这个数字改过四次(18 → 17 → 16 → 14),别照抄下游文档里的旧值** ——
+   `core/clock.py` 那一节写了怎么用 AST 重新数,手数漏过一次,
+   **建成清单之后又漏账过一次**(A45-batch17-2:`cleanup_service.py` 与
+   `model_license.py` 两处从未进过清单)。现在有
+   `tests/pure/test_a45_batch17_2_clock_ledger.py` 每次现数一遍并和清单比对,
+   所以这个数字从本批起是**被守着的**,不是被记着的。
+   A34 收掉了 `batch_service.py:1007`;A41 收掉 `batch_service.py` 的 3 处
    (回执写入 / `create_batch` / 导出文件落库 —— 它们的 `now` 全部用途都是写库,
-   归一到入口语义不变,不需要真库)。剩下 14 处是"aware 的 now 赋给变量、
+   归一到入口语义不变,不需要真库);A45-batch17-2 收掉上面那漏账的两处。
+   **这里原来还写着「A34 收掉的是全仓唯一一处原样写着那个被点名禁止的形式的
+   地方」—— 那半句是假的**:`model_license.py:53` 一直原样长着它,
+   到 A45-batch17-2 才收。剩下 14 处是"aware 的 now 赋给变量、
    用到的地方各自归一",收敛它们要动发布链路的事务编排,必须带真库跑。
 5. **出参里的时间戳走 `core/clock.iso_utc()`,不要裸 `.isoformat()`。**
    `SessionLocal` 配的是 `expire_on_commit=False`,于是"刚写完就回读"拿到的是
@@ -186,10 +249,29 @@ app/api/publish.py                六个端点,只做取数 / 调判定 / 持有
    搬进接口函数之后,覆盖「某个状态组合下按钮不该亮」就要起一个 FastAPI
    加一个库,而那种测试没人会为一个枚举分支去写。
 
-下一步是**任务 20(发布前端页面)**。它要顺手补上 `resolve_gate` 的缺口 ——
-API 上架的驳回现在记得进台账但关不掉,细节与判据见 `docs/STATUS.md`
-「已知限制」的「API 驳回关不掉」那一行。接口层已经如实把这一条报在
-`blocking_reasons` 里,前端照着展示即可,不要自己再判一次。
+**任务 20 已经拆成两件事(A45-batch18 / P3),别再当一个号用。**
+
+    20-A  发布前端页面与状态操作   ✅ 已交付(`pages/PublishPage.tsx` + 路由),
+                                  但**浏览器未实测** —— Playwright 在任务 24
+    20-B  API 驳回的 resolve_gate   ✅ 新数据路径已落码(2026-08-09 评审订正),
+                                  缺真库 seam 测试;旧数据仍需人工
+
+拆开的原因是三份文档曾经对"任务 20 完成了没有"给出三个不同答案,
+而它们各对了一部分:页面确实做完了,`resolve_gate` 确实还没有。
+一个号绑着两件依赖与排期都不同的交付物,排期就得靠猜按哪一句算。
+
+**20-B 已经落码,这里原来写的「下一步是 20-B」已过期**(2026-08-09 评审订正)。
+`platform_service._publish_attempt_entries()` 把「驳回之后有一次**成功的**
+提交尝试」当作等价证据喂进 `resolve_gates()` 与解决路径,关联口径是
+`ChannelListing.draft_id`,指纹那半边仍落在当前草稿指纹上 ——
+**所以没改草稿的重复提交过不了闸**。只认 `SUCCEEDED`:PENDING / IN_FLIGHT
+还没有结果,UNKNOWN 不知道平台收没收到,FAILED / ABORTED 根本没提交成功。
+
+仍然欠着两件,别把它们读成"没做":
+
+    真库 seam   从一行真实 PublishAttempt 穿过 platform_service 到驳回关闭,
+                没有一条真库用例走完过(判定与服务接线都有纯测试)
+    旧数据      `draft_id IS NULL` 的历史驳回关联不上尝试,仍然只能人工标记
 
 **发布接口 = 任务 25(A40 定的)。** `REVIEW.md` 12.1 的任务表里 18 一直是
 「Batch Outbox 与异常恢复」,和发布 API 无关。这个号以前被两处占着,
@@ -241,11 +323,20 @@ app/tasks/maintenance_tasks.py  reap_batch_leases  beat 每 60 秒一拍
    用 AST 钉着 —— 改回无锁 SELECT 会让租约变成一个没人写的列,
    而回收器会把**正在跑**的条目当成残骸。
 
-未做:任务 7(真实多模态抽取器)、任务 9(FASHN ProviderCall 持久化与 Usage)、
-任务 20 起的 Phase 4/5。**任务 19 两半都已落地**(N+1 在 a38,事务边界在 a42),
+未做:任务 20-B 起的 Phase 4/5(20-A 页面已交付,浏览器未实测)。**任务 19 两半都已落地**(N+1 在 a38,事务边界在 a42),
 但两半守的都是源码形状,不是运行时行为 —— 见下面单独一节。
 **任务 5 / 6 已由 a37 完成**(12.1 表已标 ✅);这里原来还写着「未做:任务 5、6」,
 和任务表对不上 —— 改了表没改总纲,正是 A38 走读点名过的那类过期。
+**任务 7 / 9 已由 A45-batch14 / batch14-18 完成**;这里原来也还写着
+「未做:任务 7(真实多模态抽取器)、任务 9(FASHN ProviderCall 持久化与 Usage)」,
+**那句话在 A45-batch17-2 之前一直是错的** —— 任务 7 落在 `app/extractors/vision.py`
+(注册表接线在 `api/attributes.py`、`workbench/batch_service.py`),任务 9 落在
+`providers/fashn.py` + `providers/base.settle_billable_units` + `units_source` 列
+(迁移 0039),调用点在 `tasks/generation_tasks.py`。两者都**从未连过真端点**,
+`docs/STATUS.md`「已知限制」如实记着 —— 但"没连过真端点"和"没做"是两件事,
+按这一段开工的人会去重做一遍已经写好的东西。
+同一段话在同一份文件里连着说错三次(5/6、7/9),原因每次都一样:
+**12.1 表改了,总纲没跟着改。** 下面那两行 236-237 恰好就在点名这一类过期。
 
 ## 请求的事务边界:归接口所有(任务 19 后半,A42)
 

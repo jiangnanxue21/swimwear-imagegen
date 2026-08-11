@@ -43,20 +43,26 @@ GUARD = "../frontend/src/components/UnsavedGuard.tsx"
 #: (编号, 一句话, 相对 backend/ 的路径, 原文, 替换成)
 MUTATIONS: list[tuple[str, str, str, str, str]] = [
     # -------------------------------------------------- 菜单与路由
+    # a47 §4 把两条锚点改没了,原样记在这里:
+    #   Q1 锚在「素材管理」那一行 —— 该项本轮改名「素材库」
+    #   Q2 锚在 `/workbench-spus` 那一项 —— 该项本轮整条撤出菜单(路由保留)
+    # 变异**意图**一字未改(往运营组塞管理入口 / 把菜单 key 拼错),
+    # 换的只是它们各自钉在哪一行。改锚点而不是删变异:失锚的变异不报错、
+    # 不变红,只是安静地什么都没验 —— 那正是 `audit_anchors.py` 存在的理由。
     (
         "Q1",
         "把 /settings 挪进普通运营菜单",
         APP_TSX,
-        "      { key: '/media', label: '素材管理', icon: <FolderOpenOutlined /> },",
-        "      { key: '/media', label: '素材管理', icon: <FolderOpenOutlined /> },\n"
+        "      { key: '/media', label: '素材库', icon: <FolderOpenOutlined /> },",
+        "      { key: '/media', label: '素材库', icon: <FolderOpenOutlined /> },\n"
         "      { key: '/settings', label: '设置', icon: <SettingOutlined /> },",
     ),
     (
         "Q2",
         "菜单项路由拼错一个字符",
         APP_TSX,
-        "{ key: '/workbench-spus', label: 'SPU 聚合'",
-        "{ key: '/workbench-spu', label: 'SPU 聚合'",
+        "{ key: '/workbench', label: '商品工作台'",
+        "{ key: '/workbenc', label: '商品工作台'",
     ),
     (
         "Q3",
@@ -118,11 +124,16 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "// import removed",
     ),
     (
+        # 锚点在 a46-phase2 订正过一次。原文钉的是
+        # `const { isAdmin, who, loading: identityLoading } = useIdentity()`,
+        # 而菜单不再按角色裁剪之后 `isAdmin` 早就从这行解构里去掉了 ——
+        # 也就是说这条变异在交付包里**一次都没造出来过**,而脚本照样报"抓住"。
+        # `audit_anchors.py` 正是为这种情况存在的,这次由它叫出来。
         "Q11",
         "菜单自己又开一份 whoami 查询(enabled 条件分叉)",
         LAYOUT,
-        "  const { isAdmin, who, loading: identityLoading } = useIdentity()",
-        "  const { isAdmin, who, loading: identityLoading } = useIdentity()\n"
+        "  const { who, isAdmin, loading: identityLoading, sessionAuth, needsLogin } = useIdentity()",
+        "  const { who, isAdmin, loading: identityLoading, sessionAuth, needsLogin } = useIdentity()\n"
         "  useQuery({ queryKey: ['auth-probe'] })",
     ),
     # -------------------------------------------------- 后端

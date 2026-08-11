@@ -167,11 +167,24 @@ class Smoke:
     def create_task(
         self, product_id: str, provider: str, model_template_id: str
     ) -> str | None:
+        """建一个任务,并**核对最终生效的参数是不是我传的那一份**(a48)。
+
+        这里显式传一个已授权模特,是为了让 §10.5 / §11 的生成前硬阻断真的在
+        冒烟里执行一遍。a47 之后这句话不再自动成立:那只 SKU 所属 SPU 有
+        ACTIVE 方案时,`provider` 与 `model_template_id` 会被方案换掉,
+        于是这一遍冒烟验的是**另一个模板**——而冒烟报告仍旧全绿。
+
+        所以这里**不绕过方案**:冒烟要测的就是运营真实走的那条路,而那条路
+        本来就该由方案接管(要不受方案影响的对比,那是 `provider_baseline`
+        的活,它显式 `override_plan=True`)。改成回读出参并如实说出来:
+        被接管时打一条 note,报告里看得见,而不是让下面的断言在一份
+        自己都不知道换过的输入上跑。
+        """
         payload = {
             "product_id": product_id,
             "mode": "virtual_try_on",
             "provider": provider,
-            # 显式选已授权模特:让 §10.5/§11 的生成前硬阻断真的在冒烟里执行
+            # 显式选已授权模特 —— 但方案在时它会被换掉,见上面的函数文档
             "model_template_id": model_template_id,
             "candidate_count": 4,
             "max_rounds": 1,
@@ -185,7 +198,22 @@ class Smoke:
             return None
         # 需求第十六章:创建接口必须立即返回,不等生成完成
         self.check("任务创建立即返回", elapsed < 3000, f"{elapsed:.0f}ms")
-        return response.json()["task"]["id"]
+
+        task = response.json()["task"]
+        # 出参里的这两个是**解析之后**的值(a47 §5.2 硬约束 2),所以拿它们和
+        # 请求体对一下,就能知道这一遍冒烟实际跑的是谁的参数。
+        # 不 fail,只 note:被方案接管是**正确行为**,不是缺陷 —— 会骗人的是
+        # 「报告说验过已授权模特那条闸,而实际上验的是别的模板」这句话。
+        applied_template = str(task.get("model_template_id") or "")
+        applied_provider = str(task.get("provider") or "")
+        if applied_template != model_template_id or applied_provider != provider:
+            self.note(
+                "本次由生成方案接管:"
+                f"模特模板 {model_template_id} -> {applied_template or '(空)'}、"
+                f"Provider {provider} -> {applied_provider or '(空)'}。"
+                "§10.5/§11 那两道闸走的是方案给的模板,不是这里传的那一个"
+            )
+        return task["id"]
 
     def wait_for_task(self, task_id: str, timeout: float) -> dict[str, Any] | None:
         deadline = time.monotonic() + timeout

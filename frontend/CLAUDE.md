@@ -17,6 +17,26 @@ npm run syntax-check
 `make fe-check` 和 CI 的 frontend job 都按这个顺序跑。改顺序要三处一起改,
 否则本地和 CI 的失败点会不一致,复现时得靠猜。
 
+**`syntax-check` 是上面那五条的离线替身,不是它们的补充。** 它只要 node、
+不要 node_modules,所以 `make check-offline` 也跑它。a48 起它是三遍:
+
+    一  语法       parseDiagnostics
+    二  死 import  声明了却没人用 —— `noUnusedLocals` 那一类
+    三  断 import  本地模块里根本没有这个导出名
+
+第二遍补的是一条**真实漏过**的缝:tsc 要 node_modules,于是离线时死 import
+没有任何东西在看 —— a46-phase6 自审专门去找都漏了一处,跟着 a47 交付了出去。
+第三遍是后端 `verify_imports.py` 的对侧(它早就在 check-offline 里,
+而前端一直没有),补在被咬之前:横跨多文件删除一个导出时,漏掉的调用点
+离线不会红。
+
+两条刻意的放宽:只管本地模块(第三方包要 node_modules 才知道它导出什么),
+`export * from` 直接放行。**宁可漏,不可冤** —— 会冤枉正常文件的门禁,
+活不过第一次拦住人的那天。
+
+三遍都验不到死变量、死参数、类型与渲染。别拿它当 typecheck 的替代品 ——
+它只是让「离线全绿」这句话少骗人一点。
+
 E2E 单独跑:`npm run e2e`(先 `npx playwright install chromium`)。
 
 ## 测试分层

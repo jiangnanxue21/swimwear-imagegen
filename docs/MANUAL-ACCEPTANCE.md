@@ -63,7 +63,9 @@
 
 准备以下数据，并建立一张外部台账记录本地 ID、SPU/SKU、测试批次号、外部商品 ID 和费用：
 
-1. 仓库样例：`sample-data/` 的 10 件商品与 30 张占位图，用于无费用冒烟。
+1. 仓库样例：`sample-data/` 的示例商品与占位图，用于无费用冒烟。
+   **条数不写在这里**——增删样例时写死的数字会静默过期；要当前口径跑
+   `cd backend && python3 tools/verify_sample_data.py`。
 2. 真实小样本：5 件已授权、信息完整的泳装商品，每件至少正面、背面、细节图。
 3. 正式 UAT 样本：至少 30 件真实商品，覆盖不同颜色、图案、版型和高风险属性。
 4. 批次样本：至少 3 批，每批 5～20 件。
@@ -124,6 +126,10 @@ OPERATOR_TOKENS=alice:<操作员口令>,bob:<另一个操作员口令>
 SETTINGS_SECRET_KEY=<32 字节 Fernet 主密钥>
 SETTINGS_ENV_LOCK=false
 
+ADMIN_PASSWORD=<浏览器登录:管理员密码>
+OPERATOR_PASSWORD=<浏览器登录:运营密码，不能与上面相同>
+AUTH_SESSION_SECRET=<至少 32 字符的随机串>
+
 SPEND_CURRENCY=USD
 SPEND_MONTHLY_BUDGET_MICROS=<本轮 UAT 预算>
 SPEND_WARN_RATIO=0.7
@@ -139,6 +145,16 @@ PRICING_VERSION=<本轮价目版本>
 - 首先保持 `SETTINGS_ENV_LOCK=false`，验证后台设置的保存/恢复和来源标识；冻结 UAT 配置后改为 `true` 并重启，再确认环境变量项只读。
 - `PROVIDER_PRICE_BOOK` 不知道价格时宁可留空并显示“未配价”，不要填 0 冒充免费。格式示例见 `backend/app/core/pricing.py`。
 - 多机部署必须显式配置同一把 `SETTINGS_SECRET_KEY`；否则各节点无法解密彼此写入的设置。
+- **最后三项不是可选的。** `APP_ENV=uat` 不属于 local/dev/development，
+  `config._check_browser_auth` 会在构造 Settings 时直接抛错，backend、worker、beat
+  三个进程都起不来；而 §5.1 的生产 overlay 把它们写成 `${KEY:?}`，变量没设时
+  **连容器都不会创建**。两个密码不能相同，`AUTH_SESSION_SECRET` 至少 32 字符，
+  且不能是 change_me / password / admin 这类占位值（会被启动检查点名）。
+  多机 UAT 各节点必须配同一把 `AUTH_SESSION_SECRET`，否则表现是隔一次请求就掉线。
+- 配了这三项之后，这个部署就进入 **session 模式**：浏览器要先登录，
+  `GET /api/health` 的 `auth_mode` 会回 `session`。上面那两把
+  `ADMIN_TOKEN` / `OPERATOR_TOKENS` 仍然有效，但它们是给 CLI、脚本和 pytest 的
+  **机器凭据**，不是任何人的登录密码。见 README「浏览器登录」。
 
 ### 3.2 第 2～3 阶段：无费用基线
 
@@ -320,12 +336,28 @@ make worker-ping
 
 ### 5.3 鉴权与配置安全
 
-用无口令、操作员口令、管理员口令分别验证：
+按 §3.1 配全之后这个部署处于 **session 模式**（`GET /api/health` 的 `auth_mode`
+回 `session`）。两条路径要分开验，别把它们混成一张表：
 
-| 动作 | 无口令 | 操作员 | 管理员 |
+**一、浏览器走登录页。** 用 `operator` 和 `admin` 两个账号分别验证：
+
+| 动作 | 未登录 | operator | admin |
 |---|---|---|---|
-| `/api/health` | 可访问 | 可访问 | 可访问 |
-| 查看业务页面 | 拒绝 | 允许 | 允许 |
+| `/api/health` | 可访问（匿名，只回状态与 `auth_mode`） | 可访问 | 可访问 |
+| 直接开任一业务页面 | 弹到 `/login`，地址栏带 `?next=` | 允许 | 允许 |
+| 创建商品/任务/审核 | 拒绝 | 允许 | 允许 |
+| 侧栏「系统管理」组 | — | **不显示** | 显示 |
+| 手输 `/settings` | 弹到 `/login` | 打得开，页面一句 403（**不是 404**） | 允许 |
+| 设置页读写、Provider 测试（后端） | 拒绝 | **403 `AUTH_FORBIDDEN`** | 允许 |
+| 退出登录后再开业务页 | — | 回到 `/login` | 回到 `/login` |
+
+用户名不存在与密码错误必须返回**完全一致**的一句话；两个密码填成相同时，
+后端应当在启动阶段就拒绝。逐步操作见 `LOCAL_MANUAL_TEST.md` §4.5。
+
+**二、脚本与 CLI 走请求头口令。** `ADMIN_TOKEN` / `OPERATOR_TOKENS` 这一路不变：
+
+| 动作 | 无口令 | 操作员口令 | 管理员口令 |
+|---|---|---|---|
 | 创建商品/任务/审核 | 拒绝 | 允许 | 允许 |
 | 设置页读写、Provider 测试 | 拒绝 | 拒绝 | 允许 |
 
@@ -335,7 +367,9 @@ make worker-ping
 - `SETTINGS_SECRET_KEY` 与存储目录分离。
 - `SETTINGS_ENV_LOCK=true` 后，环境变量提供的项变为只读，数据库覆盖不生效。
 - PostgreSQL、Redis 只绑定本机或私网，不暴露公网。
-- 日志中搜索 token、Authorization、API key 和 base64，均无明文。
+- 日志中搜索 token、Authorization、API key 和 base64，均无明文；登录被拒的日志
+  只记用户名和被拒这件事，**不记密码**。
+- 换掉 `AUTH_SESSION_SECRET` 并重启后，所有人当场登出（旧 Cookie 验不过签名）。
 
 ---
 

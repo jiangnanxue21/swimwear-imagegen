@@ -77,6 +77,31 @@ export interface GenerationPlanInput {
   note?: string | null
 }
 
+/**
+ * 「这件商品出图会按哪份方案跑」(a47 / PRD §7)。
+ *
+ * ## 为什么这是一次请求,而不是前端自己算
+ *
+ * 前端凑得出这个答案:拉 `/generation-plans?spu_id=`,再实现一遍
+ * 「颜色覆盖优先、回落 SPU 默认、只认 ACTIVE」。**而那正是硬规则 4 禁止的。**
+ * 更实际的是,那份解析规则一旦有两个实现,建任务用一份、界面显示另一份 ——
+ * 运营会看着一份不是他即将执行的方案,点下那颗付费按钮。
+ */
+export interface EffectivePlan {
+  product_id: string
+  spu_id: string | null
+  color_variant_id: string | null
+  /** 没有生效方案时为 null。**不是空对象** —— 界面据此说"这件商品没有方案" */
+  plan: GenerationPlan | null
+  /** COLOR = 这个颜色自己的覆盖;SPU_DEFAULT = 从 SPU 默认回落来的 */
+  scope: 'COLOR' | 'SPU_DEFAULT' | null
+  /** 一轮要出几张。**后端算的** —— 它是"点下去要花几次钱"的因数 */
+  candidates_per_round: number | null
+  required_angles: ImageAngle[]
+  /** 这份方案能不能拿去建任务。有问题也照样给方案本身,藏起来运营会去建第二份 */
+  problems: string[]
+}
+
 export interface PlanActivationEffect {
   plan: GenerationPlan
   /** 启用之后这些颜色的图片集会过期(§8.1 第 7 行) */
@@ -94,6 +119,13 @@ export async function createGenerationPlan(
   payload: GenerationPlanInput,
 ): Promise<GenerationPlan> {
   const { data } = await apiClient.post<GenerationPlan>('/generation-plans', payload)
+  return data
+}
+
+export async function effectivePlanForProduct(productId: string): Promise<EffectivePlan> {
+  const { data } = await apiClient.get<EffectivePlan>('/generation-plans/effective', {
+    params: { product_id: productId },
+  })
   return data
 }
 

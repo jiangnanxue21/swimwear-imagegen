@@ -1,5 +1,23 @@
 /**
- * 逐件快审(OPS-REVIEW P3)。
+ * 审核中心(a47 §6)= 顶部一组计数入口 + 原有的逐件快审(OPS-REVIEW P3)。
+ *
+ * ## a47 只做入口,**不动任何一个审核模型**
+ *
+ * 收敛之前运营的「今日工作」里并列着两条审核入口:这一页(图片集与文案)
+ * 和 `/reviews`(候选图评分不过关的落点)。它们审的不是同一个对象,
+ * 所以合并数据模型是错的 —— 而并排摆着又让人每天要先想一下该点哪个。
+ *
+ * 折中是**一个入口、三条计数**:哪一类有几件在这里说清,点进去仍是各自
+ * 现有页面。禁止新建统一审核表、拼统一 DTO、重写任一审核页、统一 mutation。
+ *
+ * **计数必须来自后端已有接口,没有的不显示**(硬规则 4)。三条的来源:
+ *
+ *     候选图审核   `GET /reviews?status=PENDING` 的 `total`
+ *     图片集/文案  本页队列查询已经在拉的 `summary.by_next_action`
+ *     属性冲突     同一份 summary 的 `RESOLVE_CONFLICT`
+ *
+ * 前两条是这一页本来就要发的请求,第三条搭同一次车 —— 没有为了三个数字
+ * 新开接口。真统一队列的触发条件沿用上游:测试期记录交叉切换频次,数据说话。
  *
  * ## 为什么需要这一页
  *
@@ -63,6 +81,7 @@ import {
   type WorkbenchListItem,
 } from '../api/workbench'
 import { imageSetsApi } from '../api/imageSets'
+import { reviewsApi } from '../api/reviews'
 import { mediaApi } from '../api/media'
 import { enumParam, useUrlFilters } from '../hooks/useUrlFilters'
 import { brandVars, fontScale, imageTile } from '../theme'
@@ -70,6 +89,111 @@ import KeyboardHelp from '../components/KeyboardHelp'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import BrandTag from '../components/BrandTag'
 import { AudienceTag, ReviewFocusLine } from '../components/AudienceBadge'
+
+/**
+ * 审核中心的计数入口(a47 §6)。**只做入口,不动模型。**
+ *
+ * 三个数字全部来自后端已有接口(见文件头)。**读不到的不显示** ——
+ * 这是硬规则 4 的直接后果:一个"0"和一个"没查到"在界面上长得一样,
+ * 而运营会按前者的意思去理解(没活了),然后漏掉一整类待办。
+ */
+function ReviewCentreTiles({
+  candidateCount,
+  imageSetCount,
+  copyCount,
+  conflictCount,
+  onPick,
+}: {
+  candidateCount: number | null
+  imageSetCount: number | null
+  copyCount: number | null
+  conflictCount: number | null
+  onPick: (filter: Filter) => void
+}) {
+  const navigate = useNavigate()
+  const tiles: {
+    key: string
+    label: string
+    hint: string
+    count: number | null
+    go: () => void
+  }[] = [
+    {
+      key: 'candidate',
+      label: '候选图审核',
+      hint: '评分不过关转人工的单张候选图。审的是"这张图能不能用"',
+      count: candidateCount,
+      go: () => navigate('/reviews'),
+    },
+    {
+      key: 'imageset',
+      label: '图片集待批准',
+      hint: '一个颜色的整组图排完了,等人批。审的是"这一版能不能发"',
+      count: imageSetCount,
+      go: () => onPick('APPROVE_IMAGE_SET'),
+    },
+    {
+      key: 'copy',
+      label: '文案待批准',
+      hint: '标题与卖点生成完了,等人批',
+      count: copyCount,
+      go: () => onPick('APPROVE_COPY'),
+    },
+    {
+      key: 'conflict',
+      label: '属性冲突',
+      hint: '同一属性在多个来源上取值打架,要人来定',
+      count: conflictCount,
+      go: () => navigate('/workbench?next_action=RESOLVE_CONFLICT'),
+    },
+  ]
+
+  return (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      {tiles.map((t) => {
+        // 数字读不到就整块不显示 —— 见本组件文档
+        if (t.count === null) return null
+        return (
+          <Tooltip key={t.key} title={t.hint}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={t.go}
+              onKeyDown={(e) => {
+                // WAI-ARIA 的 button 模式要求 Enter 与 Space 都能激活
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  t.go()
+                }
+              }}
+              aria-label={`${t.label} ${t.count} 件 · ${t.hint}`}
+              style={{
+                border: `1px solid ${brandVars.line}`,
+                background: brandVars.surface,
+                borderRadius: 4,
+                padding: '6px 14px',
+                minWidth: 110,
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontSize: fontScale.meta, color: brandVars.slate }}>{t.label}</div>
+              <div
+                style={{
+                  fontSize: fontScale.metric,
+                  fontWeight: 600,
+                  lineHeight: 1.2,
+                  color: t.count ? brandVars.ink : brandVars.textFaint,
+                }}
+              >
+                {t.count}
+              </div>
+            </div>
+          </Tooltip>
+        )
+      })}
+    </div>
+  )
+}
 
 /** 这一页只处理这两个动作。其余动作不是"审",而是"做"。 */
 const REVIEW_ACTIONS: NextActionCode[] = ['APPROVE_IMAGE_SET', 'APPROVE_COPY']
@@ -463,6 +587,41 @@ export default function WorkbenchReviewPage() {
   const loading = queues.some((q) => q.isLoading)
   const failed = queues.find((q) => q.isError)
 
+  /*
+   * 候选图审核的件数(a47 §6)。`page_size: 1` 只为了拿 `total` ——
+   * 后端在**全量筛选结果**上算它,不是当页条数。
+   *
+   * 这是本页为计数条新增的唯一一次请求;另外两个数搭队列查询的车。
+   */
+  const candidateQueue = useQuery({
+    queryKey: ['reviews', 'PENDING', 'count'],
+    queryFn: () => reviewsApi.list({ status: 'PENDING', page_size: 1 }),
+  })
+
+  /*
+   * 图片集/文案/属性冲突三个数都住在同一份 `summary.by_next_action` 里。
+   *
+   * **取哪一条 query 的 summary 有讲究**:`queues` 是按当前筛选发的,
+   * 筛成「只看文案」时里面就没有图片集那一条。所以计数条单独发一次
+   * 不带 next_action 的查询 —— `page_size: 1` 同理,要的只是 summary。
+   * 少了这一步,计数条会跟着筛选变,而它恰恰是用来**切换**筛选的。
+   */
+  const summaryQuery = useQuery({
+    queryKey: ['workbench', 'review-centre-summary'],
+    queryFn: () => workbenchApi.list({ page_size: 1 }),
+  })
+  /*
+   * 失败与 0 必须分得开:`isError` 时给 null,那几块整个不显示。
+   *
+   * `?? null` 单靠 `data` 为空也能得到 null,但那是**碰巧**对的 ——
+   * `test_frontend_contract.py` 的「每个 query 句柄都要被问过 isError」
+   * 盯的正是这种写法:它今天对,而下一个人给这几块加一个"读不到就显示 0"
+   * 的兜底时不会有任何地方变红。
+   */
+  const byAction = summaryQuery.isError
+    ? null
+    : summaryQuery.data?.summary.by_next_action ?? null
+
   const queue: WorkbenchListItem[] = useMemo(() => {
     const rows = queues.flatMap((q) => q.data?.items ?? [])
     // 按 SPU 再按 SKU 排序:同 SPU 的图片集/文案是共享对象,连着审能少看几遍同一组图
@@ -824,10 +983,19 @@ export default function WorkbenchReviewPage() {
 
   // 走查 P1-5:剩余量写进标签页标题。运营切去别的标签处理完一件事再切回来时,
   // 不用等页面渲染就知道还剩多少 —— 标签栏本身成了进度指示器
-  useDocumentTitle(queue.length ? `逐件快审 (${queue.length})` : '逐件快审')
+  useDocumentTitle(queue.length ? `审核中心 (${queue.length})` : '审核中心')
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      {/* a47 §6:计数入口。点进去仍是各自现有页面,底层一个模型都没动 */}
+      <ReviewCentreTiles
+        candidateCount={candidateQueue.isError ? null : candidateQueue.data?.total ?? null}
+        imageSetCount={byAction?.APPROVE_IMAGE_SET ?? null}
+        copyCount={byAction?.APPROVE_COPY ?? null}
+        conflictCount={byAction?.RESOLVE_CONFLICT ?? null}
+        onPick={(next) => urlFilters.patch({ filter: next })}
+      />
+
       <Card
         size="small"
         title="逐件快审"

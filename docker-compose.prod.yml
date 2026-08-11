@@ -14,6 +14,30 @@
 # **这份文件在交付时没有被验证过**(打包环境无网络、装不上 node_modules)。
 # 第一次用它之前先跑一次 `make fe-build`,那一步会把类型错误和构建错误暴露出来。
 
+# 浏览器登录的三项,生产必填 —— **这不是加严,是把已经存在的强制搬到看得见的地方。**
+#
+# `config._check_browser_auth` 早就规定:非 local 环境三项配不全**直接抛错、
+# 进程起不来**。而这份 overlay 原来一个字都没提它们,于是部署的人遇到的是:
+# `docker compose up -d` 报成功、backend 容器起来又退出、退出又重启,
+# 日志里那句「ADMIN_PASSWORD 为空」被淹在几十行启动输出里,而 `ps` 只显示
+# Restarting。全仓也没有任何一份文档提过这三个名字(本轮一起补进 README)。
+#
+# `:?` 把这件事提前到 `docker compose up` 那一刻:变量没设就根本不会创建容器,
+# 消息直接打在部署者的终端上。这和上面 POSTGRES_PASSWORD 是同一条理由,
+# 也是这份文件文件头第 1 条写的那句「启动失败是个好错误」。
+#
+# 三个服务都要:worker 与 beat 同样构造 Settings,同样会被那条检查拦住 ——
+# 只给 backend 加的话,表现是 API 起来了而任务队列在悄悄重启。
+x-browser-auth: &browser-auth
+  # 两个密码**不能相同**(config 那边也拦):相同等于两个角色形同一个,
+  # 而界面、审计、403 全都按"这是两个人"在工作
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?生产必须设置 ADMIN_PASSWORD(浏览器登录的管理员密码)}
+  OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:?生产必须设置 OPERATOR_PASSWORD,且不能与 ADMIN_PASSWORD 相同}
+  # 至少 32 字符。生成:python3 -c "import secrets;print(secrets.token_urlsafe(48))"
+  # **多机部署各节点必须是同一把** —— 签名 Cookie 是无状态的,各签各的会让
+  # 用户"隔一次请求就掉线";而换掉它等于把所有人当场登出
+  AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?生产必须设置 AUTH_SESSION_SECRET(至少 32 字符,多机部署各节点必须相同)}
+
 services:
   # R1-37:**生产不许回落到弱默认口令。**
   #
@@ -30,6 +54,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?生产必须显式设置 POSTGRES_DB}
 
   backend:
+    # `environment` 按键合并,不是整段替换 —— 基座那四项(POSTGRES_HOST 等)
+    # 原样保留,这里只是往上加三项
+    environment: *browser-auth
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -53,12 +80,14 @@ services:
       - secrets:/data/secrets
 
   worker:
+    environment: *browser-auth
     # 同 backend:不 override 的话基座的 ./backend:/app 会原样合并进来(A45-#6)
     volumes: !override
       - storage:/data/storage
       - secrets:/data/secrets
 
   beat:
+    environment: *browser-auth
     # 同上
     volumes: !override
       - storage:/data/storage

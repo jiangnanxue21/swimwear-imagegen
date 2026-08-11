@@ -1,3 +1,657 @@
+# 2026-08-11 a48 交接:a47 自审复核 —— 交付的树跑不过前端第一道门禁
+
+> 决策记在 `docs/DECISIONS.md` §3.73。下方 a46-phase6 交接紧接着,保留为历史记录。
+
+## 本轮不是新需求,是复核 a47 并焊上两条缝
+
+先说结论,因为它不好看:**a47 交付出去的这棵树,`npm run typecheck` 会红。**
+`components/AppLayout.tsx` 的 `WarningOutlined` 是死 import,从 a46-phase6
+删掉 `sharedActor` 告警横幅那一刻起就死在那里,而离线门禁**结构上看不见它**。
+
+a47 自己没做错什么:它没动那个文件,而它能跑的门禁全绿。这正是问题 ——
+发现者只能是「有人恰好在联网机器上跑了一次前端门禁」,而这棵树上多数轮次
+没有那样一台机器。a46-phase6 自审时**专门去找**死 import,找到两处,漏了第三处。
+
+## 开工前先记下基线(§9 那条规矩:分清"我改红的"和"本来就红的")
+
+    纯测试                  2788/2788,0 失败,10 条缺依赖跳过
+    make audit-anchors      565/565(33 份脚本)
+    make audit-guards       653 个守卫,反向断言窗口封闭
+    make audit-doc-refs     活文档路径引用全部指得到
+    make verify-imports     489 个文件全部解析得通
+    make verify-sample-data 10/10
+    make verify-delivery    18/19(唯一 FAIL 是「不是 Git 工作树」,解包目录跑不了)
+    frontend syntax-check   97/97 —— **而它当时只解析语法**
+
+## 改了什么
+
+    frontend/tools/syntax-check.mjs   加第二遍:死 import(走 TS 的 AST,不走正则)
+                                      覆盖面 src -> src + tests(tsconfig 的 include
+                                      本来就是两棵,原来那句"离线绿了"在 tests 上
+                                      从来没成立过)
+    frontend/src/components/AppLayout.tsx   删掉死 import,留墓碑注释
+    frontend/CLAUDE.md + AGENTS.md    门禁一节写清 syntax-check 是那五条的**离线替身**
+                                      与它仍验不到什么(两份逐字一致)
+    Makefile                          check-offline 的注释与两处 SKIP 文案跟上新口径
+    app/scripts/provider_baseline.py  显式 override_plan=True —— 见下一节
+    app/scripts/smoke_test.py         回读出参,被方案接管时如实打 note(不 fail)
+    tests/pure/test_a48_...           3 条:每个调用方必须表态 / 基线必须绕 / 反平凡
+    docs/DECISIONS.md §3.73           三条结论 + 本轮验不到什么
+
+## a47 改的是一个函数的入参语义,受影响的是它全部调用方
+
+这一条比死 import 值钱。a47 §5 让方案接管出图参数是对的,但它把
+`create_task` 的 `provider` / `model_template_id` / 一轮张数 / 提示词
+从「调用方说了算」改成了「方案在的时候方案说了算」——而 a47 只跟了一个调用方。
+
+漏掉的是 `provider_baseline.py`:SPU 上有 ACTIVE 方案时,两条腿的 `provider=`
+**双双**被换成方案里那一个,而脚本照旧打印一张对比表。不报错,答案是假的。
+`LOCAL_MANUAL_TEST.md` §4.6 的 §5 验收第一步正是「配一份 ACTIVE 方案」,
+照着文档走一遍 `make baseline` 就废了。
+
+`smoke_test.py` 是同一件事的另一面而结论相反(冒烟要测运营真实走的路,
+所以**不**绕方案,改成如实报出被接管)。两者的取舍写在 §3.73 第二节。
+
+## 变异验红:六条,全部按预期
+
+守卫必须证明它会红,否则加了等于没加。用 copy/restore 做,不用反向替换 ——
+**第一次尝试就是在这里翻的车**,值得记一笔:`sed 's/...$/'` 在 CRLF 文件上
+锚点根本不匹配,而 sed 不报错;于是"变异"没生效、测试照旧全绿,
+差一点被读成"守卫不设防"。这与 `audit_anchors.py` 防的是同一件事 ——
+**一个没命中的锚点和一个没有锚点是一回事**,所以现在变异脚本先断言命中数为 1。
+
+    B  删掉 provider_baseline 的 override_plan=       变红 2 条(表态 + 基线必须绕)
+    C  把它改成 override_plan=False                   变红 1 条(只有基线那条)
+    E  删掉 HTTP 接口那一处的 override_plan=          变红 1 条(只有表态那条)
+    D  SERVICE_ALIASES 清空                           变红 2 条(反平凡用例先响)
+    F  把 WarningOutlined 加回 AppLayout              syntax-check 退出码 1,点名文件与行
+    G  在 tests/ 下种一个死 import                    同上 —— 证明第二棵子树真在射程里
+
+C 与 E 分别只红一条,这是设计:两条守卫钉的是不同的东西(有没有表态 /
+基线表成哪个值),它们如果总是一起红,其中一条就是多余的。
+
+## 第二批:同一条缝的第三面,以及我自己改出来的第二份真相
+
+第一批交完之后又过了一遍,补了三件:
+
+    frontend/tools/syntax-check.mjs   第三遍:断 import —— 本地模块里根本没有
+                                      这个导出名。后端 verify_imports.py 早就在
+                                      check-offline 里,**前端一直没有对侧**
+    tests/pure/test_a45_batch11_...   那条冒烟守卫的判据补两条(见下)
+    docs/PROVIDER-FASHN.md            基线脚本绕过方案这件事,写在用它的人会看的地方
+
+**第三遍扫下来是干净的,一处都没有。** 加它的理由不是发现了缺陷,是
+「这一次没漏」和「有东西在看」是两件事 —— a46-phase6 与 a47 各做过一次
+横跨九个文件的删除,而那类改动漏掉调用点时,离线没有任何东西会红。
+
+**第二件是我自己造成的,值得单独说。** `test_smoke_exercises_the_license_gate_
+instead_of_the_bypass` 的文档字符串说「冒烟真的执行了 §10.5/§11 四道检查」,
+而它的判据只有"请求体里传没传 model_template_id"。a47 之后这句话变成有条件
+成立(条件是那只 SKU 的 SPU 上没有 ACTIVE 方案)。我给 smoke 加了回读却没有
+同时加判据的话,就会留下**一条绿着的守卫说着一件不一定成立的事** —— 正是
+§3.70 点名的形状,而这一次是我在修那类问题的同一轮里制造的。已同批改写。
+
+第二批变异验红,五条:
+
+    H  具名导入一个不存在的导出        BROKEN,点名模块与名字
+    I  指向一个不存在的本地文件        BROKEN,点名"找不到对应文件"
+    K  默认导入一个没有 default 的模块  BROKEN,点名 default(as X)
+    J  把 types.ts 的 AUDIENCES 改名   BROKEN ×3 —— 三个调用点全部点到,
+                                       这正是"改名漏了调用点"的真实形状
+    L  删掉 smoke 的回读               冒烟守卫变红
+    M  删掉"由生成方案接管"那句话       同上,红在另一行
+
+## 收工复跑(全绿)
+
+    纯测试                  2791/2791(+3),0 失败,10 条缺依赖跳过
+    make audit-anchors      565/565
+    make audit-guards       654 个守卫,窗口封闭
+    make audit-doc-refs     全部指得到
+    make verify-imports     490 个文件
+    make verify-sample-data 10/10
+    make verify-delivery    18/19(同基线,仍是那条 Git 工作树)
+    frontend syntax-check   115/115 files clean(语法 + 死 import + 断 import;
+                            文件数从 97 涨到 115 是因为纳入了 tests/,不是新增了文件)
+
+## 没做的,和为什么 —— 这一节比上面那一节重要
+
+**前端四条(typecheck / lint / Vitest / build)与 Playwright 一条都没跑。**
+无网络、装不上 `node_modules`。所以本轮修的那一行死 import 会让 typecheck
+变红这件事,依据是 `tsconfig.json` 的 `noUnusedLocals: true` 与 TS 的成文行为,
+**是推断,不是一次真实的红**。同理,新加的第二遍虽然自己做过变异验红,
+它与 tsc 的判定是否逐条一致,也要等一台联网机器。
+
+复跑:
+
+    cd frontend && npm ci && npm run typecheck && npm run lint && npm run test && npm run build
+
+**改过的两个脚本一次都没运行过。** `provider_baseline` 与 `smoke_test` 都要
+真库 + Redis + worker 才跑得起来,本机三样都没有(且按仓库约定,真实基础设施
+验证须由用户明确触发)。它们改的是「排障工具会不会给出假答案」——
+而假答案正是在排障时最贵,所以接第一台有库的机器时建议把这两条排在前面:
+
+    make baseline SKU=SW-001-BLK-S P=mock,fashn   # 先给该 SPU 配一份 ACTIVE 方案
+    make smoke                                     # 看有没有那条「由方案接管」的 note
+
+**a47 自己欠的账一条都没还**:`tests/test_a47_plan_governs_db.py`(§5.5 四条
+等式 + override 分支 + 403)仍是写了没跑;PRD 验收 #11(实际出图角度集合 ==
+`gp.required_angles`)在这个基线上落在提示词而不是数据上,要验到它得给候选图
+加角度标注 —— 那仍是另一轮的事(§3.72 五)。PRD 验收 #22(Mock / Simulator
+happy path 完整回归)同样未执行。
+
+**我最不放心、建议第一个看的两处**:
+
+    syntax-check 第二遍的误报面   属性名位置排了四种(属性访问 / 属性赋值 /
+                                  属性签名 / 限定名右半边)。全仓 115 个文件
+                                  当前零误报,但这个清单是我按 TS 的节点类型
+                                  列的,不是穷举出来的 —— 第一次有人被它冤枉时,
+                                  先看是不是第五种位置
+    smoke_test 的回读             `TaskOut` 有 `provider` 与 `model_template_id`
+                                  两个字段,我按 schema 读的,没有跑过一次真实
+                                  响应。字段名对不上时表现是"永远不打那条 note",
+                                  而不是报错
+
+---
+
+# 2026-08-11 a46-phase6 交接:登录 PRD v1.3 的 Phase 3 + Phase 4
+
+> 决策记在 `docs/DECISIONS.md` §3.71。下方 phase5 交接紧接着,保留为历史记录。
+
+## 先说清楚本轮做了 PRD 的哪一段
+
+PRD v1.3 的基线是 `20260810-1230`,而这棵树已经落了 a46-phase1~5。逐条核对之后,
+**Phase 0/1/2 已经在树上**(5 个 env + 启动校验、itsdangerous、SessionMiddleware
+与中间件顺序门禁、login/logout/whoami、Session 优先、精确匿名白名单、conftest
+夹具、LoginPage、`withCredentials`)。本轮做的是 **Phase 3 与 Phase 4**:
+
+    Phase 3  清理 Token UI + 菜单角色收敛 + 三处 401/403 文案
+    Phase 4  §41 的门禁逐条改写 + 文档四处 + DECISIONS 一条
+
+验收总表 34 项里,本轮关掉的是 #16 #17 #21 #22 #24 #25 #26 #29 #30 #33。
+
+## 改了什么
+
+    frontend/src/api/client.ts        删 Token 存储链、请求拦截器、adminHeaders、
+                                      authRejected 组;401/403 三处文案改写
+    api/{settings,prompts,generation,batch}.ts   adminHeaders() 调用点全删
+    hooks/useIdentity.ts              enabled 收敛成 !health.isError;isAdmin 只认
+                                      后端;删 usingAdminFallback 与口令订阅
+    components/AppLayout.tsx          NavGroup.adminOnly;visible 按 isAdmin 过滤;
+                                      顶栏「系统设置」只给管理员;删 sharedActor 告警
+    components/ColdStartBanner.tsx    只剩「后端不可用」一支
+    pages/SettingsPage.tsx            删口令录入卡与 saveToken;operator 进来是 403
+    App.tsx                           「系统管理」标 adminOnly;三段注释翻正
+    8 条纯层门禁                      4 改写 / 3 删除留墓碑 / 1 翻转(见 §3.71 第三节)
+    3 份前端测试                      nav-and-url-filters 反向门禁翻转;
+                                      client.test.ts 删拦截器组、改 401 文案断言;
+                                      error-and-cold-start 删三条口令用例、补一条
+    2 条变异锚点                      mutate_a46_phase5.py C2 / mutate_batch14_4.py Q11
+    文档四处 + DECISIONS §3.71
+
+## 本轮离线验证复跑
+
+    纯测试                  2755/2755,0 失败,10 条缺依赖跳过
+    变异验红                9/9 + 2/2(C3 那条本轮翻了方向:功能落地之后,
+                            原来的反向变异被抽空了,顺带把「已裁剪」的判据
+                            从 or 收紧成 and —— 声明了却没人读的标记等于没有)
+    make audit-anchors      565/565(33 份脚本)
+    make audit-guards       反向断言窗口封闭
+    make audit-doc-refs     活文档路径引用全部指得到
+    make verify-imports     全部解析得通
+    make verify-sample-data 10/10
+    make verify-delivery    18/19(唯一 FAIL 是「不是 Git 工作树」,解包目录跑不了)
+    frontend syntax-check   96/96
+
+## 交付后自审(同轮补):七处,五处是我自己造成的
+
+按"反思这轮改动"重新过了一遍,列出并已修:
+
+    1  client.test.ts 的 401 用例被我改成必红      断言「重新登录」,而单测环境里
+                                                  /health 从不返回,authMode 停在
+                                                  默认 token,走的是免登录分支。
+                                                  改为钉免登录支的负向不变量,
+                                                  会话支的文案改由纯层守卫接(见 4)
+    2  error-and-cold-start 我新增的用例引用了      Wrapped / 裸 render 都不存在,
+       两个不存在的帮手                            文件里真实的是 renderBanner()。
+                                                  已按同文件其余用例的写法重写,
+                                                  beforeEach 顺带补上 sessionAuth 复位
+    3  browser-login.test.tsx 的 mock 还揣着       usingAdminFallback: false ×2,
+       已删字段                                    接口里这个字段本轮删了。已清
+    4  会话文案「请重新登录」没有任何可跑的守卫    新增 test_the_session_401_copy_
+                                                  sends_people_to_login...(剥注释判,
+                                                  历史引用放行),变异 D3 验红
+    5  两处死 import                              ColdStartBanner 的 Space、
+                                                  SettingsPage 的 brandVars ——
+                                                  typecheck 会红而 syntax-check 看不见
+    6  client.ts 三段注释仍在解释旧文案            "口令模式下该说到设置页核对口令"
+                                                  一族;AUTH_FORBIDDEN 分支的注释
+                                                  还在说"口令是对的"。全部改写 ——
+                                                  正是 phase5 修的那类病,自己又犯了
+    7  SettingsPage 的 identity 注释说的是         那句 Alert 随录入卡删了,identity
+       一个已删除的用途                            现在服务 403 早退。已改写并留台账
+
+另有一处**行为记录**(非缺陷,写下来防误会):后端不可用且浏览器**冷加载**时,
+横幅只显示运营话术(不带命令)—— isAdmin 只认 whoami,而后端挂了 whoami 答不了。
+已登录页面里后端中途挂掉时,react-query 的缓存身份仍在,管理员照旧看到命令。
+这与 phase2 会话模式的行为一致,不是本轮引入的回归。
+
+## 没做的,和为什么 —— 这一节比上面那一节重要
+
+**前端四条(typecheck / lint / Vitest / build)与 Playwright 一条都没跑。**
+机器没有网络,`npm ci` 装不上。而本轮**动了 9 个 `.tsx` / `.ts` 源文件的可执行
+代码**(不是注释)——这和 phase5 那种"只改注释"的情况完全不同。
+`syntax-check.mjs` 96/96 只证明它们**解析得通**,证明不了类型、渲染与用例。
+
+具体没被执行、且本轮**新改动的**前端用例:
+
+    tests/component/nav-and-url-filters.test.tsx   翻转后的两条(operator 看不到管理入口)
+    tests/unit/client.test.ts                      删掉拦截器组之后的其余各条
+    tests/component/error-and-cold-start.test.tsx  删三条、新增一条之后的整份
+    tests/component/browser-login.test.tsx         13 条,phase2 起就没跑过
+    tests/e2e/login.spec.ts                        3 条,同上
+
+复跑:
+
+    cd frontend && npm ci && npm run typecheck && npm run lint && npm run test && npm run build
+    cd frontend && npx playwright install chromium && npm run e2e
+
+**我最不放心、建议第一个看的三处**:
+
+    SettingsPage 的 403 早退      它在 `identity.who && !identity.isAdmin` 时直接
+                                  return,而那一页原来靠下面的 hooks 顺序渲染。
+                                  早退在 hooks 之后,应当没问题 —— 但没跑过
+    AppLayout 下拉的展开语法      「系统设置」那一项改成了 `...(isAdmin ? [...] : [])`
+                                  的展开写法,antd 的 items 接受它,但 TS 的字面量
+                                  推断在这种展开下偶尔要显式标注
+    error-and-cold-start 新增的那条  自审后已改用文件里真实的 renderBanner() 与
+                                  container.textContent 判空,并显式复位
+                                  sessionAuth —— 但整份文件仍然一次没跑过
+
+**PRD §23 的 `RequireAuth` 组件没有做**,理由在 §3.71 第四节:行为上现有实现
+已满足 §23 每一条,搬动它要重写 13 条从未执行过的用例。这是一处**显式的
+范围偏离**,不是遗漏。
+
+真库 pytest、Alembic 升降级、Redis / Celery 集成同样未执行(本地协作约束)。
+PRD §42 那 25 条后端测试里,涉及 Session 的绝大部分在 `tests/test_auth_session.py`
+里已有,但**它需要 pytest 与真实依赖,本机跑不了**。
+
+---
+
+# 2026-08-11 a46-phase5 交接:文档审核收口 —— 15 处说法与代码对不上
+
+> 决策记在 `docs/DECISIONS.md` §3.70。下方 phase4 交接紧接着,保留为历史记录。
+
+## 本轮不是加功能,是把「说的」和「做的」对齐
+
+phase4 的离线门禁全绿、数字属实,我复跑过一遍一条不差。本轮查的是那些数字
+**管不到**的那一层,也就是 `audit_doc_refs.py` 自己承认看不见的:路径指得到,
+但那句话说错了内容。逐条证据在 §3.70,按后果分四类:
+
+    照着做会当场失败   MANUAL-ACCEPTANCE §3.1 的 UAT 基线起不来(缺浏览器登录
+                       三项,而 §5.1 跑的是 `${KEY:?}` 的生产 overlay);§5.3 的
+                       鉴权矩阵还是 Header 口令那套;DEPLOYMENT 全文「登录」0 次,
+                       §九仍写「MVP 没有账号体系,唯一的防线是网络层」
+    说反了             App.tsx / AppLayout.tsx / useIdentity.ts / auth.py 四处仍按
+                       「菜单按角色隐藏」写,而那一版从来没有落地;SETTINGS.md §三
+                       的「不新建 app/api/auth.py」挂在它反对的那个文件旁边
+    宣告不存在的守卫   health.py 与 client.ts 都说 `test_browser_login_frontend.py`
+                       钉着这件事 —— 全仓没有这个文件
+    冻住的数           文档地图「13 份」表里 15 行、「29 份」实际 9 份;STATUS 的
+                       「12 条 Vitest」是 phase2 自审当场改掉的第一版数;README 的
+                       「15 个硬错误代码」实际 21;「30 张素材」实际 51,同一句话
+                       在五份文档里各冻一份;三份 AGENTS.md 是 CLAUDE.md 的旧副本
+
+顺带查出一处门禁自己的射程问题:`DECISIONS.md` 的 §3.63~§3.69 用 `## 3.6x` 写,
+而「决策日志编号不重复」的正则是 `^##\s+§` —— 最新七节撞号了它也看不见。已统一。
+
+## 改了什么
+
+    docs/DEPLOYMENT.md        §二加生产 overlay 与三把启动键;§三表加三行;
+                              §九安全清单改写;「关于没有账号体系」整节重写成
+                              「有登录,但没有用户表」,列出三条仍然成立的限制
+    docs/MANUAL-ACCEPTANCE.md §3.1 env 补三项 + 两条说明;§5.3 拆成「浏览器走登录页」
+                              与「脚本走请求头口令」两张表;示例条数不再写死
+    docs/SETTINGS.md          §三的论证保留原文并说明它被什么推翻了、哪一半没落空
+    docs/STATUS.md            文档地图 13→19 并补四份活文档(LOCAL_MANUAL_TEST /
+                              MANUAL-ACCEPTANCE / HANDOVER / AGENTS);29→9;
+                              「12 条 Vitest」改成不写数并指向本文 phase2 一节
+    README.md                 接口表补 `/auth/*` 三条与七组「表外接口组」;页面表
+                              11→23 行并按侧栏四组重排(**首页是 `/today` 不是
+                              `/dashboard`**);目录结构补 8 个包;示例条数、硬错误
+                              条数、env 分组数一律改为不写死;FASHN 自检补 `X-Admin-Token`
+    四个前端/后端注释          菜单收敛那一族改成「那一版没有落地」;两处幽灵守卫
+                              改指 `test_a46_phase2_browser_login_seam.py`
+    tools/pack.sh             两处 `test_delivery_hygiene.py` 改指 verify_delivery
+    两处纯测试注释            `test_a45_batch27_seven_steps.py` 改指 batch26 那份
+    CLAUDE.md ×3 / AGENTS.md ×3  AGENTS 整份同步成 CLAUDE 的逐字副本;根 CLAUDE.md
+                              的目录块加一行说明这件事
+    docs/DECISIONS.md         §3.63~§3.69 标题规范化;新增 §3.70
+
+## 新增守卫与变异验证
+
+`tests/pure/test_a46_phase5_doc_truth.py` 7 条 + phase2 那条扩窗口(从「只钉 README」
+扩到部署者会打开的三份 —— 翻掉的理由在 §3.70 第三节)。变异 **11/11 验红**,
+分两份脚本:
+
+    tools/mutate_a46_phase5.py              9/9   钉 test_a46_phase5_doc_truth.py
+    tools/mutate_a46_phase5_deploy_docs.py  3/3   钉 phase2 套件(启动键新旧窗口各一,
+                                            会话文案一条 —— phase6 自审补)
+
+拆两份不是洁癖:第一版用 `SUITE_FILTER = "a46"` 一个子串盖住两个套件,
+`make audit-anchors` **当场拦下** —— 子串会让一条变异被别的套件的守卫抓住,
+而报告记在这份脚本头上,归因是假的。本轮主题就是「说的和做的要对上」,
+在自己的变异脚本上放过它说不过去。
+
+## 本轮离线验证复跑(全绿)
+
+    纯测试                  2758/2758,0 失败,10 条缺依赖跳过
+    make audit-anchors      564/564(33 份脚本,含本轮新增的两份)
+    make audit-guards       648 个读源码守卫,反向断言窗口封闭
+    make audit-doc-refs     活文档路径引用全部指得到
+    make verify-imports     486 个文件全部解析得通
+    make verify-sample-data 10/10
+    make verify-delivery    18/19(唯一 FAIL 是「不是 Git 工作树」,解包目录跑不了,
+                            与 phase2 同)
+    frontend syntax-check   96/96
+    tools/pack.sh           打包 + 复验通过,清单随包留档
+
+## 没做的,和为什么
+
+机器**仍然没有网络**。前端四条(typecheck / lint / Vitest / build)与 Playwright
+一条都没跑。本轮动了 4 个 `.tsx` / `.ts` 文件,但**改的全是注释与文档字符串,
+没有一行可执行代码** —— syntax-check 96/96 能证明它们仍解析得通,不能证明类型
+与用例。phase2 留的那份验证缺口(21 条 Vitest + 3 条 Playwright + 2 条 pytest)
+原样欠着,清单与复跑命令见下面 phase2 那一节。
+
+真库 pytest、Alembic 真库升降级、Redis / Celery 集成同样未执行(本地协作约束:
+需用户明确指令)。具名审计(users 表)照旧欠着。
+
+## 建议下一个人先看的两处
+
+    1. 文档地图那条守卫只钉「数和行数一致」,不钉「有没有漏收活文档」——
+       漏收要靠人。加文档时顺手看一眼 §七。
+    2. `test_no_live_comment_claims_a_guard_file_that_does_not_exist` 判的是时态,
+       靠一张过去式标记表。写注释时如果引用一个已删掉的文件,记得带上
+       「原先 / 已并入 / 当年」之类的词,否则它会红 —— 那是刻意的。
+
+---
+
+# 2026-08-10 a46-phase4 交接:打包假阴性定位收口 + 离线全量复验
+
+> 决策记在 `docs/DECISIONS.md` §3.69。下方 phase3 交接紧接着,保留为历史记录。
+
+## phase3 留的那桩悬案,查出来了,修掉了
+
+phase3 交接说:`pack.sh` 偶发误报"缺少必备文件",清单是全的、包是好的、
+那一行就在清单里,复现率约 3/12,"根因仍然没查出来,这里不编一个"。
+
+根因是四件各自无害的事叠加:`grep -q` **命中即退**;清单 31.7 KB 经
+bash printf 分多次写入管道;grep 先退、printf 没写完 → SIGPIPE(141);
+`set -o pipefail` 让 141 压过 grep 的 0,`if !` 把它读成"没找到"。
+所以受害者全是清单靠前的文件、诊断三条全绿 —— grep 其实**命中了**。
+逐进程状态抓到过现行:printf=141、grep=0。完整推理、复现数据与一般化
+见 §3.69。上一轮那份 listing.txt 诊断没白加:它把范围收窄到比对路径上,
+这次就是沿着那条缝找到的。
+
+    同形最小化 400 次      修前 38 次假阴性(退出码全 141);修后 0 次
+    真实 pack.sh 连打      修前 15 次中 3 次失败(受害者与历史一致);
+                           修后 40 次全过
+    反向路径               必备文件真缺失 → 正确报缺、删包、清单留档;
+                           故意拆掉排除规则 → 复验逐条报禁品、删包
+
+改动三处代码:
+
+    tools/pack.sh                    复验一律读落盘清单文件,不吃管道;
+                                     清单从"失败才落盘"改为每次都落盘
+                                     (`<包名>.zip.listing.txt`,与包同目录)
+    tools/pack.ps1                   本无此病(内存 List 比对,无管道),
+                                     只同步"清单每次落盘",证据口径一致
+    backend/tools/verify_delivery.py 守卫 +2:正向钉修后的形状,反向禁止
+                                     管道喂 grep -q;两个方向都做过变异验证
+
+## 本轮离线验证复跑(全绿)
+
+    纯测试                 2751/2751,0 失败,10 条缺依赖跳过
+    make audit-anchors     553/553(31 份脚本)
+    make audit-guards      638 个读源码守卫,反向断言窗口封闭
+    make audit-doc-refs    活文档路径引用全部指得到
+    make verify-imports    483 个文件全部解析得通
+    make verify-sample-data 10/10
+    make verify-delivery   19/19(本机有 git 工作树,phase2 那条 18/19
+                           的唯一 FAIL 在这里不复现)
+    frontend syntax-check  96/96
+    tools/pack.sh          正向 40 连打全过 + 两条反向路径(见上)
+
+## 没做的,和为什么
+
+打这一批的机器**仍然没有网络**。phase2 留的那份验证缺口原样欠着:
+21 条 Vitest + 3 条 Playwright + 2 条 pytest(auth_mode)一条都没能执行,
+清单与复跑命令见下面 phase2 那一节 —— `npm ci` / `pip install` /
+Playwright 浏览器在本机全部装不上。这个缺口只能等一台有网络或有
+预装依赖的机器,不是这轮不想还。
+
+具名审计(users 表)照旧欠着,见 phase2「下一步建议」第 3 条。
+
+## 交付物
+
+本包用**修后的** `pack.sh` 打出,包旁附 `*.zip.listing.txt` 清单留档。
+
+---
+
+# 2026-08-10 a46-phase3 交接:让浏览器登录能被部署、被验收
+
+> 决策记在 `docs/DECISIONS.md` §3.68。下方 phase2 交接紧接着,保留为历史记录。
+
+## 本轮修的是"两轮都落完了,而它仍然部署不了"
+
+`config._check_browser_auth` 规定非 local 环境三项配不全**直接起不来**。
+而 phase1 + phase2 落完之后:
+
+    docker-compose.prod.yml   一个字都没提这三项
+    全仓 .md                  `ADMIN_PASSWORD` 出现 0 次
+
+按 README 部一次生产,拿到的是一个反复重启的后端,而 `docker compose up -d`
+打印成功。修法与理由见 §3.68,一句话:把已经存在的强制**搬到看得见的地方**。
+
+    docker-compose.prod.yml   backend/worker/beat 三个服务用 `${KEY:?消息}`
+                              显式要求三项(worker/beat 也构造 Settings ——
+                              只给 backend 加的表现是"页面能开,任务队列在
+                              悄悄重启")
+    README.md                 新增「浏览器登录」一节:两个账号、三项配置、
+                              怎么生成密钥、换密钥=全员登出、多机必须同一把、
+                              滑动过期不是绝对存活时长、设置页那两把是机器凭据
+    LOCAL_MANUAL_TEST.md      新增 §4.5:本机怎么开、怎么确认、要走的六步,
+                              外加一条容易误判的现象(会话过期不会立刻跳,
+                              要等下一次请求撞 401)
+    纯层守卫 +3               从 `_check_browser_auth` 本身解析必填键,要求
+                              compose 逐个 `:?` 且三个服务都引到;同一份键
+                              必须在 README 出现过。两条都做过变异验证
+
+### 顺带:一次没能复现的打包失败,以及它留下的东西
+
+本轮打包时 `pack.sh` 报了一次 `!! 交付包缺少必备文件:.gitattributes` 并按设计
+删了包。**而那个文件就在工作树里**,紧接着连打三次全部通过,至今没有复现出来。
+上一轮也遇到过一次同样的中断,当时我用 `tail -3` 截掉了输出,只看到删包的收尾
+文字,**误判成"包里有禁品"** —— 两个分支共用同一段收尾话术。
+
+加上诊断之后它又报了一次(这回是 `.github/workflows/ci.yml`),而诊断把范围
+**收窄到了一处**:
+
+    清单条目数   836 —— 与**成功那次一模一样**(unzip -Z1 含目录条目)
+    包的完整性   unzip -t 通过
+    那个文件     在工作树里存在;在成功包的清单里排第 5 行
+    文件名编码   全 ASCII,locale 是 POSIX,grep 不会把清单当二进制
+    排除模式     126 条,逐条比过,没有一条命中它
+
+也就是说:**包是好的、清单是全的、要找的那一行就在清单里,而 `grep -qxF`
+没匹配上。** 问题不在排除规则、不在 zip、不在磁盘(还剩 9.9G),
+而在 `LISTING=$(unzip -Z1 ...)` 到 `grep -qxF` 这一小段路径上。
+两次报的都是清单最前面几行的文件。复现率约 3/12。
+
+**根因仍然没查出来,这里不编一个。** 能做的三件都做了:失败时打印条目数与
+完整性、指出该文件是否在工作树、并把清单落到 `$OUT.listing.txt`(包会被删,
+这份不会)—— 下一次撞上,那份文件足以一次定位。
+
+`pack.ps1` 同步了前两条(它用 .NET 的 ZipFile,失败面不同,但"分不清这两种"
+是同一个问题)。
+
+**如果你撞上同样的事,请把完整输出和那份 listing.txt 留下来** —— 不要像我
+第一次那样用 `tail` 截掉,那次我因此把它误判成了"包里有禁品"。
+
+**本轮其余部分全部可离线验证** —— 改的是编排文件、文档和纯层守卫,没有前端代码。
+compose 用 PyYAML 解过(含 `!reset` / `!override` 自定义标签),确认锚点在
+backend/worker/beat 三处都展开成那三个键。
+
+上一轮那份验证缺口(21 条 Vitest + 3 条 Playwright + 2 条 pytest 未执行)
+**依然原样欠着**,清单见下面 phase2 那一节。
+
+---
+
+# 2026-08-10 a46-phase2 交接:浏览器登录的前端接线
+
+> 决策记在 `docs/DECISIONS.md` §3.67(后端那一半在 §3.66)。
+> 下方 2026-08-09 及更早的交接保留为历史记录。
+
+## 先读这一节:本轮有一个真实的验证缺口
+
+打这一批的机器**没有网络**。`npm ci` 装不上,`pip install fastapi` 也装不上,
+Playwright 浏览器下不来。所以:
+
+    跑过并绿      纯测试 2747/2747(0 失败,10 条缺依赖跳过)
+                  make audit-anchors 553/553
+                  make audit-guards / audit-doc-refs / verify-imports / verify-sample-data
+                  mutate_batch14_4.py 20/20 条变异验红
+                  frontend/tools/syntax-check.mjs 96/96
+                  verify_delivery.py 18/19(唯一 FAIL 是「不是 Git 工作树」,
+                                            解包目录跑不了它,属预期)
+                  tools/pack.sh 正反两次(见下面「打包脚本」一节)
+
+    **一次都没跑**  npm run typecheck / lint / vitest / build
+                  pytest(含真库那一批)
+                  npx playwright test
+
+本轮主体是**前端**,所以这个缺口不小。具体没被执行的新增用例(数字是数出来的,
+不是估的 —— 第一版这里写"12 条"而实际是 13,自审时改正):
+
+    frontend/tests/component/browser-login.test.tsx    13 条
+    frontend/tests/unit/client.test.ts                  6 条(自审补的那一组)
+    frontend/tests/component/error-and-cold-start.test.tsx  2 条
+    frontend/tests/e2e/login.spec.ts                    3 条
+    backend/tests/test_auth_session.py                  2 条(auth_mode 那两条)
+
+纯层新增的 8 条(`test_a46_phase2_browser_login_seam.py`)**跑过并绿**,
+而且逐条做过变异验证 —— 它们不在上面这份清单里。
+
+复跑:
+
+    cd frontend && npm ci && npm run typecheck && npm run lint && npm run test
+    cd frontend && npx playwright install chromium && npm run e2e
+    cd backend  && pytest tests/test_auth_session.py
+
+几个我自己最不放心、建议第一个看的点:
+
+    getByLabelText('用户名')     antd `Form.Item` 的 label 与 input 是靠生成的
+                                 id 关联的。这个 Form 没有 `name`,我按 id 直接
+                                 是字段名推的 —— 定位不到的话改成 `getByPlaceholderText`
+    Dropdown 展开时序            退出登录那两条要先点开顶栏身份区再点菜单项,
+                                 jsdom 里 rc-trigger 的 portal 有没有渲染完,
+                                 我验不了。红的话多半是要加 `await screen.findByText`
+    e2e 的 page.getByLabel       同上,而且 Playwright 的 label 关联更严格
+
+## 本轮交付
+
+### 1. 打包脚本:`data/` 里的图片不再进包
+
+上一版交付包里躺着 `data/s1.jpg`(5.8 MB,占整包一半多)。那个目录不在
+`.gitignore` 里、全仓也没有任何代码或文档引用它 —— 也就是说没有任何机制拦着它。
+
+`tools/pack.sh` 新增 `IMAGE_FREE_DIRS` / `IMAGE_EXTENSIONS` 两个声明,排除侧与
+复验侧从同一份生成。**排的是扩展名,不是整个 `data/`**:将来往里放 README
+或参数样例仍然跟着交付走。大小写做了字符类展开(`jpg` -> `[jJ][pP][gG]`),
+因为 Info-ZIP 的 `-x` 在 Unix 上大小写敏感,写 `data/*.jpg` 的话 `data/S1.JPG`
+照样进包 —— 而复验侧如果照抄同一个模式,两边会**一起**漏。
+
+`tools/pack.ps1` 同步(PowerShell 的 `-like` 本身不区分大小写,那一侧不需要
+展开),两个新数组挂进了 `verify_delivery.py` 的 `paired_arrays` 表:改一侧
+不改另一侧当场红。那张表防的正是「Linux 排掉了、Windows 打出来的包里还有」。
+
+实测两次:
+
+    正向   s1.jpg / S1_UPPER.JPG / Mixed.JpEg / nested/deep.png / icon.SVG 全排掉;
+           data/ 目录条目与 data/README.md 保留。包体 10.5M -> 4.4M
+    反向   故意把排除侧那行删掉重打 —— 复验侧逐条报出禁品并**删包退出**。
+           也就是说第 2 步对这条新规则是真的在跑
+
+### 2. 浏览器登录的前端接线(phase2 主体)
+
+后端只加了一处接缝:`/health` 返回 `auth_mode`(`session` / `token`),
+取 `settings.browser_auth_configured` —— 和 `resolve_identity` 同一个属性。
+理由与备选见 §3.67 第一节。
+
+前端:
+
+    api/client.ts        withCredentials: true(**整条链路的最后一跳**)
+                         401(不含 403)触发会话失效信号
+                         describeError 的 401 尾巴按模式分两句话
+    hooks/useIdentity.ts enabled 从 hasToken 改成 (sessionAuth || hasToken);
+                         新增 sessionAuth / needsLogin
+    pages/LoginPage.tsx  新增。safeNext() 挡开放重定向;
+                         口令模式下不画表单,直说这里没有这条路
+    App.tsx              /login 挂成 AppLayout 的**兄弟**,不是子路由
+    AppLayout.tsx        needsLogin 时跳登录页并带 ?next=;顶栏加退出登录
+    ColdStartBanner.tsx  会话模式整条让位给登录页(那几句说的都是口令的事)
+    SettingsPage.tsx     一句「这两把不是你的登录密码」
+
+### 3. 顺手修的四条僵尸守卫(**不是本轮引入的**)
+
+打开交付包时纯层就有 3 条红、变异脚本 1 条锚点失效。清单与处理见 §3.67 第五节。
+删掉其中一条时露出一个洞(变异 Q1 从 RED 变 GREEN),已用「同一个 key 不出现
+在两组里」补上,`mutate_batch14_4.py` 回到 20/20。
+
+`docs/STATUS.md` 里两处跟着过期的说法(「「系统管理」只对管理员显示」)
+一并订正。
+
+## 自审发现并修掉的一个洞(本轮第二遍才看见)
+
+第一版把 401 会话失效信号**算出来了,而没有任何人订阅**。后果不是少一个功能,
+是"用着用着会话过期"这条路径整个不生效:身份探测挂着 60 秒 `staleTime`,
+后端 Cookie 过期之后前端手里那份"我是 operator"还能继续有效一分多钟 ——
+运营点什么都失败,而界面**不会把他送去登录页**,页面上也没有登录入口。
+
+三样东西当时是死的:`SESSION_EXPIRED_EVENT`(一个从没被 dispatch 过的事件名)、
+`isSessionExpired`(没有读者)、`onSessionExpiredChange`(没有订阅者)。
+
+而**两侧的用例全绿**。`browser-login.test.tsx` 把 `useIdentity` 整个 mock 掉了,
+它验的是"拿到 `needsLogin` 之后怎么办",洞在"`needsLogin` 永远不会变成真"。
+这正是本仓 §3.43 那一族,而我在给它加守卫的同一轮里又造了一个。
+
+修法:
+
+    接线   `useIdentity` 订阅信号,401 时 `resetQueries(['auth-probe'])`。
+           **不是** `invalidateQueries` —— 后者在重新请求失败时保留旧数据,
+           `probe.data` 还在、`needsLogin` 还是假,等于什么都没做
+    减法   删掉 `SESSION_EXPIRED_EVENT` 与 `isSessionExpired`(没有读者),
+           `isSessionAuth` 改成模块内私有(只有 `describeError` 用)
+    守卫   纯层加"信号必须有消费端"+"这两个死导出不许回来",两条都做过变异验证
+    用例   `tests/unit/client.test.ts` 加 6 条,**一个 mock 都不用**,
+           直接让真实响应拦截器跑:401 通知 / 403 不通知 / 匿名 401 不通知 /
+           连着两次只响一次(防死循环)/ 登录后清掉 / 成功请求让它落下来
+
+判定仍然只有一处:跳不跳登录页由 whoami 的回答决定,401 只是让人**再问一遍**。
+反过来"看见 401 就跳"会把一次偶发 401 变成一个能无限循环的动线。
+
+顺带修的一处 UX:登录页在 `/health` 回来之前不再画表单(改成骨架屏)。
+先画表单再改主意的代价是口令模式下人已经开始输入,然后整块被换掉。
+
+## 下一步建议
+
+1. **先在浏览器里走一遍**,再看别的。这一批的成色完全取决于此。
+2. 上面那三个定位点(getByLabelText / Dropdown 时序 / Playwright getByLabel)
+   如果红,多半是定位方式问题而不是功能问题 —— 改用例,别改实现。
+3. 具名审计仍然欠着(§3.66 第二节):浏览器登录只有 admin / operator 两个
+   固定账号。要按人追溯,下一步是「users 表 + 每人一个账号」,
+   **不是**回头去配 `OPERATOR_TOKENS`。
+
 # 2026-08-09 人工测试准入收口交接:身份先行、0054 异步识别、签名预览
 
 > 当前结论以 `docs/DECISIONS.md` §3.65、`docs/STATUS.md` 顶部与

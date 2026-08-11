@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -54,13 +56,29 @@ logger = get_logger(__name__)
 #: 现在默认是关的,要开放得显式加进这个列表 —— 于是"开一个匿名接口"
 #: 变成一次会出现在 diff 里的动作,而不是某个新路由忘了挂守卫。
 #:
-#: 目前只有两类:
+#: 目前只有四类:
 #:   /health      探针。编排系统不会带口令,而且它只回答"活着吗"
 #:   /media-files 私有素材代发。它自己验 URL 签名 —— 见 api/media_files.py
 #:                里关于 <img> 标签带不了自定义请求头的那段说明。
 #:                注意**不是** /media:素材库的增删改查在那个前缀下,
 #:                走正常的操作口令,不能被这条白名单顺带放开
-PUBLIC_PREFIXES: tuple[str, ...] = ("/health", "/media-files")
+#:   /auth/login  登录本身不能要求先登录
+#:   /auth/logout 幂等退出。Cookie 已经过期的人来调这个接口时,如果被守卫
+#:                401 挡住,他就"登不出去也进不去";而他此刻想做的事
+#:                (清掉本地登录态)本来就不需要任何权限
+#:
+#: **这两条是精确路径段,不是 `/auth` 前缀。** 放开整个 `/auth` 会把
+#: `/auth/whoami` 一起变成匿名 —— 身份探测于是永远成功,冷启动横幅那套
+#: "没填口令 / 填错了 / 后端挂了"的区分整个失效。
+#:
+#: 加匿名接口时**前端 `api/client.ts` 的 ANONYMOUS_PATHS 要一起加**:
+#: test_gate_a_guards.py 断言两边是同一个集合。
+PUBLIC_PREFIXES: tuple[str, ...] = (
+    "/health",
+    "/media-files",
+    "/auth/login",
+    "/auth/logout",
+)
 
 
 def is_public_api_path(path: str, prefix: str) -> bool:
@@ -274,6 +292,50 @@ def create_app() -> FastAPI:
             return response
         finally:
             request_id_var.reset(token)
+
+    # ------------------------------------------------------------------
+    # Session **第 3 个 add**,于是它在 request_context 外、CORS 内。
+    #
+    # 后 add 的在外层,所以这个位置是被两头夹死的,只有一个格子:
+    #
+    #   放到 CORS 后面(最外层) -> 登录失败的 401 从 Session 层之外返回,
+    #                             拿不到 CORS 头;跨域部署下浏览器直接拦掉
+    #   放到 guard 前面(最内层) -> `guard_api_requests` 里调 resolve_identity
+    #                             时 scope 里还没有 session,于是**已登录的
+    #                             浏览器会被兜底守卫当成匿名挡在门外**
+    #
+    # 硬约束只有两条:Session 必须比 guard **外**(guard 要读 session),
+    # CORS 必须**最外**(理由见下面那段)。中间这一格给 Session。
+    #
+    # 这一段和下面 CORS 那一段共用同一个理由:中间件顺序改错**不会报错**,
+    # 只会在某一条路径上安静失效。本文件里已经有两段注释在讲上一版正是
+    # 这么坏的 —— 所以 `test_browser_session_structure.py` 用 AST 把这四次
+    # add 的相对顺序钉住了。
+    # ------------------------------------------------------------------
+    #
+    # 密钥为空时**不拿空串去签名**。空 key 在 itsdangerous 里是合法输入,
+    # 于是 Cookie 会被一把"人人都知道"的密钥签出来,而且全程不报错。
+    #
+    # 非 local 环境走不到这条回落:`Settings._check_browser_auth` 已经保证
+    # 配不全就起不来。它只在"本机、且没配浏览器登录"时生效,此时根本不会
+    # 有人登录(resolve_identity 走的是 ROLE_DEV 那条回落)。
+    #
+    # 代价写明白:进程重启后这把随机密钥就变了,已经签发的 Cookie 全部失效。
+    # 多 worker 启动时每个 worker 各生成一把,登录态会来回跳 —— 两者都只
+    # 发生在"本机开发且没打算用登录"的场景里,而修法是同一个:配上
+    # AUTH_SESSION_SECRET。
+    session_secret = (settings.AUTH_SESSION_SECRET or "").strip() or secrets.token_urlsafe(48)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret,
+        session_cookie=settings.AUTH_SESSION_COOKIE_NAME,
+        # 滑动过期,不是绝对存活时长:Starlette 在每个 session 非空的响应上
+        # 重写 Set-Cookie。只要页面还在轮询,它就不会到期(docs/DECISIONS.md)。
+        max_age=settings.AUTH_SESSION_MAX_AGE_SECONDS,
+        same_site="lax",
+        # 本轮不做 CSRF Token 体系,SameSite=Lax 是当前阶段的最低防线。
+        https_only=settings.session_cookie_https_only,
+    )
 
     # ------------------------------------------------------------------
     # CORS **最后 add,因此在最外层**。这不是风格问题。

@@ -28,6 +28,16 @@ dependencies = [
     # 缺了它 secrets.available() 返回 False,后台一个 API Key 都存不下来 ——
     # 而这在开发机上是看不出来的:pytest / 别的包很容易把它顺带装进来
     "cryptography>=43.0",
+    # 浏览器登录的 Session Cookie 签名(starlette.middleware.sessions)。
+    #
+    # **它是显式依赖,不是"顺带装上的"。** starlette 自己没有声明它,而
+    # `starlette.middleware.sessions` 在**模块导入期**就 `import itsdangerous` ——
+    # 缺了它不是运行期降级,是 `app.main` 直接 ImportError、应用起不来。
+    # 它长期能在开发机上 import 成功,只因为别的包顺带带过它。
+    #
+    # 上界照 redis / ruff / import-linter 的既有惯例钉住:一个"今天绿明天红、
+    # 而中间没有人改过任何代码"的门禁,最后一定会被关掉。
+    "itsdangerous>=2.2,<3",
 ]
 
 [project.optional-dependencies]

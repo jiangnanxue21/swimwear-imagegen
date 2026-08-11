@@ -45,6 +45,36 @@ def _pin_resp2(url: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(params)))
 
 
+#: 免口令的本机开发环境。**判据只有这一份语义,不新造第三套。**
+#:
+#: 同样的字面量在 `app/api/deps.py` 里也有一份,而那不是疏忽:
+#:
+#:   1. `deps.py` 模块级 `from app.core.config import settings` —— core 反过来
+#:      import api 是循环导入,`.importlinter` 的「core 是最底层」契约也禁止它
+#:      (包括函数体内 import:import-linter 建的是完整依赖图,藏不住);
+#:   2. `test_security_audit.py::test_local_bypass_does_not_cover_a_test_environment`
+#:      用 AST 直接读 `deps.py` 里那条**赋值语句**的字符串常量,把
+#:      "APP_ENV=test 不得免口令" 钉在那个文件上。改成 import 会让它失锚。
+#:
+#: 所以这里的处置和前后端匿名白名单是同一个套路:**允许两份字面量,但用一条
+#: 门禁把它们钉成相等**(`test_browser_session_structure.py::
+#: test_local_envs_agree_between_config_and_deps`),而不是让两份自由漂移。
+#:
+#: 刻意**不含** ``test``:local/dev/development 只可能是某人的开发机,
+#: 而"测试环境"在多数团队里是一台真的、连着真 Key、别人也能访问的机器。
+LOCAL_ENVS = frozenset({"local", "dev", "development"})
+
+#: Session 签名密钥的最短长度。32 个字符 ≈ 一次 `token_urlsafe(24)`,
+#: 低于这个长度的密钥离线爆破成本已经不够看,而 Cookie 是签名不加密的。
+_MIN_SESSION_SECRET_LENGTH = 32
+
+#: 一眼可辨的占位值。它们全都出现在公开文档、示例文件和教程里,
+#: 所以"配了但配的是它"和"没配"在安全上是同一件事 —— 一起拦。
+_PLACEHOLDER_SECRETS = frozenset(
+    {"change_me", "changeme", "change-me", "password", "secret", "admin", "operator"}
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(PROJECT_ROOT / ".env"),
@@ -275,6 +305,105 @@ class Settings(BaseSettings):
     #: 而不是任人填写的 X-Actor。留空且没配 ADMIN_TOKEN 时,非 local 环境一律拒绝写入。
     OPERATOR_TOKENS: str = ""
 
+    # --- 浏览器登录(Browser Auth) ---
+    #
+    # 这一组回答的是「坐在浏览器前的这个人是谁」,和上面那两把**机器凭据**
+    # (ADMIN_TOKEN / OPERATOR_TOKENS,给 CLI、脚本、pytest、服务间调用用)
+    # 是两件事,故意分开:
+    #
+    #   1. 用户密码与 API Token 语义不同;
+    #   2. 登录之后浏览器不该继续持有一把 API Token;
+    #   3. 改密码不必同步去改所有脚本;
+    #   4. OPERATOR_TOKENS 支持「多条目 + 名字:口令」,形状上不适合当单账号密码;
+    #   5. 避免管理员密码被每个请求当请求头反复发送。
+    #
+    # **这五项刻意不进 `app/core/settings_schema.py`。** 进了那里就意味着值可以
+    # 被设置页写入、加密落库、并受 SETTINGS_ENV_LOCK 影响 —— 于是出现
+    # 「用管理员会话去改管理员密码」的自指闭环,而且密码的真相来源变成两个
+    # (env + DB)。改密码和改 Provider Key 不该共用同一条通路。
+    #: 浏览器登录用的两个固定账号密码。只从环境变量读。
+    ADMIN_PASSWORD: str = ""
+    OPERATOR_PASSWORD: str = ""
+    #: 签名浏览器 Session Cookie 用。多机部署必须显式配置,否则各节点签名互不认。
+    AUTH_SESSION_SECRET: str = ""
+    #: 默认 12 小时。**注意这是滑动过期(idle timeout),不是登录后的绝对存活时长** ——
+    #: Starlette 的 SessionMiddleware 在每一个 session 非空的响应上重写 Set-Cookie,
+    #: 所以只要页面还在发请求,它就不会到期。取舍记在 docs/DECISIONS.md。
+    AUTH_SESSION_MAX_AGE_SECONDS: int = 43200
+    AUTH_SESSION_COOKIE_NAME: str = "swimwear_session"
+
+    @model_validator(mode="after")
+    def _check_browser_auth(self):
+        """非本机环境必须把浏览器登录配全,**配不全就起不来**。
+
+        ## 判据为什么是 LOCAL_ENVS 而不是 is_production
+
+        `is_production` 只认 production/prod。用它做判据的话,`APP_ENV=uat`、
+        `staging`、`test` 会落进一个"既不强制、也没说不强制"的未定义区间 ——
+        而那几个名字对应的往往正是别人也能访问的真机器。
+
+        这里复用的是 `deps.resolve_identity` 判断"要不要口令"的**同一条语义**:
+        只有 local/dev/development 才免。少一个字母的差别不该决定要不要密码。
+
+        ## 为什么是抛错而不是打日志
+
+        `main.lifespan` 里的 `secrets_dir_is_exposed` 是"只打 error 就放行"的
+        先例,那条被判定为错误的权衡:一条启动时刷过去的红字,在容器日志里
+        和其余几十行一样,没有人会因为它去改配置。配置不全的后果是登录页
+        永远登不进去、或者更糟 —— 用一把空密钥签 Cookie。所以在这里拦死。
+
+        照 `_check_spend_ratios` 的写法。
+        """
+        if self.APP_ENV.strip().lower() in LOCAL_ENVS:
+            # 本机开发:三个全空时沿用旧的 Legacy Token + ROLE_DEV 模式。
+            # 但只要有任意一个非空,就必须真的走 Session 登录(见 deps.py),
+            # 否则本地人工验收永远测不到 admin/operator 的差异、logout、403。
+            return self
+
+        problems: list[str] = []
+        admin = (self.ADMIN_PASSWORD or "").strip()
+        operator = (self.OPERATOR_PASSWORD or "").strip()
+        secret = (self.AUTH_SESSION_SECRET or "").strip()
+
+        if not admin:
+            problems.append("ADMIN_PASSWORD 为空")
+        if not operator:
+            problems.append("OPERATOR_PASSWORD 为空")
+        if admin and operator and admin == operator:
+            # 两个密码相同 = 两个角色形同一个。而界面、审计、403 全都按
+            # "这是两个人"在工作,于是权限边界在文档上存在、在现实里不存在。
+            problems.append("ADMIN_PASSWORD 与 OPERATOR_PASSWORD 不能相同")
+        if not secret:
+            problems.append("AUTH_SESSION_SECRET 为空")
+        elif len(secret) < _MIN_SESSION_SECRET_LENGTH:
+            problems.append(
+                f"AUTH_SESSION_SECRET 至少 {_MIN_SESSION_SECRET_LENGTH} 个字符"
+                f"(当前 {len(secret)})"
+            )
+        for label, value in (
+            ("ADMIN_PASSWORD", admin),
+            ("OPERATOR_PASSWORD", operator),
+            ("AUTH_SESSION_SECRET", secret),
+        ):
+            if value and value.lower() in _PLACEHOLDER_SECRETS:
+                # 占位值比空值更危险:空值会被上面拦住,占位值会一路启动成功,
+                # 而它是公开的 —— .env.example 和每一份教程里都写着同一个词。
+                problems.append(f"{label} 仍然是占位值({value})")
+        if self.AUTH_SESSION_MAX_AGE_SECONDS <= 0:
+            problems.append(
+                f"AUTH_SESSION_MAX_AGE_SECONDS 必须为正(当前 "
+                f"{self.AUTH_SESSION_MAX_AGE_SECONDS})"
+            )
+
+        if problems:
+            raise ValueError(
+                f"APP_ENV={self.APP_ENV} 不属于 {sorted(LOCAL_ENVS)},"
+                "必须配置浏览器登录:" + ";".join(problems)
+                + "。生成密钥:python3 -c \"import secrets;"
+                "print(secrets.token_urlsafe(48))\""
+            )
+        return self
+
     @field_validator("LOG_LEVEL")
     @classmethod
     def _upper(cls, v: str) -> str:
@@ -384,6 +513,45 @@ class Settings(BaseSettings):
         except ValueError:
             return False
         return True
+
+    @property
+    def is_local_env(self) -> bool:
+        """本机开发环境。判据与 `deps.LOCAL_ENVS` 同源(见模块顶部注释)。"""
+        return self.APP_ENV.strip().lower() in LOCAL_ENVS
+
+    @property
+    def browser_auth_configured(self) -> bool:
+        """浏览器登录是不是已经配了。
+
+        **"配了"的判据是三项里有任意一项非空,不是三项都齐。** 方向是刻意的:
+
+        - 非 local 环境下 `_check_browser_auth` 已经保证"要么三项齐全、
+          要么起不来",所以这里在非 local 只会是 True;
+        - local 环境下,只要有人填了其中一项,就说明他**想**测登录。这时候
+          必须真的走 Session,不能让 `ROLE_DEV` 那条免口令的回落把他悄悄绕开 ——
+          否则本地怎么点都是通的,admin/operator 的差异、logout、403
+          一个都验不到,而人工验收正是要验这些。
+        """
+        return bool(
+            (self.ADMIN_PASSWORD or "").strip()
+            or (self.OPERATOR_PASSWORD or "").strip()
+            or (self.AUTH_SESSION_SECRET or "").strip()
+        )
+
+    @property
+    def session_cookie_https_only(self) -> bool:
+        """Session Cookie 要不要 Secure 标记。**判据写死在这里,不新增 env。**
+
+        v1.2 只说了"HTTPS 环境 true、local HTTP false",没说谁来判 —— 留空的
+        结果是每个实现者各写一套,而这个值配错**不会报错**:配成 True 之后
+        本地 HTTP 上浏览器会安静地不回传 Cookie,表现是"登录成功但刷新就掉线"。
+
+        复用两个已有配置,不新增 env(新增就要再进一遍 `.env.example` 契约)。
+        `PUBLIC_BASE_URL` 默认 http://localhost:8000,于是本地自动为 False。
+        """
+        return self.is_production or self.PUBLIC_BASE_URL.strip().lower().startswith(
+            "https://"
+        )
 
     @property
     def is_production(self) -> bool:

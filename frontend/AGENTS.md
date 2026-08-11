@@ -17,6 +17,26 @@ npm run syntax-check
 `make fe-check` 和 CI 的 frontend job 都按这个顺序跑。改顺序要三处一起改,
 否则本地和 CI 的失败点会不一致,复现时得靠猜。
 
+**`syntax-check` 是上面那五条的离线替身,不是它们的补充。** 它只要 node、
+不要 node_modules,所以 `make check-offline` 也跑它。a48 起它是三遍:
+
+    一  语法       parseDiagnostics
+    二  死 import  声明了却没人用 —— `noUnusedLocals` 那一类
+    三  断 import  本地模块里根本没有这个导出名
+
+第二遍补的是一条**真实漏过**的缝:tsc 要 node_modules,于是离线时死 import
+没有任何东西在看 —— a46-phase6 自审专门去找都漏了一处,跟着 a47 交付了出去。
+第三遍是后端 `verify_imports.py` 的对侧(它早就在 check-offline 里,
+而前端一直没有),补在被咬之前:横跨多文件删除一个导出时,漏掉的调用点
+离线不会红。
+
+两条刻意的放宽:只管本地模块(第三方包要 node_modules 才知道它导出什么),
+`export * from` 直接放行。**宁可漏,不可冤** —— 会冤枉正常文件的门禁,
+活不过第一次拦住人的那天。
+
+三遍都验不到死变量、死参数、类型与渲染。别拿它当 typecheck 的替代品 ——
+它只是让「离线全绿」这句话少骗人一点。
+
 E2E 单独跑:`npm run e2e`(先 `npx playwright install chromium`)。
 
 ## 测试分层
@@ -45,7 +65,13 @@ frontend/tests/e2e/*.spec.ts     Playwright。跑 vite preview 的**构建产物
 ## Playwright 现在只是骨架
 
 `playwright.config.ts` 的边界写在文件顶部:任务 3(接骨架)在 P0,
-任务 24(补完整主流程)在 P5,依赖任务 20 的发布页 —— 那些页面**现在还不存在**。
+任务 24(补完整主流程)在 P5,依赖任务 20 的发布页。
+
+**「那些页面现在还不存在」这句话已经过期**(A45-batch24 订正):
+`src/pages/PublishPage.tsx` 在阶段 4 就落地了,syntax-check 与 tsc 都覆盖着它。
+任务 24 仍未开工,但拦着它的不再是"页面不存在",而是**没有人写过那些用例**
+—— 两者要做的事完全不同,而这句过期的话会让下一个人先去找页面。
+
 
 骨架阶段用例内部 `page.route()` 拦掉 `/api/**`,不连后端。
 连后端等于把「前端能不能起来」和「数据库在不在」绑成一个红灯,两者修法完全不同。
@@ -68,16 +94,31 @@ frontend/tests/e2e/*.spec.ts     Playwright。跑 vite preview 的**构建产物
 
 关键页面必须可见的信息(方案 4.1 节 F):Mock/真实、测试/UAT/生产、
 真实渠道/Simulator、渠道、站点、语言、干跑/真实提交、发布状态。
-其中「真实渠道 / Simulator」与环境标识对应任务 5、6,**尚未实现**。
+其中「真实渠道 / Simulator」与环境标识对应任务 5、6。
+**这里原来写着「尚未实现」—— 那句话是错的**:a37 已经落了
+`GET /api/environment` + `src/components/EnvironmentBanner.tsx`,
+A42 又修正了三列的上报口径(Mock 出图 / Mock 评分曾被报成 REAL、
+正常工作的渠道 Simulator 曾被报成 UNAVAILABLE)。12.1 表里两条都标 ✅。
+按这一段开工的人会去重写一个已经挂在页面上的横幅。
+
+新接一个真后端时,`is_simulator` 由实现类自己声明(默认 True),
+不查名单 —— 忘了写 `is_simulator = False` 只会多喊一次警告,
+不会反过来把假的说成真的。
 
 ## 代码组织
 
 ```
 src/api/          按资源分文件,统一走 client.ts(拦截器、错误归一、身份头)
 src/components/   通用组件 + workbench/ 下的工作台各 Tab
-src/hooks/        useUrlSeed(URL 即状态)、useServerSort、useIdentity、useThemeMode
+src/hooks/        useUrlFilters(URL 是唯一真相)、useServerSort、useIdentity、useThemeMode
 src/theme.ts      antd token 与暗色模式,颜色不要写死在组件里
 ```
 
-`useUrlSeed` 的约定:筛选条件进 URL query,刷新和分享链接都要能还原同一屏。
+`useUrlFilters` 的约定:筛选条件进 URL query,刷新和分享链接都要能还原同一屏。
 新增筛选项时一并加进去,不要只存 useState。
+
+**这里原来写的是 `useUrlSeed`,而那个文件在 A45-batch14-17 就删掉了** ——
+它的做法是"用完把参数擦掉",于是 URL 只是初值、组件内 state 是第二处真相,
+§8.2 的四条要求里三条落空。删它是刻意的:留着下一个人会照着抄回来。
+照这一段去找 `useUrlSeed` 的人会找不到文件,然后多半自己写一个 —— 
+那正是它被删掉要防的东西。

@@ -25,24 +25,13 @@
  * 不在这里替用户存口令:设置页才是那件事的唯一入口(它还要处理管理口令),
  * 两个地方都能填,下次就会有人问"我明明填了为什么不生效"。
  */
-import { useEffect, useState } from 'react'
-import { Alert, Space, Typography } from 'antd'
-import { Link, useLocation } from 'react-router-dom'
-import {
-  isAuthRejected,
-  onAuthRejectedChange,
-  readAdminToken,
-  readOperatorToken,
-} from '../api/client'
+import { Alert, Typography } from 'antd'
+import { useLocation } from 'react-router-dom'
 import { useIdentity } from '../hooks/useIdentity'
 import { fontScale } from '../theme'
 
 export default function ColdStartBanner() {
   const location = useLocation()
-  const [rejected, setRejected] = useState(isAuthRejected())
-
-  useEffect(() => onAuthRejectedChange(setRejected), [])
-
   // 带口令的探测。这是"口令填错了"唯一诚实的判据 —— 匿名探活成功只说明
   // 后端活着。后端不认时守卫回 401/403,响应拦截器会顺手点亮全局 rejected
   // 状态,所以这里不自己判断"口令好不好",只是把探测发出去。
@@ -87,81 +76,28 @@ export default function ColdStartBanner() {
 
   if (identity.loading) return null
 
-  // A5:"填了没有"只能由 localStorage 回答,"填对了没有"只能由后端回答。
-  // 上一版把两件事合成了一句 `readOperatorToken() || readAdminToken()`,
-  // 于是口令填错时横幅静默 —— 它以为"已配置"就等于"没问题"。
-  const hasToken = Boolean(readOperatorToken() || readAdminToken())
-
-  if (!hasToken) {
-    return (
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="还差一步:填入操作口令"
-        description={
-          <Space direction="vertical" size={2}>
-            <Typography.Text style={{ fontSize: fontScale.body }}>
-              后端已就绪。读列表和做操作都需要「日常操作口令」(后端的
-              OPERATOR_TOKENS),没有它每一页都会是空的。
-            </Typography.Text>
-            <Typography.Text style={{ fontSize: fontScale.body }}>
-              到 <Link to="/settings">系统设置</Link> 页填一次即可,浏览器会记住它。
-              改 API Key、切换生成模型用的是另一把「管理口令」,同一页里分开填。
-            </Typography.Text>
-          </Space>
-        }
-      />
-    )
-  }
-
   /*
-   * C-04(部分):正在拿管理口令跑日常业务。
+   * 会话模式:这条横幅整个让位给登录页(a46-phase2)。
    *
-   * 这个回落本身是刻意的(只配 admin 的部署照样能用,后端也认),但代价是
-   * **每一次列表 GET 都在发送能改 API Key 的那把口令** —— 而运营完全看不到
-   * 这件事正在发生,也就没有任何理由去配一把运营口令。
+   * 下面每一支说的都是**口令**的事 —— 去设置页填、去设置页改、别拿管理口令
+   * 跑日常业务。会话模式下浏览器根本不持有口令,这三句话一句都不成立:
+   * 运营照着去设置页填一把口令,填完仍然是未登录,而横幅还在。
    *
-   * 所以不删回落,只让它可见。真正消除它要账号体系(C-05')。
+   * 未登录本身不需要横幅来说:`AppLayout` 已经把人送到 `/login` 了,
+   * 而那一页比一条横幅说得清楚得多。这里返回 null 不是"没话说",
+   * 是"这件事有别的地方在说,而且说得更好"。
    *
-   * 排在"口令被拒"之前:口令被拒是更急的问题,而这一条是长期建议。
+   * 位置在 `backendDown` **之后**:后端连不上时那句话两种模式都成立,
+   * 而且那时登录页也进不去 —— 它是先要说的那一句。
    */
-  if (identity.usingAdminFallback && !rejected && !identity.authFailed) {
-    return (
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="正在用管理口令做日常操作"
-        description={
-          <Typography.Text style={{ fontSize: fontScale.body }}>
-            这台浏览器只填了「管理口令」,于是<b>每一个</b>请求(包括拉列表)都带着它,
-            而那把口令能改 API Key、能切换生成模型、能烧掉额度。
-            到 <Link to="/settings">系统设置</Link> 页补一把「日常操作口令」之后,
-            管理口令就只会在改配置时才发出去。
-          </Typography.Text>
-        }
-      />
-    )
-  }
-
-  if (rejected || identity.authFailed) {
-    return (
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="口令被后端拒绝了"
-        description={
-          <Typography.Text style={{ fontSize: fontScale.body }}>
-            后端在正常运行,但它不认这把口令(可能是换过、或复制时多了空格)。
-            到 <Link to="/settings">系统设置</Link> 页重新填一次;下一个成功的请求
-            会让这条提示自动消失。
-          </Typography.Text>
-        }
-      />
-    )
-  }
-
+  /*
+   * 到这里只剩一种情况:后端活着。**横幅不再承担"未登录"这件事** ——
+   * `AppLayout` 已经把人送到 `/login`,那一页比一条横幅说得清楚得多。
+   *
+   * 这里原来还有三支:「还差一步:填入操作口令」「正在用管理口令做日常操作」
+   * 「口令被后端拒绝」。三支都是 localStorage 口令链的产物,随那条链一起退役
+   * (PRD §32)。留着的话,运营会照着去设置页填一把**根本不会被读**的口令 ——
+   * 而那个输入框本轮也删掉了。
+   */
   return null
 }

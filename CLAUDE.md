@@ -21,11 +21,15 @@
 backend/          FastAPI + Celery + SQLAlchemy2 + Alembic   → backend/CLAUDE.md
 frontend/         React18 + Vite + antd + Vitest + Playwright → frontend/CLAUDE.md
 comfyui/          ComfyUI 工作流模板与配置样例
-sample-data/      10 个示例商品 + 30 张示例图(首次演示用)
+sample-data/      示例商品与示例图(首次演示用;条数问 verify_sample_data.py)
 docs/             REVIEW.md(施工方案)、vendor/(第三方接口参考)
 tools/pack.sh     交付打包:先按黑名单排除,打完再解开复验
 .github/workflows/ci.yml   门禁执行者
 HANDOVER.md       最近交接。过程文档不留档 —— 结论进 docs/DECISIONS.md
+AGENTS.md         与同级 CLAUDE.md **逐字一致**的副本,给读 AGENTS.md 的工具。
+                  改约定只改 CLAUDE.md,再同步过去 —— 两边分叉过一次,
+                  根 AGENTS.md 停在「一条命令跑全部」那版被订正掉的文案上,
+                  而全仓没有任何东西盯着(a46-phase5 补了守卫)
 ```
 
 ## 门禁

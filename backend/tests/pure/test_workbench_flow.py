@@ -54,7 +54,7 @@ def _flow(**kwargs) -> ProductFlow:
         # **默认值只在测试这一侧给。** 生产侧的 `SetupFacts()` 空视图判
         # NEEDS_CONFIRM,与受众的空视图同一个处理:存量数据的未知要人来
         # 解决,而不是系统替他猜。两条各自专门的路径由
-        # `test_a45_batch27_seven_steps.py` 穷举。
+        # `test_a45_batch26_step_table_exhaustiveness.py` 穷举。
         setup=SetupFacts(has_spu_ref=True, has_colour_ref=True),
         plan=PlanFacts(has_active_plan=True, plan_is_colour_level=True, has_model=True),
         # `usable_roles` 与 `gate_roles` **不是一回事**,两份都要填(§6.2):

@@ -154,6 +154,33 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
             "检查发现禁品时必须删包并退出非零 —— "
             "一个「有警告但仍然生成了」的包会被发出去"
         )
+    # 图片排除的大小写展开。少了它 `data/S1.JPG` 会绕过 `data/*.jpg`,
+    # 而排除侧和复验侧会**一起**漏 —— 于是包里有图,脚本仍然打印 OK。
+    if "ext_any_case" not in body:
+        raise Failure(
+            "tools/pack.sh 没有把图片扩展名展开成大小写字符类 —— "
+            "`data/S1.JPG` 会绕过 `data/*.jpg`,而复验侧照抄同一个模式时两边一起漏"
+        )
+
+    # 成包复验的比对必须读清单**文件**,不许把清单从管道喂给 `grep -q`。
+    # 2026-08-10 两轮打包各撞到一次"必备文件被误报缺失,而它就在清单里":
+    # `grep -q` 在清单前几行命中后立即退出,printf 收到 SIGPIPE(141),
+    # `set -o pipefail` 把 141 判成整条管道失败,`if !` 再把它读成"没找到"。
+    # 同形复现 400 次 38 次假阴性;grep 改读文件后 0 次。这个假阴性的代价
+    # 不止重打一次 —— 它曾被误判成"包里有禁品"。复现与修法见 DECISIONS §3.69;
+    # 这里钉住修后的形状,防止哪次重构把管道写回来。
+    if 'grep -qxF "$path" "$LISTING_FILE"' not in body:
+        raise Failure(
+            "tools/pack.sh 的必备文件复验必须从清单文件读取"
+            '(grep -qxF "$path" "$LISTING_FILE")—— '
+            "用管道喂 grep -q 在 SIGPIPE × pipefail 下会产生约 1/4 概率的假阴性"
+        )
+    if re.search(r"\|\s*grep\s+-q", body):
+        raise Failure(
+            "tools/pack.sh 又在把内容从管道喂给 grep -q —— 那条路径产生过"
+            "约 3/12 的假阴性(grep -q 提前退出 × SIGPIPE × pipefail),"
+            "改成让 grep 读文件(DECISIONS §3.69)"
+        )
 
     windows_script = PROJECT_ROOT / "tools" / "pack.ps1"
     if not windows_script.exists():
@@ -166,6 +193,9 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
         "ZipFile]::OpenRead",
         "Test-ForbiddenArchivePath",
         "[System.IO.File]::Delete($Out)",
+        # 图片排除必须真的接在**枚举与复验共用**的那条判定上。
+        # 只声明数组、不接线的话,数组比对那一段照样通过 —— 而包里还有那张图。
+        "Test-ImageUnderImageFreeDir",
     )
     missing = [marker for marker in required_markers if marker not in windows_body]
     if missing:
@@ -195,6 +225,12 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
     paired_arrays = {
         "FORBIDDEN_DIRS": "ForbiddenDirs",
         "CONTENT_ONLY_DIRS": "ContentOnlyDirs",
+        # `data/` 里的图片。两侧的实现手法不同(shell 展开成 `[jJ][pP][gG]`
+        # 字符类,PowerShell 靠 `-like` 天然不区分大小写),但**声明必须一致** ——
+        # 分叉的表现是「Linux 排掉了、Windows 打出来的包里还躺着那张图」,
+        # 而两台机器各自跑的时候都显示 `==> OK`。
+        "IMAGE_FREE_DIRS": "ImageFreeDirs",
+        "IMAGE_EXTENSIONS": "ImageExtensions",
         "FORBIDDEN_FILES": "ForbiddenFiles",
         "ENV_EXAMPLES": "EnvExamples",
         "REQUIRED": "Required",

@@ -12,7 +12,7 @@
  * 下面几张文案表由 `tests/pure/test_frontend_contract.py` 静态对齐后端枚举,
  * 后端加一个异常码而这里不加,测试立刻失败。
  */
-import { adminHeaders, apiClient, LONG_TIMEOUT_MS } from './client'
+import { apiClient, LONG_TIMEOUT_MS} from './client'
 import type { FlowStep } from './workbench'
 
 // ==========================================================
@@ -566,6 +566,8 @@ export interface SpuSkuRow {
   completion: number
   blocking_count: number
   next_action_label: string
+  /** 这一只卡在哪几步(`FlowStep` 的值)。级别判定在后端 `flow.py` */
+  blocked_steps: string[]
 }
 
 export interface SpuGroup {
@@ -584,6 +586,16 @@ export interface SpuGroup {
   /** 各 SKU 的最小值,不是平均值 —— 上架文件是整个 SPU 一起导的 */
   completion: number
   blocking_count: number
+  /**
+   * 卡点分布 `{步骤: 卡在该步的 SKU 数}`(a47 §8.1)。
+   *
+   * **没有款级 `next_action`,而且不该有** —— 不同 SKU 卡在不同步骤时,
+   * 任何单选都是编的。展示分布,不编一个单一答案。
+   *
+   * 口径提醒:数的是 **SKU 个数**,不是问题条数,所以
+   * `sum(blocked_steps) !== blocking_count`。两个数字回答两个问题。
+   */
+  blocked_steps: Record<string, number>
   variants: Record<string, string[]>
   common: { field_name: string; value: string | null }[]
   /** 本该一致却不一致的公共属性。**这是要人处理的那一列** */
@@ -785,7 +797,7 @@ export const batchApi = {
         // 而加的唯一出口,在最需要它的人手里点不动** —— 修复本身等于没交付。
         //
         // 同类路由(settings / prompts / generation)一直是带的,只有这条漏了。
-        { timeout: LONG_TIMEOUT_MS, headers: adminHeaders() },
+        { timeout: LONG_TIMEOUT_MS },
       )
     ).data,
 

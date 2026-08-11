@@ -20,21 +20,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useWriteError } from '../hooks/useWriteError'
 import { settingsApi } from '../api/settings'
 import { providersApi } from '../api/generation'
-import {
-  isAuthError,
-  readAdminToken,
-  readError,
-  readOperatorToken,
-  writeAdminToken,
-  writeOperatorToken,
-} from '../api/client'
+import { isAuthError, readError } from '../api/client'
 import { SETTING_GROUP_PROVIDER, SETTING_SOURCE_LABEL } from '../api/types'
 import type { SettingField, SettingGroup } from '../api/types'
 import UnsavedGuard from '../components/UnsavedGuard'
 import BrandTag from '../components/BrandTag'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { brandVars, fontScale } from '../theme'
+import { useIdentity } from '../hooks/useIdentity'
+import { fontScale } from '../theme'
 
 type Draft = Record<string, string>
 
@@ -159,10 +153,13 @@ function FieldRow({ field, draft, onChange, onReset, resetting }: RowProps) {
 export default function SettingsPage() {
   useDocumentTitle('设置')
   const { message } = App.useApp()
+  // 服务下面的 403 早退:operator 手输地址进来,在发出任何请求之前就把话
+  // 说清楚。判定不在这里做 —— isAdmin 的真相来源是后端 `/auth/whoami`,
+  // 这一页只是读它。(这行注释原来说"只为了那句『这两把不是你的登录密码』",
+  // 那句 Alert 随口令录入卡一起删了,identity 的用途跟着换了)
+  const identity = useIdentity()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState<Draft>({})
-  const [token, setToken] = useState<string>(readAdminToken())
-  const [operatorToken, setOperatorToken] = useState<string>(readOperatorToken())
 
   // 口令不对时重试三次没有任何意义,只会让人多等三个来回
   const query = useQuery({
@@ -170,7 +167,14 @@ export default function SettingsPage() {
     queryFn: settingsApi.read,
     retry: (count, err) => !isAuthError(err) && count < 2,
   })
-  const needsToken = query.isError && isAuthError(query.error)
+  /*
+   * 读不到配置,而且是身份问题。本轮之后这只有一种解释:**当前账号不是管理员**。
+   *
+   * 口令时代它还有第二种解释("口令没填 / 填错了"),那时这一支引导人去下面那张
+   * 录入卡填口令。卡片随 localStorage 口令链一起删掉了(PRD §28),
+   * 所以这里的话也必须跟着改 —— 指着一个不存在的输入框比不说更糟。
+   */
+  const forbidden = query.isError && isAuthError(query.error)
 
   /**
    * 改配置是写请求(BLOCK-05)。它能切 Provider、能改 API Key、能改预算 ——
@@ -243,31 +247,6 @@ export default function SettingsPage() {
     reset.mutate(key)
   }
 
-  const saveToken = () => {
-    // 写入可能只落在内存里(隐私模式 / 存储被禁用 / 配额满)。
-    // 那种情况下说"已记住"是假话:刷新一次就没了,而用户会以为配好了
-    //
-    // **两个都要先算出来再合并,不能写成 `a() && b()`。** `&&` 会短路:
-    // 管理口令持久化失败时 `writeOperatorToken` 根本不会被调用,于是运营口令
-    // 连内存都没进 —— 提示说"仅本次会话有效",而实际上这次会话也没有。
-    // 隐私模式下两次写必然同时失败,所以这个坑一旦踩到就是必现的。
-    const adminPersisted = writeAdminToken(token.trim())
-    const operatorPersisted = writeOperatorToken(operatorToken.trim())
-    const persisted = adminPersisted && operatorPersisted
-    const hasToken = Boolean(token.trim() || operatorToken.trim())
-    if (!hasToken) message.success('口令已清除')
-    else if (persisted) message.success('口令已记住')
-    else message.warning('口令仅在本次会话有效:浏览器不允许写入本地存储,刷新后需重新填写')
-
-    // 读接口也要口令,所以存完立刻重拉一次:填对了页面当场就出来
-    queryClient.invalidateQueries({ queryKey: ['settings'] })
-    // 身份探针也必须失效。它 staleTime 60 秒且不在窗口聚焦时重取 ——
-    // 不主动失效的话,operator 换成 admin 之后管理菜单要过一分钟才出来,
-    // 反过来 admin 降成 operator 时管理菜单还亮着(后端仍会拦,
-    // 但界面在说一件不成立的事)
-    queryClient.invalidateQueries({ queryKey: ['auth-probe'] })
-  }
-
   const renderGroup = (group: SettingGroup) => {
     const basic = group.fields.filter((f) => !f.advanced)
     const advanced = group.fields.filter((f) => f.advanced)
@@ -337,21 +316,45 @@ export default function SettingsPage() {
   /** A11:改过的设置项都攒在 draft 里,一个键就算有未保存内容 */
   const dirty = Object.keys(draft).length > 0
 
+  /*
+   * operator 手输 `/settings`(PRD §31)。路由仍然注册,所以这一页会被渲染 ——
+   * 这里在**发请求之前**就把话说清楚,而不是让他看着一页空白等一个 403 回来。
+   *
+   * 判据取 `identity.who && !identity.isAdmin`,不是 `!identity.isAdmin`:
+   * 后者在身份还没探出来时也为真,于是管理员每次刷新都会先闪一下 403。
+   *
+   * 这**不是**权限边界:边界是后端 `require_admin`,下面那个 `forbidden`
+   * 分支接的就是它的回答。两处都要有 —— 少了后端那半是漏洞,少了这半是难用。
+   */
+  if (identity.who && !identity.isAdmin) {
+    return (
+      <>
+        <PageHeader title="设置" subtitle="密钥、模型、Provider 与系统参数" />
+        <Alert
+          type="error"
+          showIcon
+          message="当前账号没有管理员权限"
+          description="设置页只对 admin 账号开放。要改 Provider、密钥或系统参数,请用管理员账号登录 —— 侧栏里没有「系统管理」这一组入口也是同一个原因。"
+        />
+      </>
+    )
+  }
+
   return (
     <Space direction="vertical" size={12} style={{ width: '100%', maxWidth: 940 }}>
       <UnsavedGuard dirty={dirty} what="设置" />
-      <PageHeader title="设置" subtitle="口令、密钥、模型与白名单。改一次就不常动的东西" />
+      <PageHeader title="设置" subtitle="密钥、模型、Provider 与系统参数" />
 
-      {needsToken && (
+      {forbidden && (
         <Alert
-          type="warning"
+          type="error"
           showIcon
-          message="需要口令才能查看配置"
-          description={`${readError(query.error)}。在下方填入后端 ADMIN_TOKEN 里的口令并点"记住"。`}
+          style={{ marginBottom: 12 }}
+          message="当前账号没有管理员权限"
+          description={`${readError(query.error)}。设置页需要用 admin 账号登录;operator 看不到这一页的内容。`}
         />
       )}
-
-      {query.isError && !needsToken && (
+      {query.isError && !forbidden && (
         <Alert type="error" showIcon message="读取配置失败" description={readError(query.error)} />
       )}
 
@@ -373,58 +376,6 @@ export default function SettingsPage() {
         />
       )}
 
-      <Card size="small" styles={{ body: { padding: 12 } }}>
-        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-            后端读写接口都需要身份。两把口令分工不同,建议都填:
-          </Typography.Text>
-          <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-            <span className="mono">OPERATOR_TOKENS</span>
-            —— 日常使用。看列表、传商品、建任务、审图都要它,
-            <b>每个请求都会带上</b>。
-          </Typography.Text>
-          <Space.Compact style={{ width: 420, maxWidth: '100%' }}>
-            <Input.Password
-              value={operatorToken}
-              placeholder="操作口令,日常浏览和业务操作用"
-              autoComplete="off"
-              onChange={(e) => setOperatorToken(e.target.value)}
-            />
-          </Space.Compact>
-          <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-            <span className="mono">ADMIN_TOKEN</span>
-            —— 改配置、改提示词、测 Provider 连接。它能改 API Key、能烧光额度,
-            所以<b>只跟随这几个页面的请求发出</b>,拉列表时不会捎上。
-          </Typography.Text>
-          {/*
-            评审 P2-3:这里原本写着「只配了它也能用:admin 天然包含 operator」。
-            那句话是对的,但它引导人**只填管理口令** —— 而一旦如此,
-            `client.ts` 拦截器的回落就会生效,于是每一次拉列表都会带上
-            那把能改 API Key 的口令。拦截器注释里刻意要防的正是这件事。
-            事实留下(不填 operator 也能用,不然新人会以为自己被卡住),
-            但把代价一起说出来,并且只在真的只填了一把时才提醒。
-          */}
-          {!operatorToken.trim() && Boolean(token.trim()) && (
-            <Typography.Text style={{ fontSize: fontScale.body, color: brandVars.dangerDeep }}>
-              只填管理口令也能用(admin 天然包含 operator),但那样<b>每一次拉列表都会带上这把口令</b>。
-              上面那一栏一起填,日常请求就只用得到操作口令。
-            </Typography.Text>
-          )}
-          <Space.Compact style={{ width: 420, maxWidth: '100%' }}>
-            <Input.Password
-              value={token}
-              placeholder="管理口令,改配置时用"
-              autoComplete="off"
-              onChange={(e) => setToken(e.target.value)}
-            />
-            <Button onClick={saveToken}>记住</Button>
-          </Space.Compact>
-          <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-            本机开发(APP_ENV=local/dev 且两项都没配)可以留空。
-            口令只存在这台浏览器上。
-          </Typography.Text>
-        </Space>
-      </Card>
 
       {query.isLoading && <Skeleton active />}
 

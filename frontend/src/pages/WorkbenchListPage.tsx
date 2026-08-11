@@ -23,12 +23,22 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Button, Card, Empty, Input, Progress, Segmented, Select, Space, Table, Tag, Tooltip,
+  Alert, App, Button, Card, Dropdown, Empty, Input, Progress, Segmented, Select,
+  Space, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowRightOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
-import { useQuery } from '@tanstack/react-query'
+import {
+  ArrowRightOutlined, ImportOutlined, PlusOutlined, PlusSquareOutlined,
+  ReloadOutlined, WarningOutlined,
+} from '@ant-design/icons'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ErrorNotice from '../components/ErrorNotice'
+import ProductFormModal from '../components/ProductFormModal'
+import SpuGroupTable from '../components/workbench/SpuGroupTable'
+import { batchApi } from '../api/batch'
+import { productsApi } from '../api/products'
+import { describeError } from '../api/client'
+import type { Product } from '../api/types'
 import { AudienceTag } from '../components/AudienceBadge'
 import { AUDIENCES, AUDIENCE_LABEL, type Audience } from '../api/types'
 import {
@@ -146,6 +156,17 @@ const LIST_SORT_KEYS = ['updated_at', 'sku', 'completion', 'blocking_count'] as 
 
 export default function WorkbenchListPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const { message } = App.useApp()
+
+  /**
+   * 新建商品(a47 §3.1)。**复用 `ProductFormModal`,不重新实现表单。**
+   *
+   * 那个组件里有 §20.5 的受众二次确认、品类联动、清空受众要以 null 上线
+   * 这三处踩过坑的处理。抄一份过来的代价不是重复代码,是那三处会各自漂移
+   * —— 而它们每一处的失效都不报错。
+   */
+  const [creatingProduct, setCreatingProduct] = useState(false)
 
   /**
    * 筛选条件住在 URL 里(GAP-033)。这一页有七项,全在这张表里 ——
@@ -168,6 +189,18 @@ export default function WorkbenchListPage() {
      * 却没给行动,运营只能一件件点开看受众。
      */
     audience: enumParam<Audience | 'UNCONFIRMED'>([...AUDIENCES, 'UNCONFIRMED']),
+    /**
+     * 按 SKU 还是按款(a47 §8.2)。**默认 `sku`,本轮不切默认。**
+     *
+     * 切默认的判据沿用上游 §8.4:测 10~20 款(3~5 款多颜色),记录两个视图
+     * 的使用次数、同款 SKU 重复打开次数、判断一款整体状态的耗时。
+     * 按款明显更顺手才改 —— 现在改就是拿一个没有数据支持的猜测,
+     * 去换掉一个已经被用了几个月的默认。
+     *
+     * 写进 URL:这一页七个筛选项全在 URL 里,新增的跟上同一规矩,
+     * 于是刷新、后退、把链接发给同事都停在同一个视图上。
+     */
+    view: enumParam<'sku' | 'spu'>(['sku', 'spu']),
     only_blocked: flagParam(),
     page: intParam(1, { min: 1 }),
     page_size: pageSizeParam,
@@ -178,6 +211,8 @@ export default function WorkbenchListPage() {
     search, step, state, next_action: nextAction, audience, only_blocked: onlyBlocked,
     page, page_size: pageSize,
   } = filters.values
+  /** 默认按 SKU。codec 认不出来的取值也退回它 */
+  const view = filters.values.view ?? 'sku'
 
   /** 输入框里的字。与已生效的 `search` 分开 —— 敲字不该每个字符打一次接口
       (也不该每个字符进一格后退栈)。生效的那一份在 URL 上,所以刷新、后退
@@ -341,6 +376,24 @@ export default function WorkbenchListPage() {
       }),
   })
 
+  /**
+   * 按款视图的数据(a47 §8.2)。**只在切到按款时才发请求。**
+   *
+   * `enabled` 不加的话,每个运营每次打开工作台都会白跑一次 `/workbench/spus`
+   * —— 那条查询要对本页每个 SKU 跑 `collect()`,是这一组接口里最贵的一条。
+   *
+   * 后端那条接口今天只认 `search` 与分页,不认另外六个筛选项。**这是一处
+   * 真实的不对齐,写在这里而不是悄悄兜住**:切到按款时其余筛选不生效,
+   * 界面上要说出来(见下面那条提示)。让前端自己按筛选过滤一遍是错的:
+   * 那会把"共 N 个款命中"算成当前页的条数,正是 A-01~A-05 那批修掉的形状。
+   */
+  const spuQuery = useQuery({
+    queryKey: ['workbench-spus', { search, page, pageSize }],
+    queryFn: () =>
+      batchApi.spus({ search: search || undefined, page, page_size: pageSize }),
+    enabled: view === 'spu',
+  })
+
   // 「清除筛选」= 把这一页声明过的参数从 URL 上全删掉。URL 上别的参数
   // (将来可能有的 `?tab=`)不动 —— 这一页没资格替别人做决定。
   // 框里的字由上面那条同步 effect 跟着清,不在这里各写一遍。
@@ -354,6 +407,25 @@ export default function WorkbenchListPage() {
     const suffix = tab ? `?tab=${tab}` : ''
     navigate(`/workbench/${item.product.id}${suffix}`)
   }
+
+  /**
+   * 建完一件商品之后落在哪(a47 §3.1)。
+   *
+   * **直接进它的工作台详情**,而不是留在列表页刷新一下。运营新建一件商品
+   * 的下一个动作必然是给它传图 —— 停在列表页等于让他自己在 20 行里找刚
+   * 建的那一行,而那一行按更新时间排序时还不一定在第一页。
+   */
+  const createProduct = useMutation({
+    mutationFn: (payload: Partial<Product>) => productsApi.create(payload),
+    onSuccess: (created) => {
+      setCreatingProduct(false)
+      message.success(`已建档 ${created.sku},接着给它上传素材`)
+      // 列表查询要失效:回到工作台时新商品得在里面
+      queryClient.invalidateQueries({ queryKey: ['workbench'] })
+      navigate(`/workbench/${created.id}?tab=material`)
+    },
+    onError: (err) => message.error(describeError(err, 'write').text),
+  })
 
   const columns: ColumnsType<WorkbenchListItem> = [
     {
@@ -520,28 +592,83 @@ export default function WorkbenchListPage() {
         subtitle="这一页回答一个问题:今天从哪件商品下手"
         extra={
           <>
-            <Tooltip
-              title={
-                dense
-                  ? '展开五个步骤列。屏幕不够宽时表格会横向滚动'
-                  : '把五个步骤压成一格色条,表格窄 384px —— 小屏上主按钮才不会被挤出去'
-              }
+            {/*
+              三个生产入口(a47 §3.1)。**工作台是唯一常规生产入口**之后,
+              「新建商品」「批量导入」「新建商品款式」三条路必须从这里出发 ——
+              它们原来分别住在 `/products`、`/workbench-import`、`/spus/new`
+              三个菜单项上,而那三项本轮全部撤出运营菜单。
+
+              收进一个 Dropdown 而不是摆三颗按钮:这一页的主角是下面那张表,
+              页头再多三颗同级按钮会和「刷新」「紧凑/展开」抢注意力,
+              而新建商品是**低频**动作(一天可能一次,而看表是一天几十次)。
+            */}
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: [
+                  {
+                    key: 'new-product',
+                    icon: <PlusOutlined />,
+                    label: '新建商品(单件 SKU)',
+                    onClick: () => setCreatingProduct(true),
+                  },
+                  {
+                    key: 'import',
+                    icon: <ImportOutlined />,
+                    label: '批量导入 SKU(CSV)',
+                    // 导入完成后**回工作台**(§3.3 验收第 2 条)。带上来路,
+                    // 让那一页知道该往哪儿送 —— 它原来只会回 `/products`
+                    onClick: () => navigate('/workbench-import?from=workbench'),
+                  },
+                  {
+                    key: 'new-spu',
+                    icon: <PlusSquareOutlined />,
+                    label: '新建商品款式(SPU 三步建档)',
+                    onClick: () => navigate('/spus/new?from=workbench'),
+                  },
+                ],
+              }}
             >
-              <Segmented
-                size="small"
-                value={dense ? 'dense' : 'wide'}
-                onChange={(v) => toggleDense(v === 'dense')}
-                options={[
-                  { label: '紧凑', value: 'dense' },
-                  { label: '展开', value: 'wide' },
-                ]}
-              />
-            </Tooltip>
+              <Button size="small" type="primary" icon={<PlusOutlined />}>
+                新建
+              </Button>
+            </Dropdown>
+            {/* 按 SKU / 按款(a47 §8.2)。默认按 SKU,状态写在 URL 上 */}
+            <Segmented
+              size="small"
+              value={view}
+              onChange={(v) => filters.patch({ view: v as 'sku' | 'spu', page: 1 })}
+              options={[
+                { label: '按 SKU', value: 'sku' },
+                { label: '按款', value: 'spu' },
+              ]}
+            />
+            {/* 列密度只对按 SKU 那张表有意义(它切的是五个步骤列)。
+                按款视图里没有那几列,留着这个开关会让人点一下、什么都没发生 */}
+            {view === 'sku' && (
+              <Tooltip
+                title={
+                  dense
+                    ? '展开五个步骤列。屏幕不够宽时表格会横向滚动'
+                    : '把五个步骤压成一格色条,表格窄 384px —— 小屏上主按钮才不会被挤出去'
+                }
+              >
+                <Segmented
+                  size="small"
+                  value={dense ? 'dense' : 'wide'}
+                  onChange={(v) => toggleDense(v === 'dense')}
+                  options={[
+                    { label: '紧凑', value: 'dense' },
+                    { label: '展开', value: 'wide' },
+                  ]}
+                />
+              </Tooltip>
+            )}
             <Button
               size="small"
               icon={<ReloadOutlined />}
-              onClick={() => query.refetch()}
-              loading={query.isFetching}
+              onClick={() => (view === 'spu' ? spuQuery.refetch() : query.refetch())}
+              loading={view === 'spu' ? spuQuery.isFetching : query.isFetching}
             >
               刷新
             </Button>
@@ -549,7 +676,10 @@ export default function WorkbenchListPage() {
         }
       />
 
-      {query.data && (
+      {/* 四个计数与批量动作条都是 SKU 口径的:计数点一下是改 `next_action`
+          筛选(按款视图不认它),批量动作提交的是 product_id 清单。
+          在按款视图里摆着它们,点下去要么没反应、要么处理的不是眼前这些款 */}
+      {view === 'sku' && query.data && (
         <SummaryTiles
           summary={query.data.summary}
           active={onlyBlocked ? 'blocked' : nextAction === 'EXPORT' ? 'exportable' : null}
@@ -563,7 +693,7 @@ export default function WorkbenchListPage() {
         />
       )}
 
-      {selected.length > 0 && (
+      {view === 'sku' && selected.length > 0 && (
         <BatchActionBar
           selected={selected}
           onClear={() => setSelected([])}
@@ -637,6 +767,43 @@ export default function WorkbenchListPage() {
         </Space>
       </Card>
 
+      {view === 'spu' ? (
+        <>
+          {/*
+            按款视图(a47 §8.2)。**这条提示不是客套话。**
+
+            后端 `/workbench/spus` 今天只认 `search` 与分页,不认另外六个
+            筛选项。不说出来的话,运营会以为"只看有阻断"在按款下也生效,
+            然后照着一份全量清单做判断 —— 一个界面完全正常的错答案。
+          */}
+          {(step || state || nextAction || audience || onlyBlocked) && (
+            <Alert
+              type="warning"
+              showIcon
+              message="按款视图暂时只认搜索词"
+              description="流程步骤、状态、下一步动作、受众、只看有阻断这五个筛选在按款视图下不生效 —— 下面是搜索词命中的全部款。要按这些条件筛,先切回「按 SKU」。"
+            />
+          )}
+          {spuQuery.isError && (
+            <ErrorNotice
+              title="拉不到按款视图"
+              error={spuQuery.error}
+              onRetry={() => spuQuery.refetch()}
+            />
+          )}
+          <SpuGroupTable
+            groups={spuQuery.isError ? [] : spuQuery.data?.items ?? []}
+            loading={spuQuery.isFetching}
+            total={spuQuery.data?.total ?? 0}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={(p, ps) =>
+              filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) })
+            }
+          />
+        </>
+      ) : (
+        <>
       {/* 二次走查 A-2:紧凑模式的图例。不给的话那五个色块在界面上
           没有任何地方解释「左起第一格是哪一步」「哪个色是哪个状态」 */}
       {dense && <FlowStripLegend />}
@@ -682,7 +849,9 @@ export default function WorkbenchListPage() {
               description={
                 search || step || state || nextAction || onlyBlocked
                   ? '没有商品命中当前筛选。点「清除筛选」看全部。'
-                  : '还没有商品。先在「商品」页导入 sample-data/products.csv。'
+                  /* a47 §3.1:这句话原来把新人送到「商品」页 —— 而那一页
+                     本轮撤出了运营菜单。现在指向本页自己的「新建」按钮 */
+                  : '还没有商品。点右上角「新建」建第一件,或批量导入 CSV。'
               }
             />
           ),
@@ -702,6 +871,16 @@ export default function WorkbenchListPage() {
           onChange: (p, ps) =>
             filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) }),
         }}
+      />
+        </>
+      )}
+
+      {/* 新建商品。`product` 不传 = 新增模式(见 ProductFormModal 的 props) */}
+      <ProductFormModal
+        open={creatingProduct}
+        confirmLoading={createProduct.isPending}
+        onCancel={() => setCreatingProduct(false)}
+        onSubmit={(values) => createProduct.mutate(values)}
       />
     </Space>
   )

@@ -159,11 +159,62 @@ def _matches(supplied: str, expected: str) -> bool:
     return hmac.compare_digest(supplied, expected)
 
 
+def _session_identity(request: Request) -> Identity | None:
+    """从浏览器 Session Cookie 里取身份。取不到返回 None。
+
+    ## 为什么是 `request.scope.get("session")` 而不是 `request.session`
+
+    后者是个 property,没装 SessionMiddleware 时**抛 AssertionError**。而本仓
+    有大量纯测试直接构造 `Request(scope)` 来打这个函数(见本文件头那段说明),
+    那些 scope 里当然没有 session。用 `scope.get` 是 fail-safe 的:没有中间件
+    就当作"没有 Session",自然回落到 Legacy Token,而不是把整条身份链炸掉。
+
+    ## 为什么还要校验 role
+
+    Cookie 是**签名**的,所以正常情况下伪造不了。但签名保证的是"这个值是
+    我们自己写的",不是"这个值今天还有意义" —— 上一版 session 里写的字段、
+    别的服务共用同一把密钥写进来的东西,签名一样是合法的。这里只认识
+    admin / operator 两个角色,别的一律当作没有 Session。
+    """
+    session = request.scope.get("session") or {}
+    if not isinstance(session, dict):
+        return None
+    name = session.get("name")
+    role = session.get("role")
+    if not isinstance(name, str) or not isinstance(role, str):
+        return None
+    name, role = name.strip()[:64], role.strip()
+    if not name or role not in {ROLE_ADMIN, ROLE_OPERATOR}:
+        return None
+    return Identity(name=name, role=role)
+
+
 def resolve_identity(request: Request) -> Identity | None:
     """认出这次请求是谁。认不出来返回 None,**不抛异常** ——
 
     中间件和路由依赖都要用它:前者需要自己组装响应,后者需要抛 AppError。
+
+    三级,**顺序是安全约束的一部分**::
+
+        Session(有效)              -> Identity(name, role)      浏览器
+              下无
+        Legacy Header Token        -> 现有逻辑不变              CLI / 脚本 / pytest
+              下无
+        local/dev 且未配浏览器登录 -> ROLE_DEV 回落              本机开发
+
+    ## Session 必须**优先**,不是"也支持"
+
+    反过来写(先试 Header)会开一个提权口子:operator 已经登录的浏览器,
+    只要拿到一次 X-Admin-Token(从别人屏幕上、从某份文档里、从 XSS 里),
+    塞进请求头就变成了 admin。而 Session 优先意味着——**已登录的浏览器
+    带什么头都仍然是它登录的那个人**,想换身份只能重新登录。
+
+    Legacy Token 因此只服务于"没有 Browser Session"的那一类客户端。
     """
+    session_identity = _session_identity(request)
+    if session_identity is not None:
+        return session_identity
+
     admin_token, operators = _configured()
 
     supplied_admin = _header(request, ADMIN_HEADER)
@@ -175,9 +226,18 @@ def resolve_identity(request: Request) -> Identity | None:
         if _matches(supplied_operator, token):
             return Identity(name=name, role=ROLE_OPERATOR)
 
-    if not admin_token and not operators and _is_local_env():
+    if (
+        not admin_token
+        and not operators
+        and _is_local_env()
+        and not settings.browser_auth_configured
+    ):
         # 本机开发:没配任何口令时放行,审计名退回自述的 X-Actor。
         # 这条路径只在 local/dev 存在,所以“自述”的风险仅限于开发机自己的日志。
+        #
+        # `browser_auth_configured` 这个条件是本轮**唯一**加进来的:填了浏览器
+        # 密码的本机,不能再被这条回落悄悄绕过。否则本地怎么点都是通的,
+        # 而人工验收要验的正是 admin/operator 的差异、退出登录、401 与 403。
         declared = (request.headers.get("x-actor") or "system").strip()[:64]
         return Identity(name=declared or "system", role=ROLE_DEV)
 
@@ -185,16 +245,40 @@ def resolve_identity(request: Request) -> Identity | None:
 
 
 def rejection(needs_admin: bool) -> AppError:
-    """认不出身份时该回什么。中间件和路由守卫共用同一套措辞。"""
+    """认不出身份时该回什么。中间件和路由守卫共用同一套措辞。
+
+    ## "服务器没配" 和 "你没登录" 必须分开
+
+    这里原来只看 Legacy Token 配没配。加了浏览器登录之后那个判据就不成立了:
+    一个**只配浏览器登录、不配 Legacy Token** 的部署(这正是本轮之后最常见的
+    形态)会让每一次未登录请求都回 403 CONFIG_INVALID,而那句话说的是
+    "当前环境没有配置 ADMIN_TOKEN 或 OPERATOR_TOKENS,请在 .env 里配置后重启" ——
+
+        运营看到的:  一句让他去改服务器配置的话
+        实际该做的:  点一下登录
+
+    更糟的是状态码:前端按 401 判"登录态失效 -> 跳登录页"(§33)。403 不会
+    触发跳转,于是他停在一个说着配置错误的空页面上,而重启后端不会有任何改善。
+
+    所以配置缺失这一条现在要求**三种凭据都没有**才成立。
+    """
     admin_token, operators = _configured()
-    if not admin_token and not operators:
-        # 没配任何口令、又不是本机:这是部署配置问题,不是调用方填错了口令。
+    if not admin_token and not operators and not settings.browser_auth_configured:
+        # 三种凭据一个都没配、又不是本机:这是部署配置问题,不是调用方填错了。
         # 401 会让人一直去找口令,403 + 这段话才指向真正要做的事。
         return AppError(
-            f"当前环境({settings.APP_ENV})没有配置 ADMIN_TOKEN 或 OPERATOR_TOKENS,"
-            "已拒绝所有写操作。请在 .env 里配置后重启后端",
+            f"当前环境({settings.APP_ENV})没有配置浏览器登录密码,"
+            "也没有配置 ADMIN_TOKEN 或 OPERATOR_TOKENS,已拒绝所有请求。"
+            "请在 .env 里配置后重启后端",
             code=ErrorCode.CONFIG_INVALID,
             http_status=403,
+        )
+    if settings.browser_auth_configured:
+        # 浏览器登录已配:未登录就是未登录,让前端按 401 跳登录页。
+        return AppError(
+            "未登录或登录已失效,请重新登录",
+            code=ErrorCode.AUTH_FAILED,
+            http_status=401,
         )
     what = "管理口令" if needs_admin else "操作口令"
     return AppError(

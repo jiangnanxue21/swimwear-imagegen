@@ -41,7 +41,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   SPU_AUDIENCE_LABEL,
   spusApi,
@@ -83,6 +83,9 @@ const emptyColour = (): ColorVariantDraft => ({
 export default function SpuCreatePage() {
   const { message } = App.useApp()
   const navigate = useNavigate()
+  // 来路白名单(a47 §3.1)。理由与 `WorkbenchImportPage` 那一处同一条
+  const [searchParams] = useSearchParams()
+  const cameFromWorkbench = searchParams.get('from') === 'workbench'
   useDocumentTitle('新建商品款式')
 
   const [current, setCurrent] = useState(0)
@@ -320,6 +323,14 @@ export default function SpuCreatePage() {
           <Button onClick={() => navigate(`/spus/${created.id}`)}>
             去配置生成方案
           </Button>
+          {/*
+            a47 §3.1:工作台带 `?from=workbench` 过来时,建完款回工作台。
+            「SPU 聚合页」那颗留着 —— 它本轮撤出菜单但路由保留,
+            而从建档直接去看聚合仍然是一条说得通的动线。
+          */}
+          {cameFromWorkbench && (
+            <Button onClick={() => navigate('/workbench')}>回商品工作台</Button>
+          )}
           <Button onClick={() => navigate('/workbench-spus')}>去 SPU 聚合页</Button>
           <Button
             onClick={() => {

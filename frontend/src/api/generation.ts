@@ -1,4 +1,4 @@
-import { adminHeaders, apiClient } from './client'
+import { apiClient} from './client'
 import type {
   ModelTemplate, Page, Provider, ProviderTestResult, Task, TaskDetail,
 } from './types'
@@ -15,6 +15,15 @@ export interface TaskCreatePayload {
   base_seed?: number | null
   prompt?: string
   provider_params?: Record<string, unknown>
+  /**
+   * 绕过生成方案(a47 §5.3)。**仅管理员可用 —— 后端对非管理员是 403,
+   * 不是静默忽略。**
+   *
+   * 打开它意味着这次出图完全按本请求的参数跑,而且任务上的
+   * `generation_plan_id` 与 `plan_fingerprint` 都会留空:绕过了方案
+   * 就不许再记这份方案。
+   */
+  override_plan?: boolean
 }
 
 /** 对账结论字数上限。与后端 `Query(max_length=500)` 同源,改一处要改两处。 */
@@ -96,9 +105,7 @@ export const providersApi = {
 
   /** 会拿真 Key 去打厂商接口,后端要口令。 */
   test: async (name: string) =>
-    (await apiClient.post<ProviderTestResult>(`/providers/${name}/test`, null, {
-      headers: adminHeaders(),
-    })).data,
+    (await apiClient.post<ProviderTestResult>(`/providers/${name}/test`, null)).data,
 }
 
 export const modelTemplatesApi = {

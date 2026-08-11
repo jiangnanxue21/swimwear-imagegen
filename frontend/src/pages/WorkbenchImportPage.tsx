@@ -11,7 +11,7 @@
  * 改完可以直接重新上传,不用先删两列。
  */
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Descriptions, Empty, Space, Statistic, Steps, Table, Tag,
   Tooltip, Upload,
@@ -47,6 +47,17 @@ export default function WorkbenchImportPage() {
    */
   const { message } = App.useApp()
   const navigate = useNavigate()
+  /*
+   * 来路(a47 §3.1)。工作台的「批量导入」带 `?from=workbench` 过来,
+   * 导入完成后**回工作台**(§3.3 验收第 2 条)。
+   *
+   * 判据取白名单而不是 `document.referrer`:后者在刷新、粘贴链接、
+   * 从聊天窗点进来这三种情况下都不可靠,而"回哪儿"这件事一旦猜错,
+   * 运营会被送到一个他从没去过的页面。认不出来就不给这颗按钮 ——
+   * 少一个入口比送错地方好。
+   */
+  const [searchParams] = useSearchParams()
+  const cameFromWorkbench = searchParams.get('from') === 'workbench'
   useDocumentTitle('批量导入 SKU')
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null)
@@ -342,6 +353,13 @@ export default function WorkbenchImportPage() {
                 committed.skipped_existing ?? 0
               } 件,错误 ${committed.failed ?? 0} 行`}
               description="错误行没有进库,其余行不受影响。改完错误行文件可以直接重新上传。"
+              action={
+                cameFromWorkbench ? (
+                  <Button size="small" type="primary" onClick={() => navigate('/workbench')}>
+                    回工作台
+                  </Button>
+                ) : undefined
+              }
             />
           )}
 

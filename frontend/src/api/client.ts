@@ -33,186 +33,56 @@ export const LONG_TIMEOUT_MS = 300_000
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? '/api',
   timeout: DEFAULT_TIMEOUT_MS,
+  /*
+   * 浏览器登录的 Session Cookie 靠它送出去。**这一行是整条登录链路的最后一跳。**
+   *
+   * 后端已经在 `/auth/login` 上发了 HttpOnly Cookie,而 axios 默认
+   * `withCredentials: false` —— 同源部署(nginx 把 `/api/` 反代到后端、
+   * dev 走 vite proxy)下浏览器仍然会带上 Cookie,所以**开发和默认部署都看不出
+   * 少了这一行**。出问题的是 `VITE_API_BASE_URL` 指向另一个源的那种部署:
+   * Cookie 一次都不会发出去,每个请求 401,而登录接口本身返回 200 ——
+   * 表现是"登录成功了,然后立刻又要登录"。
+   *
+   * 这正是本仓 §3.43 那一族缺陷:上游全对,断在最后一跳,而两侧的测试都绿。
+   * 所以它有一条源码级守卫
+   * (`backend/tests/pure/test_a46_phase2_browser_login_seam.py` 的
+   * `test_the_browser_actually_sends_the_session_cookie`)。
+   */
+  withCredentials: true,
 })
 
-/**
- * 改配置的口令(后端 ADMIN_TOKEN)。能改 API Key、能把生成切到别家、能烧光额度。
+/*
+ * ## 这里原来有一整条浏览器 Token 链,随 Browser Login 一起退役(PRD §26/§27)
  *
- * 存在 localStorage 里意味着任何 XSS 都能读到它。这是本阶段明确接受的取舍
- * ——它不是账号体系,只是一道运维口令,后端才是真正把关的一方——
- * 但换成账号体系时,这里应当一并换成 httpOnly Cookie 或内存态。
+ * 退役的是:`imagegen.admin-token` / `imagegen.operator-token` 两个 localStorage
+ * 键、写不进去时的 `memory` 兜底、`TOKEN_CHANGED_EVENT` 与 `announceTokenChange`、
+ * `read/write` 两个私有函数、`readAdminToken` / `writeAdminToken` /
+ * `readOperatorToken` / `writeOperatorToken`、自动带 `X-Operator-Token` 并回落
+ * `X-Admin-Token` 的请求拦截器、`adminHeaders()`,以及 `authRejected` 那一组
+ * (`isAuthRejected` / `onAuthRejectedChange` / `setAuthRejected`)。
+ *
+ * **不是简化,是换了一套凭据。** 浏览器现在拿的是 HttpOnly 签名 Cookie
+ * (`withCredentials: true`,见上面),它读不到、也不需要读。`ADMIN_TOKEN` /
+ * `OPERATOR_TOKENS` 仍然在后端好好活着,只服务 CLI、脚本、pytest 与服务间调用。
+ *
+ * ## 为什么 `token` 模式下删掉它是安全的
+ *
+ * 会有人担心:`/health` 回 `auth_mode: token` 的部署,浏览器岂不是没凭据了?
+ * 不会。`config._check_browser_auth` 规定 `APP_ENV ∉ LOCAL_ENVS` 时三项必填、
+ * 配不全直接起不来 —— 也就是说 `token` 模式**只可能出现在 local/dev**,
+ * 而那里 `deps.resolve_identity` 的 `ROLE_DEV` 回落本来就不要任何凭据。
+ * 「口令模式的浏览器」这个组合在今天的配置空间里不存在。
+ *
+ * ## 别照着旧门禁的失败信息把它加回来
+ *
+ * 曾经有三条门禁守着这条链,其中一条的失败信息是「回落被整个删掉了 ——
+ * 只配 admin 的部署会整站 401,那不是修复」。那句话在口令时代是对的,今天不是:
+ * 今天整站 401 的正确解法是登录,不是往 localStorage 里塞一把口令。
+ * 三条门禁已随本轮改写(见 `test_gate_a_guards.py` / `test_a44_batch6_fixes.py`)。
  */
-const ADMIN_TOKEN_STORAGE_KEY = 'imagegen.admin-token'
 
 /**
- * 日常业务口令(后端 OPERATOR_TOKENS)。传商品、建任务、审图,以及**读列表**。
- *
- * 以前不存在这个东西:写接口靠 local 开发环境免口令跑通,读接口后端根本不验。
- * 后端现在读写都要身份(评审第 1 条),于是它成了必需品。
- */
-const OPERATOR_TOKEN_STORAGE_KEY = 'imagegen.operator-token'
-
-/**
- * 本次会话的口令。**localStorage 写不进去时的唯一去处。**
- *
- * 上一版这里只有一句注释「隐私模式下 localStorage 不可写,不影响本次会话内
- * 继续操作」—— 那句话不成立:异常被吞掉之后没有任何兜底,后续读取仍然只读
- * localStorage,读到的还是空。于是设置页提示「口令已记住」,而**每一个请求
- * 都不带口令**,整站 401。提示和事实相反,比没有提示更糟。
- *
- * 内存态活到刷新为止,这一点必须让用户知道(见 `writeToken` 的返回值)。
- */
-const memory = new Map<string, string>()
-
-/**
- * 口令变了。**同一个标签页里 `storage` 事件不触发**,所以要自己发一个(A-10)。
- *
- * `useIdentity` 的 `hasToken` 原来是同步读存储的一个普通变量,注释自己写着
- * "不是响应式的" —— 于是存完口令之后那个组件不会重渲染,`enabled` 不会翻转,
- * 全靠设置页记得手动 invalidate。漏一处就是"口令存好了、界面仍说没登录"。
- *
- * 事件名走 `window`,因为读写口令的地方不止一处,而它们之间没有共同的 React 树。
- */
-export const TOKEN_CHANGED_EVENT = 'imagegen:token-changed'
-
-function announceTokenChange(): void {
-  try {
-    window.dispatchEvent(new Event(TOKEN_CHANGED_EVENT))
-  } catch {
-    // 非浏览器环境(vitest 的 node 环境)。口令变更没人听也不影响写入本身
-  }
-}
-
-function read(key: string): string {
-  try {
-    const stored = window.localStorage.getItem(key)
-    if (stored) return stored
-  } catch {
-    /* 读不到就看内存 */
-  }
-  return memory.get(key) ?? ''
-}
-
-/** 返回是否**持久化**成功。false = 只存在内存里,刷新就没了。 */
-function write(key: string, value: string): boolean {
-  if (value) memory.set(key, value)
-  else memory.delete(key)
-  // 无论落到 localStorage 还是只落到内存,**口令都已经变了** —— 所以广播
-  // 放在 try 之外。放进 try 的话,隐私模式下写不进存储的那一路就不会通知,
-  // 而那一路恰恰是最需要界面立刻跟上的(它只活到刷新为止)
-  try {
-    if (value) window.localStorage.setItem(key, value)
-    else window.localStorage.removeItem(key)
-    announceTokenChange()
-    return true
-  } catch {
-    announceTokenChange()
-    return false
-  }
-}
-
-export function readAdminToken(): string {
-  return read(ADMIN_TOKEN_STORAGE_KEY)
-}
-
-export function writeAdminToken(value: string): boolean {
-  return write(ADMIN_TOKEN_STORAGE_KEY, value)
-}
-
-export function readOperatorToken(): string {
-  return read(OPERATOR_TOKEN_STORAGE_KEY)
-}
-
-export function writeOperatorToken(value: string): boolean {
-  return write(OPERATOR_TOKEN_STORAGE_KEY, value)
-}
-
-/**
- * 全局带上口令。
- *
- * 以前这里刻意**没有**拦截器,理由是"别让拉列表的请求捎上改配置的口令"。
- * 那个理由在后端只保护写接口时成立;现在读接口也要身份,不带就一个页面都打不开。
- *
- * 但那份顾虑是对的,所以两把口令分开处理:
- *
- *   X-Operator-Token   每个请求都带。它只能做日常业务操作
- *   X-Admin-Token      **只在设置页/提示词/Provider 测试显式带**(adminHeaders)
- *
- * 于是"拉一次商品列表"不会把能改 API Key 的那把口令送出去。后端两边都认:
- * admin 天然包含 operator,所以只配了 admin 的开发机照样能用。
- *
- * A5 补的回落:上一版只在有 operator 口令时才带头,只配了 admin 口令的浏览器
- * 于是**一个头都不带**,后端如实回 401 —— 而"后端已经允许 admin 访问业务接口"
- * (`deps.resolve_identity`)这件事在前端被浪费掉了。现在没有 operator 口令时
- * 退而带上 admin 口令。顺序不能反:两把都配了就还是走 operator,
- * 免得日常拉列表也把管理口令送出去。
- */
-/**
- * 评审 P2-4:两处写法改掉,行为不变。
- *
- *   `config.headers['X-Admin-Token']`  裸下标是**大小写敏感**的,而 axios 的
- *                                      `AxiosHeaders` 是大小写不敏感的容器。
- *                                      今天能对,只是因为全仓只有 `adminHeaders()`
- *                                      一个写入点、大小写恰好一致。用 `has()`
- *   `config.headers.set?.(…)`          可选调用:一旦 headers 不是 AxiosHeaders
- *                                      实例,它会**静默地不带口令**发出去 ——
- *                                      失败方向是 fail-open,而这是一个鉴权头。
- *                                      改成直接调用:真出这种事要当场炸
- */
-apiClient.interceptors.request.use((config) => {
-  if (config.headers.has('X-Operator-Token') || config.headers.has('X-Admin-Token')) {
-    return config
-  }
-  const operator = readOperatorToken()
-  if (operator) {
-    config.headers.set('X-Operator-Token', operator)
-    return config
-  }
-  const admin = readAdminToken()
-  if (admin) {
-    config.headers.set('X-Admin-Token', admin)
-  }
-  return config
-})
-
-/** 需要管理口令的请求带这个。不做成全局,理由见上面的拦截器注释。 */
-export function adminHeaders(): Record<string, string> {
-  const value = readAdminToken()
-  return value ? { 'X-Admin-Token': value } : {}
-}
-
-/**
- * 口令被后端拒过一次(OPS-REVIEW P5:冷启动)。
- *
- * 光看 localStorage 只能发现"没填",发现不了"填错了" —— 而填错的那种更折磨:
- * 每个页面都红一片,每条错误都在说"到设置页核对口令",但没有一处告诉新人
- * **系统整体是好的、只差一个口令**。所以把这件事提升成一个全局事实,
- * 由 `ColdStartBanner` 在所有页面顶部统一说一次。
- *
- * 状态存在模块变量里而不是 React 里:拦截器不在组件树内,而这是整个应用
- * 唯一一份"口令好不好"的判断 —— 两份的话,横幅和请求会各说各话。
- */
-let authRejected = false
-const authListeners = new Set<(rejected: boolean) => void>()
-
-export function isAuthRejected(): boolean {
-  return authRejected
-}
-
-/** 订阅口令状态变化。返回退订函数(给 useEffect 用)。 */
-export function onAuthRejectedChange(fn: (rejected: boolean) => void): () => void {
-  authListeners.add(fn)
-  return () => authListeners.delete(fn)
-}
-
-function setAuthRejected(value: boolean): void {
-  if (authRejected === value) return
-  authRejected = value
-  for (const fn of authListeners) fn(value)
-}
-
-/**
- * 匿名接口:成功了也**不能**证明口令是好的。
+ * 匿名接口:成功了也**不能**证明登录态是好的;失败了也不该把人踢去登录页。
  *
  * A5 修的那个缺陷:`/health` 走同一个 apiClient,而响应拦截器对任何成功
  * 响应都执行 `setAuthRejected(false)` —— 于是横幅刚被 401 点亮,
@@ -221,7 +91,7 @@ function setAuthRejected(value: boolean): void {
  * 判断仍然只有一份(就在下面那个拦截器里),这里只是把"哪些成功不算数"
  * 说清楚。与后端 `main.PUBLIC_PREFIXES` 对应,加匿名接口时两边一起加。
  */
-const ANONYMOUS_PATHS = ['/health', '/media-files']
+const ANONYMOUS_PATHS = ['/health', '/media-files', '/auth/login', '/auth/logout']
 
 function isAnonymousPath(url: string | undefined): boolean {
   if (!url) return false
@@ -229,15 +99,101 @@ function isAnonymousPath(url: string | undefined): boolean {
   return ANONYMOUS_PATHS.some((p) => url === p || url.startsWith(`${p}/`))
 }
 
+/**
+ * 这个部署认哪种凭据。**真相来源是后端 `/health` 的 `auth_mode`,不是这里。**
+ *
+ * 记一份的唯一理由:`describeError` 不在 React 树里,它拿不到那个查询的结果,
+ * 而它必须对 401 说对话 —— 会话模式下该说"请重新登录",免登录模式
+ * (local/dev 三项全空,`token`)下没有登录这个动作,只能说"配置刚变过"。
+ * 两句话指向的动作完全不同;口令时代这里的错话真的把运营送去改过一把
+ * 根本不会被读的口令(`deps.rejection` 顶部记着那件事)。
+ *
+ * 由响应拦截器在 `/health` 回来时写入 —— 也就是说它**永远不早于**那次响应,
+ * 而 React 那一侧读的是同一次响应的 `data`。两处不会分叉:它们是同一个来源,
+ * 不是两份判断。默认值取 `token` 是安全方向:会话模式下最坏是把人当成
+ * 开发模式多解释一句,而反过来会把免登录环境的人送到一个登不进去的登录页。
+ */
+type AuthMode = 'session' | 'token'
+let authMode: AuthMode = 'token'
+
+function isSessionAuth(): boolean {
+  return authMode === 'session'
+}
+
+/**
+ * 登录态**可能**失效了(**401,不含 403**)。
+ *
+ * ## 它不是结论,是一句"去重新问一遍"
+ *
+ * 这个信号**不直接决定跳不跳登录页**。判定只有一处:`useIdentity` 那次
+ * `/auth/whoami`。这里发生的全部事情是:某个业务请求撞了 401,于是通知
+ * `useIdentity` 把缓存的身份丢掉、重新问后端一次,由后端的回答决定去留。
+ *
+ * 这么绕一圈是有理由的。反过来"看见 401 就跳登录页"会把两件事混在一起:
+ * 一次偶发的 401(某个接口配错了守卫、网关抽风)会把一个登录态完好的人
+ * 踢出去,而他重新登一次、回来撞上同一个接口,再被踢出去 —— 一个能无限
+ * 循环的动线。让 whoami 来回答,"我到底登没登着"就仍然只有一个答案来源。
+ *
+ * ## 和 `authRejected` 的分工
+ *
+ *     authRejected   401 或 403(除 AUTH_FORBIDDEN)。点亮横幅,说一句话
+ *     sessionExpired 只有 401。让 `useIdentity` 重新探一次身份
+ *
+ * 403 一律不算:`AUTH_FORBIDDEN` 说明这次身份是**有效的**(operator 去动了
+ * 管理接口),`CONFIG_INVALID` 说明服务端没配凭据。这两种情况重新探身份
+ * 探不出任何新东西,只会多打一次请求。
+ *
+ * ## 只在**翻转**时通知
+ *
+ * `if (sessionExpired === value) return` 那一行不是优化,是**防死循环**:
+ * 重新探身份本身也会撞 401,如果每次 401 都通知一遍,订阅者就会被自己
+ * 触发的请求无限唤醒。已经是 true 时再来一个 401,什么都不做才是对的。
+ */
+let sessionExpired = false
+const sessionListeners = new Set<(expired: boolean) => void>()
+
+/** 订阅"该重新探一次身份了"。返回退订函数,给 `useEffect` 当清理用 */
+export function onSessionExpiredChange(fn: (expired: boolean) => void): () => void {
+  sessionListeners.add(fn)
+  return () => {
+    sessionListeners.delete(fn)
+  }
+}
+
+function setSessionExpired(value: boolean): void {
+  if (sessionExpired === value) return
+  sessionExpired = value
+  for (const fn of sessionListeners) fn(value)
+}
+
+/** 登录成功后调用,把上一次的 401 记录清掉 —— 否则它属于上一个会话 */
+export function clearSessionExpired(): void {
+  setSessionExpired(false)
+}
+
 apiClient.interceptors.response.use(
   (response) => {
-    // 有一个**带口令的**请求成功了才说明口令没问题。**不等用户手动关掉横幅** ——
-    // 一条修好了还赖着不走的警告,下一次会被连同真问题一起忽略
-    if (!isAnonymousPath(response.config?.url)) setAuthRejected(false)
+    // 一次成功的**带身份**请求,就是"会话还活着"的证据。匿名接口不算:
+    // `/health` 在没登录时也会 200,拿它当证据等于永远不会发现登录态没了
+    if (!isAnonymousPath(response.config?.url)) {
+      setSessionExpired(false)
+    }
+    if (response.config?.url === '/health') {
+      const mode = (response.data as { auth_mode?: string } | undefined)?.auth_mode
+      // 只认这两个值。后端将来加第三种模式而前端没跟上时,退回 `token`
+      // 比按一个不认识的字符串猜要安全 —— 猜错的方向是把人锁在登录页外面
+      authMode = mode === 'session' ? 'session' : 'token'
+    }
     return response
   },
   (error) => {
-    if (isAuthError(error)) setAuthRejected(true)
+    if (
+      axios.isAxiosError(error) &&
+      error.response?.status === 401 &&
+      !isAnonymousPath(error.config?.url)
+    ) {
+      setSessionExpired(true)
+    }
     return Promise.reject(error)
   },
 )
@@ -404,8 +360,9 @@ const HINTS = {
   server: '按请求编号在后端 JSON 日志里搜 request_id,可定位到这一次请求;错误体里不带异常原文是刻意的(需求第十九章)',
   network: '请求没到后端。确认后端在运行(docker compose ps),以及前端的 VITE_API_BASE_URL 指向它',
   timeout: '后端 30 秒未响应。看 worker 是不是卡在 Provider 轮询上(FASHN 不支持取消),或数据库连接被占满',
-  auth: '核对后端 OPERATOR_TOKENS / ADMIN_TOKEN 与本浏览器存的那把口令;后端 admin 天然包含 operator',
-  forbidden: '这把口令通过了身份验证,但角色是 operator。该接口挂的是 require_admin,需要 ADMIN_TOKEN',
+  auth: '这是 local/dev 的免登录模式(后端三项浏览器登录配置全空),正常不该出现 401。先看后端是不是换了 APP_ENV 或补了 ADMIN_PASSWORD —— 补了任意一项,本机也会真的走登录',
+  session: '浏览器 Session 已失效或从未建立。签名 Cookie 是无状态的,换过 AUTH_SESSION_SECRET 会让全部已登录会话当场作废;多机部署各节点必须配同一把',
+  forbidden: '当前账号是 operator,身份是有效的;该接口挂的是 require_admin,要用 admin 账号登录。设置页里那两把 ADMIN_TOKEN / OPERATOR_TOKENS 是给 CLI 和脚本的机器凭据,改它们不影响谁能登录',
   rate: '被限流。看 Provider 配额与当前并发',
 } as const
 
@@ -487,10 +444,10 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
   }
 
   if (code === 'AUTH_FORBIDDEN') {
-    // 口令是对的,只是这件事这把口令做不了。**不能指他去核对口令** ——
-    // 那会让他去改一把正确的口令,而正确的做法是找有管理口令的人
+    // 登录是有效的,只是这件事这个账号做不了。**不能指他去改凭据** ——
+    // 重新登录、换密码都不会让 operator 变成 admin,正确的做法是找管理员
     return {
-      text: `${body?.error?.message ?? '权限不足'} —— 你的口令是有效的,这一步需要管理口令,请联系管理员`,
+      text: `${body?.error?.message ?? '权限不足'} —— 你的登录是有效的,这一步需要管理员账号,请联系管理员`,
       requestId,
       outcome: 'REJECTED',
       technical: { code, status, fields, retriable: false, hint: HINTS.forbidden },
@@ -498,12 +455,30 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
   }
 
   if (status === 401 || status === 403) {
-    // 口令是手填的,不存在"登录失效",只有"没填/填错"。指到设置页是运营做得到的动作
+    /*
+     * 这句尾巴分两种说法,因为两种部署下运营该做的事完全不同:
+     *
+     *     会话模式   重新登录一次。设置页里那两把是**机器凭据**,改它没有用
+     *     免登录模式 local/dev 且三项全空。这里既没有"登录"也没有口令可填,
+     *                所以只能说"配置刚变过" —— 这是唯一还能到达这一支的路径
+     *
+     * 上一版这里的后一句是"到「系统设置」页核对口令"。浏览器登录落地、
+     * localStorage 口令链删除之后,那句话指向一个**已经不存在的输入框**。
+     */
+    const tail = isSessionAuth()
+      ? ' —— 登录状态已失效,请重新登录'
+      : ' —— 这台机器处于免登录的开发模式,出现这一条说明后端配置刚变过,请刷新或联系管理员'
     return {
-      text: `${body?.error?.message ?? '口令缺失或不正确'} —— 到「系统设置」页核对口令后重试`,
+      text: `${body?.error?.message ?? '登录状态已失效'}${tail}`,
       requestId,
       outcome: 'REJECTED',
-      technical: { code, status, fields, retriable: false, hint: HINTS.auth },
+      technical: {
+        code,
+        status,
+        fields,
+        retriable: false,
+        hint: isSessionAuth() ? HINTS.session : HINTS.auth,
+      },
     }
   }
 

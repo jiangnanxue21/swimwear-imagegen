@@ -45,7 +45,8 @@ make smoke      # 一分钟内告诉你闭环通不通
 > # 前端构建产物由 Nginx 托管,监听 127.0.0.1:8080;backend 不再对外发布端口
 > ```
 
-导入示例数据(10 个商品 + 30 张素材,幂等,可重复执行):
+导入示例数据(幂等,可重复执行。**条数不写在这里** —— 增删样例时写死的数字
+会静默过期,要当前口径跑 `cd backend && python3 tools/verify_sample_data.py`):
 
 ```bash
 python3 sample-data/generate_images.py   # 首次需先生成占位图
@@ -62,8 +63,11 @@ make worker-ping     # 期望输出 {'pong': True, ...}
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 存活探针,不依赖外部组件 |
+| GET | `/api/health` | 存活探针,不依赖外部组件;匿名可访问,顺带回 `auth_mode` |
 | GET | `/api/health/ready` | 就绪探针,逐项报告 DB / Redis / 存储 |
+| POST | `/api/auth/login` | 浏览器登录,用户名+密码换 HttpOnly Session Cookie;匿名可访问 |
+| POST | `/api/auth/logout` | 退出登录,**幂等**(没登录也回 200);匿名可访问 |
+| GET | `/api/auth/whoami` | 这次请求带的凭据是谁,冷启动横幅与顶栏身份区据此渲染 |
 | POST | `/api/products` | 新增商品,SKU 重复返回 409 |
 | GET | `/api/products` | 列表,支持 search / status / category / garment_type / 分页 |
 | GET | `/api/products/{id}` | 商品详情 |
@@ -94,6 +98,21 @@ make worker-ping     # 期望输出 {'pong': True, ...}
 | PUT | `/api/settings` | 保存配置,需要 `X-Admin-Token` |
 | POST | `/api/settings/reset` | 删掉指定项的后台覆盖,回到环境变量/默认值,需要 `X-Admin-Token` |
 
+**这张表是主链路,不是全量。** 后来的几个阶段又加了七组接口,数量已经超过
+一张手写表能跟上的程度 —— 全量以运行中的 `/docs`(OpenAPI)为准,
+路由装配的唯一真相在 `backend/app/api/router.py`:
+
+| 接口组 | 做什么 |
+| --- | --- |
+| `/api/spus/*` | SPU / 颜色变体 / SKU 展开(建档,商品的上游) |
+| `/api/attributes/*` | 属性识别与人工校准 |
+| `/api/media/*`、`/api/media-files/*` | 素材库、私有素材签名代发 |
+| `/api/image-sets/*` | 图片集编排与校验 |
+| `/api/generation-plans/*` | 生成方案(创建任务前解析出当前生效的那一份) |
+| `/api/workbench/*` | 运营工作台:流程聚合、文案、草稿、批量任务、异常、审计查询 |
+| `/api/publish/*` | 发布上架:提交、清单、详情、刷新状态、下架、清理预案 |
+| `/api/usage/*`、`/api/environment` | 付费调用台账、环境真实性(状态条按它渲染) |
+
 
 
 ## 生成一张图试试
@@ -118,19 +137,36 @@ make seed                          # 导入示例商品与素材
 
 ## 已实现的页面
 
-| 路径 | 内容 |
-| --- | --- |
-| `/dashboard` | 仪表盘(首页):商品/任务/分档分布/Provider 调用/出图覆盖率/最近失败 |
-| `/products` | 商品列表:搜索、状态与类型筛选、分页、新增、CSV 导入 |
-| `/products/:id` | 商品详情:属性、原始素材、**网站成品图与导出**、生成历史、创建任务 |
-| `/tasks` | 生成任务列表:状态筛选、取消、重试,进行中自动轮询 |
-| `/tasks/:id` | 任务详情:按轮次分组的候选图、分档与总分、评分抽屉、Provider 调用记录 |
-| `/reviews` | 人工审核队列:状态与原因筛选、最佳候选分档、硬错误、只读分档标准 |
-| `/reviews/:id` | 审核详情:原图对照、各轮最佳候选、维度分、通过/驳回/重生/切换 Provider |
-| `/model-templates` | 模特模板:上传、标签、姿势、体型、启用停用 |
-| `/providers` | Provider:能力、是否已配置、连接测试(只读) |
-| `/settings` | 设置:Provider 密钥、生成模型、评分模型、下载白名单 |
-| `/system` | 系统状态:进程与依赖组件连通性 |
+侧栏按**一天的顺序**分四组(`App.tsx` 的 `NAV`)。`/` 重定向到 `/today`,
+**首页是它,不是仪表盘**;`/dashboard` 在 A9 之后归到「系统管理」组。
+菜单与路由都**不按账号裁剪** —— 非管理员看得见管理入口,点进去由后端返回 403,
+理由在 `App.tsx` 的「路由和菜单都不按角色裁剪」一节。
+
+| 路径 | 组 | 内容 |
+| --- | --- | --- |
+| `/login` | — | 浏览器登录。未登录访问任何页面都会弹到这里,并带 `?next=` |
+| `/today` | 今日工作 | **首页**。七张待办卡片,计数全部来自后端 |
+| `/workbench-review` | 今日工作 | **审核中心**:顶部按类别给计数(候选图/图片集/文案/属性冲突),下面是逐件快审 |
+| `/reviews`、`/reviews/:id` | 路由保留,不在菜单 | 候选图人工审核队列与详情:原图对照、各轮最佳候选、维度分、通过/驳回/重生。入口在审核中心顶部 |
+| `/workbench-exceptions` | 今日工作 | 异常与驳回 |
+| `/workbench`、`/workbench/:id` | 商品生产 | 商品工作台:七步流程聚合视图 |
+| `/wizard/:id` | 商品生产 | 一体化向导:七步逐步引导,支持刷新恢复 |
+| `/products`、`/products/:id` | 路由保留,不在菜单 | 商品与 SKU 原始信息:列表筛选、详情、**网站成品图与导出**、生成历史。日常走工作台详情,这里留给排障与看原始信息 |
+| `/spus/new`、`/spus/:spuId` | 路由保留,不在菜单 | 新建商品款式(三步建档)与 SPU 详情。入口在工作台的「新建」按钮 |
+| `/workbench-import` | 路由保留,不在菜单 | 批量导入 SKU(CSV)。入口在工作台的「新建」按钮,导入完成后回工作台 |
+| `/media` | 商品生产 | 素材库:去重、归属与授权 |
+| `/tasks`、`/tasks/:id` | 系统管理 | 生成任务列表与详情(**排障用**):按轮次分组的候选图、评分抽屉、Provider 调用记录。运营看自己商品的任务走工作台详情的「生成任务」页签 |
+| `/workbench-spus` | 路由保留,不在菜单 | SPU 聚合视图。已被工作台的「按款」视图取代 |
+| `/workbench-batches` | 导出与上架 | 批量与导出:批量任务与导出文件 |
+| `/publish` | 导出与上架 | 发布上架:提交、状态、驳回回流、下架 |
+| `/dashboard` | 系统管理 | 指标仪表盘:商品/任务/分档分布/Provider 调用/出图覆盖率/最近失败 |
+| `/spend` | 系统管理 | 付费调用花费与预算 |
+| `/model-templates` | 系统管理 | 模特模板:上传、标签、姿势、体型、启用停用 |
+| `/providers` | 系统管理 | Provider:能力、是否已配置、连接测试(只读) |
+| `/prompts` | 系统管理 | 提示词模板 |
+| `/settings` | 系统管理 | 设置:Provider 密钥、生成模型、评分模型、下载白名单 |
+| `/audit` | 系统管理 | 操作审计,可按操作人筛 |
+| `/system` | 系统管理 | 系统状态:进程与依赖组件连通性 |
 
 **不需要任何第三方 API Key,也不需要视觉大模型。** 未配置 FASHN / fal.ai / ComfyUI 时系统照常启动,
 对应 Provider 显示为"未配置";没有外部评分模型时使用 Mock 评分器,整条评分闭环照样跑通。
@@ -159,7 +195,8 @@ make seed                          # 导入示例商品与素材
 **总分由后端按权重算,不采信评分器自报的数字。** 两者差值存进 `model_reported_overall`,
 用来监控大模型打分漂移。Mock 评分器故意自报一个不同的数,等于给这条规则内置了活体探针。
 
-**硬错误只淘汰候选,不终结任务。** 15 个硬错误代码中任意一个出现即判 D;
+**硬错误只淘汰候选,不终结任务。** 硬错误代码(`core/enums.HardFailCode`,
+按受众分女装 / 男装 / 通用三组)中任意一个出现即判 D;
 但只要还有轮次,任务就继续自动重生,**不立刻交给人工**。
 人工审核的对象是**商品任务**,不是每一张低分候选图 —— 否则队列会被本可自动解决的废图淹没。
 
@@ -181,7 +218,8 @@ FASHN_API_KEY=fa-xxxxxxxx
 
 ```bash
 docker compose restart backend worker
-curl -X POST http://localhost:8000/api/providers/fashn/test
+curl -X POST http://localhost:8000/api/providers/fashn/test \
+     -H "X-Admin-Token: $ADMIN_TOKEN"    # APP_ENV=local 下可省;其它环境必带
 # {"configured": true, "reachable": true, "message": "连接正常,剩余额度 234"}
 ```
 
@@ -279,6 +317,58 @@ openssl rand -base64 32
 
 设计取舍与未完成事项见 `docs/SETTINGS.md`。
 
+## 浏览器登录
+
+打开网页需要先登录。两个固定账号,密码由部署的人在服务器上配:
+
+| 账号 | 能做什么 |
+| --- | --- |
+| `admin` | 改配置、改 Provider、改提示词、测连接 —— 以及 operator 能做的一切 |
+| `operator` | 日常生产:传商品、建任务、审图、上架 |
+
+配置在 `.env` 里,三项:
+
+```ini
+ADMIN_PASSWORD=换成一个真密码
+OPERATOR_PASSWORD=换成另一个真密码       # 不能和上面相同
+AUTH_SESSION_SECRET=                    # 至少 32 字符,见下面那行命令
+```
+
+```bash
+# 生成一把签名密钥
+python3 -c "import secrets;print(secrets.token_urlsafe(48))"
+```
+
+四件需要知道的事:
+
+**非本机环境三项必填,配不全后端起不来。** 判据是 `APP_ENV` 不属于
+local/dev/development —— `uat`、`staging`、`test` 都算"非本机",因为那几个名字
+对应的往往正是别人也能访问的真机器。用 `docker-compose.prod.yml` 部署时,
+compose 会在**创建容器之前**就报变量未设置,而不是让容器起来又退出。
+
+**本机默认不开。** 三项全空时沿用旧的 Header 口令模式(`APP_ENV=local` 下连口令
+都不用)。但只要填了**任意一项**,本机也会真的走登录 —— 这是刻意的:否则本地
+人工验收永远测不到 admin/operator 的差异、退出登录和 403。
+
+**换掉 `AUTH_SESSION_SECRET` 等于把所有人当场登出。** 签名 Cookie 是无状态的,
+服务端不存会话表,旧 Cookie 的签名换一把密钥就验不过了。反过来说,
+**多机部署各节点必须配同一把**,否则用户会"隔一次请求就掉线"。
+
+**登录状态是滑动过期,不是绝对存活时长。** `AUTH_SESSION_MAX_AGE_SECONDS`
+(默认 12 小时)计的是**空闲**时间:页面只要还在发请求,Cookie 就会被不断续期。
+要做"登录满 N 小时强制重登",得另外在会话里记登录时刻,当前不做。
+
+设置页里那两把 `ADMIN_TOKEN` / `OPERATOR_TOKENS` 是**机器凭据**,给 CLI、脚本和
+pytest 用,和网页登录是两回事 —— 改它们不会影响任何人的登录密码。浏览器**不再
+持有任何 Token**:凭据是 HttpOnly 签名 Cookie,localStorage 里那两把口令与设置页
+上的录入卡在 a46-phase6 一起删掉了。
+
+**侧栏按角色收敛。** 「系统管理」整组(仪表盘、花费、模特模板、Provider、
+提示词、设置、审计、系统状态)**只对 `admin` 显示**;`operator` 的顶栏菜单里也
+没有「系统设置」。但**路由全部照常注册** —— operator 手输 `/settings` 打得开,
+页面上是一句「当前账号没有管理员权限」,真正拦住他的是后端 `require_admin`。
+菜单收敛是可发现性,不是权限边界。
+
 ## 本机开发(不用 Docker)
 
 ```bash
@@ -352,6 +442,14 @@ backend/app/providers/   图像生成 Provider 抽象(阶段 3)
 backend/app/evaluators/  候选图评分器(阶段 4)
 backend/app/workflows/   状态机与编排(阶段 3)
 backend/app/tasks/       Celery
+backend/app/attributes/  属性注册表、校准、置信度与运行态
+backend/app/extractors/  属性抽取器(视觉 / mock)与调用预算
+backend/app/media/       素材域:证据规则、样本完整度、来源冲突
+backend/app/listings/    Listing:SKU 矩阵、文案、变体键、图片集、导出写出
+backend/app/workbench/   运营工作台:流程、批次、平台、颜色维聚合
+backend/app/channels/    渠道 Adapter 与字段 spec(`spec/{category_id}.yaml`)
+backend/app/llm/         多模态与文本模型传输层、端点信任、脱敏
+backend/app/scripts/     一次性脚本:冒烟、校准、回填、清理、基线
 frontend/src/            React + TS + AntD 后台
 comfyui/                 工作流 JSON 与节点映射(阶段 5)
 sample-data/             示例商品与素材
@@ -382,7 +480,9 @@ make secret-key    # 生成设置页主密钥
 
 ## 环境变量
 
-见 `.env.example`,已按「应用 / 数据库 / Redis / 存储 / 上传限制 / Provider / 评分」分组。
+见 `.env.example`,按主题分组(应用、数据库、Redis/Celery、存储、上传限制、
+Provider、评分与视觉模型、属性识别、批量执行、文案、后台设置页、**浏览器登录**、
+费用与预算)。**分组数不写在这里** —— 以那个文件为准。
 `tests/pure/test_config_contract.py` 会静态校验 `.env.example` 与 `Settings` 字段一一对应,新增配置项时会自动提醒补文档。
 
 

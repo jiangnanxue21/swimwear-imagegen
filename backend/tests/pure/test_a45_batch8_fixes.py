@@ -107,65 +107,49 @@ def _one_call(text: str, needle: str, where: str) -> str:
                 return text[start:i]
     raise AssertionError(f"{where} 里 {needle!r} 这次调用找不到收尾括号")
 
-def test_every_admin_route_is_called_with_admin_headers():
-    """挂 `require_admin` 的路由,前端调用点必须带 `adminHeaders()`。
+def test_no_frontend_call_site_carries_an_admin_token():
+    """挂 `require_admin` 的路由仍然要有,而正常前端**不得**再带管理口令。
 
-    ## 为什么这条门禁值得存在
+    ## 这条是把旧不变量翻过来,不是删掉它
 
-    A45-#1:`regenerateFile` 少了这一句,于是 A-21 那个**专门为解开 409 死循环
-    而加的唯一出口**对每一个正常用户 403。而 `AUTH_FORBIDDEN` 被 `isAuthError`
-    刻意排除(那是 A5 的正确设计:它不是"口令错了"),冷启动横幅也不亮,
-    运营只看到一句红字 —— **一条修复交付了,却等于没交付**。
+    旧的那条叫 `test_every_admin_route_is_called_with_admin_headers`:对每一个
+    admin 路由,要求前端调用点出现 `adminHeaders()`。它是为一次真实事故加的
+    (A45-#1:`regenerateFile` 少了那一句,于是 A-21 专门为解开 409 死循环加的
+    唯一出口对每个人 403,而 `AUTH_FORBIDDEN` 被 `isAuthError` 刻意排除、
+    冷启动横幅也不亮 —— 一条修复交付了,却等于没交付)。
 
-    同类路由(settings / prompts / generation)一直是带的。靠人记得这条防线
-    在本仓已经反复证明会漏。
+    浏览器登录之后,管理权限由 **Session Identity → require_admin** 判定,
+    浏览器一个 Token 都不该再持有。旧断言于是从"必须带"变成"必须不带"。
 
-    ## 断言口径
+    **保留了 `_admin_routes()` 那半段。** 它扫的是后端真实挂着 `require_admin`
+    的路由,和前端怎么调用无关 —— 那一半的价值一点没变:admin 路由必须存在,
+    否则说明有人在"让前端不带口令"的过程中顺手把守卫也摘了,而那才是真正的
+    退化。两条断言合起来才是新方案下的等强度不变量:
 
-    对每一个 admin 路由,在前端找出**发起它的那一行 axios 调用**,
-    要求同一次调用里出现 `adminHeaders`。路径里的 `{id}` 之类换成宽松匹配。
+        后端仍然有 admin 路由     守卫没被摘
+        前端一处都不带管理口令     凭据确实换成了 Cookie
     """
     routes = _admin_routes()
-    assert routes, "一条 admin 路由都没扫到 —— 是扫描坏了,不是没有 admin 路由"
-
-    frontend = {
-        path: _code_only(_read(path))
-        for path in FRONTEND.rglob("*.ts")
-        if path.name != "client.ts"
-    }
-
-    offenders: list[str] = []
-    for route in sorted(routes):
-        # `/workbench/batches/{batch_id}/file/regenerate` -> 取最后一段静态尾巴
-        tail = route.split("}")[-1]
-        if not tail or tail == "/":
-            tail = route.split("{")[0]
-        hits = [
-            (path, text)
-            for path, text in frontend.items()
-            if tail.strip("/") and tail.strip("/") in text
-        ]
-        if not hits:
-            # 前端根本没调它(比如 /publish/* 那一组,见 A45-#8)——不是本条要管的
-            continue
-        for path, text in hits:
-            # 原来是 `text[index : index + 400]` —— 一个**定长窗口**。
-            # 调用点一多写几行注释,`adminHeaders` 就掉到窗口外面,
-            # 而这一条是**反向**判断,掉出去的表现是「报一个假的漏网」。
-            # 现在切到这次调用的收尾括号为止,切不出来就当场说清楚。
-            call = _one_call(text, tail.strip("/"), path.name)
-            if "adminHeaders" not in call:
-                offenders.append(f"{path.name} -> {route}")
-
-    assert not offenders, (
-        "这些 admin 路由的前端调用点没带 adminHeaders(),后端会 403 而界面上"
-        "只有一句通用错误 -> " + "; ".join(sorted(set(offenders)))
+    assert routes, (
+        "一条 admin 路由都没扫到。要么扫描坏了,要么 `require_admin` 被摘干净了 —— "
+        "后者意味着设置页、Provider 测试、提示词这些接口现在谁都能调"
     )
 
+    offenders: list[str] = []
+    for path in sorted(FRONTEND.rglob("*.ts")) + sorted(FRONTEND.rglob("*.tsx")):
+        text = _code_only(_read(path))
+        for token in ("adminHeaders", "X-Admin-Token", "X-Operator-Token"):
+            if token in text:
+                offenders.append(f"{path.name} -> {token}")
 
-# ==========================================================
-# 门禁二:配置读取的唯一入口没有绕过点(A45-#31 这一类)
-# ==========================================================
+    assert not offenders, (
+        "正常前端又开始带机器凭据了:" + "; ".join(sorted(set(offenders)))
+        + "。浏览器的凭据是 HttpOnly 签名 Cookie(`withCredentials`),"
+        "它读不到也不该读 Token;`ADMIN_TOKEN` / `OPERATOR_TOKENS` 只服务 "
+        "CLI、脚本与 pytest。**不要**为了让某个 403 变绿把这一行加回来 —— "
+        "403 的正确解法是用 admin 账号登录。"
+    )
+
 
 #: 设置页可改、因此**必须**走 `provider_setting()` 读的键。
 #:

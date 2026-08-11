@@ -1,10 +1,10 @@
-import { adminHeaders, apiClient } from './client'
+import { apiClient} from './client'
 import type { PromptOverview, PromptPreview } from './types'
 
 /** 提示词决定评分口径,读写都要口令 —— 能改它的人等于能改「什么图算合格」。 */
 export const promptsApi = {
   read: async (key: string) =>
-    (await apiClient.get<PromptOverview>(`/prompts/${key}`, { headers: adminHeaders() })).data,
+    (await apiClient.get<PromptOverview>(`/prompts/${key}`)).data,
 
   /** 体检,不写库。保存和「看看这版有没有问题」是两件事。 */
   preview: async (key: string, content: string) =>
@@ -12,7 +12,6 @@ export const promptsApi = {
       await apiClient.post<PromptPreview>(
         `/prompts/${key}/preview`,
         { content },
-        { headers: adminHeaders() },
       )
     ).data,
 
@@ -32,7 +31,6 @@ export const promptsApi = {
       await apiClient.put<PromptOverview>(
         `/prompts/${key}`,
         { content, note: note || null },
-        { headers: adminHeaders() },
       )
     ).data,
 
@@ -41,14 +39,11 @@ export const promptsApi = {
       await apiClient.post<PromptOverview>(
         `/prompts/${key}/activate`,
         { version },
-        { headers: adminHeaders() },
       )
     ).data,
 
   reset: async (key: string) =>
-    (await apiClient.post<PromptOverview>(`/prompts/${key}/reset`, null, {
-      headers: adminHeaders(),
-    })).data,
+    (await apiClient.post<PromptOverview>(`/prompts/${key}/reset`, null)).data,
 }
 
 export const VISION_SYSTEM_PROMPT = 'vision_system_prompt'

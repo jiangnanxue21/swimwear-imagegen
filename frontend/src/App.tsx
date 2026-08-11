@@ -1,9 +1,8 @@
 import { createBrowserRouter, createRoutesFromElements, Navigate, Route } from 'react-router-dom'
 import {
-  ApiOutlined, AuditOutlined, DashboardOutlined, FileTextOutlined, HeartOutlined,
-  FolderOpenOutlined, PictureOutlined, ProfileOutlined, SettingOutlined, SkinOutlined,
-  TeamOutlined, ThunderboltOutlined, WarningOutlined, ImportOutlined, ClusterOutlined,
-  PlusSquareOutlined,
+  ApiOutlined, DashboardOutlined, FileTextOutlined, HeartOutlined,
+  FolderOpenOutlined, PictureOutlined, ProfileOutlined, SettingOutlined,
+  TeamOutlined, ThunderboltOutlined, WarningOutlined,
   HistoryOutlined, CheckSquareOutlined, HomeOutlined, WalletOutlined,
   CloudUploadOutlined,
 } from '@ant-design/icons'
@@ -34,45 +33,58 @@ import ReviewDetailPage from './pages/ReviewDetailPage'
 import DashboardPage from './pages/DashboardPage'
 import PromptsPage from './pages/PromptsPage'
 import SettingsPage from './pages/SettingsPage'
+import LoginPage from './pages/LoginPage'
 import SpendPage from './pages/SpendPage'
 import PublishPage from './pages/PublishPage'
 
 /**
- * 侧栏导航(A8:按角色收敛)。
+ * 侧栏导航(A8:按工作阶段分组 + 按角色收敛;a47 §4:菜单收敛 13 → 7)。
  *
- * ## 与计划里那份清单的三处出入
+ * 「按角色收敛」那一半到 a46 才落地:标了 `adminOnly` 的组只对管理员显示。
+ * 在此之前它一直是 `const visible = groups`,当时的理由与撤销它的理由
+ * 都写在 `AppLayout.tsx` 那一行上。**路由不跟着裁**,见下面那一节。
  *
- * 计划 §3.2 给的普通运营清单是九项。落地时多留了三项,理由都是"少了它这条路
- * 就断了",不是"顺手留着":
+ * ## a47:运营那三组从 13 项收到 7 项
  *
- *     商品与 SKU  `/products` 是**唯一**能逐个查看和修改 SKU 基础信息的地方。
- *                 新款统一走 `/spus/new`,批量追加统一走 `/workbench-import`;
- *                 列表页只提供跳转,不再藏第三套建档入口
- *     生成任务    A9 首页的「生成失败」「运行中任务」两张卡片点进来就是这一页。
- *                 首页有卡片、菜单没入口,运营第二次想看时会找不到路
- *     图片审核    `/reviews` 是候选图评分不过关时的落点(MANUAL_REVIEW)。
- *                 它和「待我处理」不是同一个对象:那边审的是图片集与文案,
- *                 这边审的是单张候选图
+ * 收敛的判据是**同一件事只留一个入口**,不是"少即是好"。六项的去处:
+ *
+ *     /reviews          候选图审核 —— 审核中心顶部的计数入口通向它
+ *     /products         工作台详情覆盖日常;原始信息走商品详情的深链
+ *     /spus/new         工作台「新建」里的「新建商品款式」
+ *     /workbench-import 工作台「新建」里的「批量导入 SKU」
+ *     /workbench-spus   工作台的「按款」视图取代它
+ *     /tasks            工作台详情的「生成任务」页签
+ *
+ * **`/tasks` 那一条有硬顺序。** 它移进「系统管理」组等于对运营彻底消失,
+ * 前提是工作台详情的生成任务页签先能回答"我这件商品的任务跑到哪了" ——
+ * 状态、轮次、失败原因三样。a47 §3.2 先落地了那三样,这一步才动。
+ * 反过来做,运营会有一段时间两头落空。
+ *
+ * ## 路由一条都没删
+ *
+ * 撤出菜单 ≠ 删路由。上面六条手输地址全部照常打开,深链、书签、
+ * 聊天窗里发的链接一条都没断。`nav-and-url-filters.test.tsx` 的
+ * `declaredPaths()` 那条断言钉着这一点。
  *
  * ## 「导出」组里没有独立的导出中心页
  *
- * 计划写的是「导出中心」,但仓库里从来没有这一页:单件导出在商品详情的导出标签,
- * 批量导出的文件在批量任务页。Gate A 期间不为了对齐一个菜单名去新建页面
- * (§2.2 禁止扩张),所以这一组指向批量任务页,单件路径由 A9 首页的
- * 「可导出」卡片进入。
+ * 仓库里从来没有这一页:单件导出在商品详情的导出标签,批量导出的文件在
+ * 批量任务页。不为了对齐一个菜单名去新建页面,所以这一组指向批量任务页,
+ * 单件路径由 A9 首页的「可导出」卡片进入。
  *
  * ## 组的顺序就是一天的顺序
  *
  * 今日工作 -> 商品生产 -> 导出。运营早上打开侧栏,从上往下就是他今天的动线;
- * 「系统管理」在最下面,而且只有管理员看得见。
+ * 「系统管理」在最下面,而且**只有管理员看得见**(`adminOnly: true`)。
  */
 export const NAV: NavGroup[] = [
   {
     label: '今日工作',
     items: [
       { key: '/today', label: '工作首页', icon: <HomeOutlined /> },
-      { key: '/workbench-review', label: '待我处理', icon: <CheckSquareOutlined /> },
-      { key: '/reviews', label: '图片人工审核', icon: <AuditOutlined /> },
+      // a47 §6:改名「审核中心」。它是**唯一**一条审核入口,顶部按类别
+      // 给计数,点进去仍是各自现有页面 —— 底层三套审核模型一个都没动
+      { key: '/workbench-review', label: '审核中心', icon: <CheckSquareOutlined /> },
       { key: '/workbench-exceptions', label: '异常与驳回', icon: <WarningOutlined /> },
     ],
   },
@@ -80,12 +92,7 @@ export const NAV: NavGroup[] = [
     label: '商品生产',
     items: [
       { key: '/workbench', label: '商品工作台', icon: <ProfileOutlined /> },
-      { key: '/products', label: '商品与 SKU', icon: <SkinOutlined /> },
-      { key: '/spus/new', label: '新建商品款式', icon: <PlusSquareOutlined /> },
-      { key: '/workbench-import', label: '批量导入 SKU', icon: <ImportOutlined /> },
-      { key: '/media', label: '素材管理', icon: <FolderOpenOutlined /> },
-      { key: '/tasks', label: '生成任务', icon: <PictureOutlined /> },
-      { key: '/workbench-spus', label: 'SPU 聚合', icon: <ClusterOutlined /> },
+      { key: '/media', label: '素材库', icon: <FolderOpenOutlined /> },
     ],
   },
   {
@@ -99,13 +106,26 @@ export const NAV: NavGroup[] = [
      */
     label: '导出与上架',
     items: [
-      { key: '/workbench-batches', label: '批量任务与导出', icon: <ThunderboltOutlined /> },
+      { key: '/workbench-batches', label: '批量与导出', icon: <ThunderboltOutlined /> },
       { key: '/publish', label: '发布上架', icon: <CloudUploadOutlined /> },
     ],
   },
   {
+    /*
+     * 只给管理员看(PRD §30)。这是 a46 新做的功能,不是恢复什么 ——
+     * 在那之前 `AppLayout` 那一行是 `const visible = groups`,
+     * 而 `nav-and-url-filters.test.tsx` 还有一条反向门禁明令禁止这个字段。
+     * 撤那条约束的理由:密码在 .env 里之后,没有人再需要"先进设置页把
+     * 自己变成管理员"—— 那正是当初"始终可见"的全部理由。
+     *
+     * a47 把 `/tasks` 收进这一组。它对运营是**整组不可见**,所以这既不是
+     * 降级也不是折叠,是消失 —— 前提见文件头那一段的硬顺序。
+     * 排在最前面是因为它是这一组里唯一一条业务排障入口,其余八项是配置。
+     */
+    adminOnly: true,
     label: '系统管理',
     items: [
+      { key: '/tasks', label: '生成任务(排障)', icon: <PictureOutlined /> },
       { key: '/dashboard', label: '指标仪表盘', icon: <DashboardOutlined /> },
       { key: '/spend', label: '付费调用花费', icon: <WalletOutlined /> },
       { key: '/model-templates', label: '模特模板', icon: <TeamOutlined /> },
@@ -117,6 +137,16 @@ export const NAV: NavGroup[] = [
     ],
   },
 ]
+
+/**
+ * 运营看得见的菜单项数。**门禁按它做一致性断言,散文里不抄这个数。**
+ *
+ * 仓库规矩(CLAUDE.md「数字不写死」):会变的数写进守卫,别抄进文档 ——
+ * README 里那句「7 项」在改成 8 项时不会有任何地方变红,而这一行会。
+ */
+export const OPERATOR_NAV_ITEM_COUNT = NAV
+  .filter((g) => !g.adminOnly)
+  .reduce((sum, g) => sum + g.items.length, 0)
 
 /**
  * 路由表。
@@ -131,16 +161,29 @@ export const NAV: NavGroup[] = [
  * 顺带得到的是布局路由:`AppLayout` 成为父路由,子页面从 `<Outlet />` 出来,
  * 不再靠 `children` 透传。
  *
- * ## 路由和菜单都不按角色裁剪
+ * ## 菜单按角色裁剪,**路由不裁**
  *
- * 两个理由:一,新人第一次进来还不是管理员,也必须能找到 /settings 填口令;
- * 二,真正的权限边界在后端 require_admin,
- * 再在这里加一份判断只会多出一处可能与后端不一致的地方。手敲 URL 打开管理页的
- * 后果是页面上一片 403,不是数据泄露。
+ * 两件事分开:菜单收敛是可发现性(运营不必看见一组点了只会失败的入口),
+ * 路由全量注册是安全设计。operator 手输 `/settings` 打得开,页面上是一句
+ * 403 —— 真正的边界在后端 `require_admin`,前端再加一道守卫只会多出一处
+ * 可能与后端不一致的地方。**不要**因为"菜单都藏了"就顺手删路由:
+ * 那会把一个说得清楚的 403 变成一个看不懂的 404。
  */
 export const router = createBrowserRouter(
   createRoutesFromElements(
-    <Route element={<AppLayout groups={NAV} />}>
+    <>
+      {/*
+        登录页(a46-phase2)。**是 `AppLayout` 的兄弟,不是它的子路由。**
+
+        挂进布局路由的表现:未登录的人看到一个完整的侧栏,点哪一项都被
+        `AppLayout` 弹回登录页 —— 而他会以为是自己点错了。更糟的是 `AppLayout`
+        本身要跳登录页,而登录页在它里面,那就是一次自指的重定向。
+
+        它也**不在**上面 NAV 的任何一组里:登录是一次性的动作,不是一个
+        随时可以去的地方。退出登录挂在顶栏身份区。
+      */}
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<AppLayout groups={NAV} />}>
         {/* A9:默认落点从指标仪表盘改成今日待办。/dashboard 保留给管理员看技术指标 */}
         <Route path="/" element={<Navigate to="/today" replace />} />
         <Route path="/today" element={<TodayPage />} />
@@ -189,6 +232,7 @@ export const router = createBrowserRouter(
         部署侧的 base-path 问题尤其:整站每个深链都会跳首页,而首页是好的。
       */}
       <Route path="*" element={<NotFoundPage />} />
-    </Route>,
+      </Route>
+    </>,
   ),
 )

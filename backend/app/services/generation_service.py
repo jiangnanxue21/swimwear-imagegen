@@ -306,6 +306,7 @@ def create_task(
     provider_params: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     color_variant_id: UUID | None = None,
+    override_plan: bool = False,
     actor: str = "system",
 ) -> tuple[GenerationTask, bool]:
     """创建任务。返回 (任务, 是否命中幂等)。
@@ -320,6 +321,54 @@ def create_task(
     方案由 `generation_plan_service.resolve_for()` **解析**出来,不由调用方
     指定:指定的写法会让"给红色配了覆盖方案"这件事取决于前端记不记得带上
     那个 id,而 §4.7 的整套唯一性约束正是为了让它有唯一答案。
+
+    ## a47:方案解析出来之后**由这里决定最终参数**,调用方只表达意图
+
+    ### 改之前的形状:按方案验收,不按方案生成
+
+    `GenerationPlan` 有六个生成参数,而建任务时只有 `budget_cap` 生效 ——
+    `provider` / `model_template_id` 取的是调用方传的,`scene` / `pose` /
+    `angles_json` 三个字段在建任务与执行链路里**一次都没有被读过**。
+
+    而它们在**验收**链路里被读了:`workbench/upstream_collect.py` 用
+    `gp.required_angles()` 算出每个颜色"要求哪些角度"进上游快照,
+    §6.5 据此判图片集完不完整。于是系统的实际行为是:
+
+        运营配方案:要求 正面 / 30° / 背面
+        出图:按弹窗里手填的参数跑,方案的角度没人告诉生成器
+        验收:按方案检查 —— 缺背面,判定图片集不完整
+        运营看到"不完整",而他并没有做错任何事
+
+    **这是本轮唯一一处业务正确性修复**,可以在 Mock 下当场复现。
+
+    ### 三条硬约束
+
+    1. **解析不到方案不拦。** 存量商品与单色 SPU 都没有方案,拦下来
+       等于让它们集体无法出图(这条从阶段 4 起就成立,原样保留)。
+    2. **幂等键用解析后的值。** 用入参的话,同一份方案下前端传两个不同的
+       `provider` 会生成两个任务,而它们最终跑的是同一组参数 —— 幂等这道
+       防线在最需要它的场景(重试、批量、网络抖动)下直接失效。
+    3. **冲突不静默。** 按方案执行,并在审计 payload 里记
+       「请求 X,方案 Y,按 Y 执行」。静默覆盖会让排障的人对着请求体
+       百思不得其解。清单在 `gp.PLAN_GOVERNED_FIELDS` 一处。
+
+    ### 不给 `generation_tasks` 加列
+
+    `scene` / `pose` 进提示词(`gp.compose_prompt`),`angles` 决定角度集合
+    与一轮张数。事后追溯靠已有的 `generation_plan_id` + `plan_fingerprint`
+    两列 —— 那正是它们该有的用途,也顺带让 `plan_fingerprint`
+    从"算出来但没有读者"变成"有读者"。
+
+    ### `override_plan` 是管理员排障出口,不是默认路径的放宽
+
+    非管理员传它由**接口层** 403(端点挂的是 `require_operator`,
+    没有"require_admin 的调用点"这回事)。这里只认它一件事:
+    绕过之后 `generation_plan_id` 与 `plan_fingerprint` **必须留空** ——
+    绕过了方案就不许再记这份方案。
+
+    **但预算仍然照查。** `budget_cap` 是花钱的闸,不是出图参数;
+    绕过方案不等于绕过预算,否则 override 会成为超预算出图的后门。
+    这一条是本函数自己的决定,记在 `docs/DECISIONS.md`。
     """
     product = session.get(Product, product_id)
     if product is None:
@@ -351,6 +400,52 @@ def create_task(
     if not assets:
         raise ValidationError("该商品还没有可用素材,请先上传商品图", code=ErrorCode.INPUT_INVALID)
 
+    # ---- 阶段 4:解析当前生效的方案与颜色作用域(§6.4)----
+    #
+    # 解析不到方案**不拦**:单色 SPU 与阶段 4 之前建的款都没有方案,
+    # 拦下来等于让存量商品集体无法出图。方案缺席时 plan 指纹为空串,
+    # 与"没传"是同一个键(`build_idempotency_key` 那条守卫钉着这一点)。
+    #
+    # **这一段必须排在素材检查与 Provider 解析之前**(a47):方案会换掉
+    # `model_template_id` 与 `provider`,而那两样正是下面两道检查的入参。
+    # 排在后面的表现是"按调用方的模板过了授权闸,却按方案的模板出图"——
+    # 一个 §11 授权检查在产品里静默失效的洞。
+    scope_variant_id = color_variant_id or getattr(product, "color_variant_id", None)
+    sample_fp = _variant_sample_fingerprint(session, product_id, scope_variant_id)
+    plan_row = None
+    if getattr(product, "spu_id", None):
+        plan_row = generation_plan_service.resolve_for(
+            session, spu_id=product.spu_id, color_variant_id=scope_variant_id
+        )
+    if plan_row is not None:
+        # 预算照查,`override_plan` 也不例外 —— 见函数文档最后一段
+        _assert_budget(session, plan_row)
+
+    # ---- a47:方案决定最终参数(§5.2)----
+    #
+    # `plan_applied` 是"这一次真的按方案跑了吗"的唯一答案。它同时决定
+    # 两件必须同向的事:用谁的参数、两个 plan 列写不写。分成两个变量的
+    # 写法出现过(阶段 4 的 `plan_row is not None`),而 override 一来
+    # 它们就会分叉:参数按调用方、列却记着方案。
+    plan_applied = plan_row is not None and not override_plan
+    plan_overrides: tuple[gp.PlanOverride, ...] = ()
+    if plan_applied:
+        plan_view = generation_plan_service.to_view(plan_row)
+        plan_overrides = gp.plan_overrides(
+            plan_view,
+            {"provider": provider, "model_template_id": model_template_id},
+        )
+        provider = plan_view.provider or provider
+        model_template_id = (
+            UUID(plan_view.model_template_id)
+            if plan_view.model_template_id
+            else model_template_id
+        )
+        candidate_count = gp.governed_candidate_count(plan_view, fallback=candidate_count)
+        prompt = gp.compose_prompt(
+            prompt, scene=plan_view.scene, pose=plan_view.pose, angles=plan_view.angles
+        )
+
     _assert_assets_are_usable(
         session, assets, generation_mode, model_template_id, product=product
     )
@@ -365,29 +460,18 @@ def create_task(
     )
     caps = chosen.capabilities()
     if candidate_count > caps.max_candidates_per_call and not caps.supports_multiple_candidates:
+        # 有方案时这个数是**方案算出来的**(角度张数之和),所以错误里要点名
+        # 是谁给的 —— 否则运营会去改弹窗里那个他已经改不动的数字
         raise ValidationError(
-            f"{chosen.provider_name} 单次最多生成 {caps.max_candidates_per_call} 张候选图",
+            f"{chosen.provider_name} 单次最多生成 {caps.max_candidates_per_call} 张候选图"
+            + (f",而方案要求一轮出 {candidate_count} 张" if plan_applied else ""),
             code=ErrorCode.INPUT_INVALID,
         )
-
-    # ---- 阶段 4:解析当前生效的方案与颜色作用域(§6.4)----
-    #
-    # 解析不到方案**不拦**:单色 SPU 与阶段 4 之前建的款都没有方案,
-    # 拦下来等于让存量商品集体无法出图。方案缺席时 plan 指纹为空串,
-    # 与"没传"是同一个键(`build_idempotency_key` 那条守卫钉着这一点)。
-    scope_variant_id = color_variant_id or getattr(product, "color_variant_id", None)
-    sample_fp = _variant_sample_fingerprint(session, product_id, scope_variant_id)
-    plan_row = None
-    if getattr(product, "spu_id", None):
-        plan_row = generation_plan_service.resolve_for(
-            session, spu_id=product.spu_id, color_variant_id=scope_variant_id
-        )
-    if plan_row is not None:
-        _assert_budget(session, plan_row)
 
     key = build_idempotency_key(
         product_id=str(product_id),
         mode=mode,
+        # 下面四个一律是**解析后**的值(§5.2 硬约束 2)
         provider=chosen.provider_name,
         asset_ids=[str(a.id) for a in assets],
         model_template_id=str(model_template_id) if model_template_id else None,
@@ -402,7 +486,9 @@ def create_task(
         negative_prompt=negative_prompt,
         provider_params=provider_params,
         color_variant_id=str(scope_variant_id) if scope_variant_id else None,
-        plan_fingerprint=plan_row.plan_fingerprint if plan_row else None,
+        # 绕过方案时这里也必须是 None,与下面两列同向:一个记着指纹的键
+        # 配一行两列为空的任务,会让"这个任务按方案跑了没有"有两个答案
+        plan_fingerprint=plan_row.plan_fingerprint if plan_applied else None,
         sample_fingerprint=sample_fp,
         explicit_key=idempotency_key,
     )
@@ -432,8 +518,10 @@ def create_task(
         provider_params=provider_params or {},
         idempotency_key=key,
         status=TaskStatus.CREATED.value,
-        generation_plan_id=plan_row.id if plan_row else None,
-        plan_fingerprint=plan_row.plan_fingerprint if plan_row else None,
+        # §5.3 的要害:绕过了方案就不许再记这份方案。两列一起由
+        # `plan_applied` 决定,不各判一次
+        generation_plan_id=plan_row.id if plan_applied else None,
+        plan_fingerprint=plan_row.plan_fingerprint if plan_applied else None,
         color_variant_id=scope_variant_id,
         sample_fingerprint=sample_fp,
     )
@@ -470,7 +558,13 @@ def create_task(
             "mode": generation_mode.value,
             "candidate_count": candidate_count,
             "color_variant_id": str(scope_variant_id) if scope_variant_id else None,
-            "generation_plan_id": str(plan_row.id) if plan_row else None,
+            "generation_plan_id": str(plan_row.id) if plan_applied else None,
+            # §5.2 硬约束 3:冲突不静默。空列表与缺席是两件事 ——
+            # 缺席意味着这一版代码还不记这件事,空列表意味着这次没有冲突
+            "plan_overrides": [o.as_payload() for o in plan_overrides],
+            # 解析到了方案却没有按它跑,只有一个原因。写下来,免得排障的人
+            # 看着一行 plan 列为空的任务去查"为什么方案没解析出来"
+            "plan_bypassed": bool(override_plan and plan_row is not None),
         },
     )
     return task, False

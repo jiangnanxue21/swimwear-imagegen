@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_actor, db_session, require_operator
 from app.core.config import settings
 from app.core.enums import DispatchReason, TaskStatus
+from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.schemas.common import Page
 from app.schemas.generation import (
@@ -71,6 +72,7 @@ def create_task(
     request: Request,
     session: Session = Depends(db_session),
 ) -> TaskCreateResult:
+    _assert_may_override_plan(request, payload)
     task, deduplicated = gs.create_task(
         session,
         product_id=payload.product_id,
@@ -89,6 +91,7 @@ def create_task(
         prompt_version=payload.prompt_version,
         provider_params=payload.provider_params,
         idempotency_key=payload.idempotency_key,
+        override_plan=payload.override_plan,
         actor=current_actor(request),
     )
 
@@ -102,6 +105,36 @@ def create_task(
         _dispatch(task.id, session)
 
     return TaskCreateResult(task=_task_out(task), deduplicated=deduplicated)
+
+
+def _assert_may_override_plan(request: Request, payload: TaskCreate) -> None:
+    """绕过生成方案是**管理员**的排障出口(PRD §5.3)。
+
+    ## 为什么判在 handler 里,而不是换一个依赖
+
+    这个路由器整体挂的是 `require_operator`,再叠一个 `require_admin`
+    会把**全部**建任务请求都提到管理员门槛上 —— 而日常出图正是运营的活。
+    需要按身份分岔的只有 `override_plan` 这一个字段,所以判定跟着字段走。
+
+    ## 为什么是 403,不是静默忽略
+
+    静默忽略会让调试的人以为自己绕过去了:他拿到一个 201、一个正常的任务,
+    然后对着一组"我明明传了别的参数"的候选图查半天 —— 而真正发生的是
+    系统按方案跑了。**一个没有生效的开关比没有这个开关更贵。**
+
+    身份取 `request.state.identity`(`require_operator` 已经验过并放在那里),
+    不重新解析一遍:重新解析等于给"我是谁"这件事开第二个入口。
+    """
+    if not payload.override_plan:
+        return
+    identity = getattr(request.state, "identity", None)
+    if identity is None or not identity.is_admin:
+        raise AppError(
+            "绕过生成方案(override_plan)需要管理口令 —— 方案决定这批图按什么"
+            "参数出,绕过它意味着这次出图不受方案约束,也不会记方案指纹",
+            code=ErrorCode.AUTH_FORBIDDEN,
+            http_status=403,
+        )
 
 
 def _dispatch(task_id: UUID, session: Session) -> None:

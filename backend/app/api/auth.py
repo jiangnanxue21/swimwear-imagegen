@@ -10,19 +10,85 @@
 这个接口本身不产生任何副作用,也不碰数据库:它就是把 `resolve_identity`
 已经算出来的结论回给前端。
 
-顺带解决 A8 的一个依赖:菜单按角色收敛需要知道"这个浏览器是不是管理员",
+顺带解决 A8 的一个依赖:顶栏身份区要显示"这个浏览器是不是管理员"
+(菜单**不**按角色裁剪 —— 那一版没落地,见 `frontend/src/App.tsx`),
 而这件事同样不该由前端读 localStorage 自己判断——那是显示层的判断,
 真正的权限边界仍然在后端的 `require_admin`。
 """
 from __future__ import annotations
 
+import hmac
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
 
-from app.api.deps import require_operator
+from app.api.deps import ROLE_ADMIN, ROLE_OPERATOR, Identity, require_operator
+from app.core.config import settings
+from app.core.errors import AppError, ErrorCode
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["auth"])
+
+#: 只有这两个账号。用户名 -> 角色。
+#:
+#: 没有用户表、没有注册、没有自助改密 —— 本轮明确不做。要按人追溯时,
+#: 正确的下一步是"用户表 + 每人一个账号",不是回头去配 OPERATOR_TOKENS
+#: 的具名口令(那是机器凭据,不是人的账号)。
+_ACCOUNTS: dict[str, str] = {"admin": ROLE_ADMIN, "operator": ROLE_OPERATOR}
+
+
+class LoginRequest(BaseModel):
+    """登录入参。
+
+    ``role`` **不在这里** —— 角色一律由服务端在校验通过后写进 Session。
+    让前端提交角色等于把权限判定交给调用方。
+    """
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=512)
+
+
+def _configured_password(username: str) -> str:
+    """这个账号配的密码。未知账号返回空串。
+
+    空串在 `_password_matches` 里一律不匹配,于是"用户名不存在"和"密码错误"
+    走的是**同一条**返回路径、同一个响应体 —— 调用方问不出哪个账号存在。
+    """
+    if username == "admin":
+        return (settings.ADMIN_PASSWORD or "").strip()
+    if username == "operator":
+        return (settings.OPERATOR_PASSWORD or "").strip()
+    return ""
+
+
+def _password_matches(supplied: str, expected: str) -> bool:
+    """定长比较。空的一律不匹配,免得"没配密码"变成"人人都对"。
+
+    两侧都 strip:配置侧是因为 `.env` 行尾的空格看不见,输入侧是因为复制
+    密码时多带一个空格是这个仓库已经踩过的事(见 ColdStartBanner 那段说明)。
+    """
+    supplied, expected = supplied.strip(), expected.strip()
+    if not supplied or not expected:
+        return False
+    return hmac.compare_digest(supplied, expected)
+
+
+def _identity_payload(identity: Identity) -> dict[str, Any]:
+    """登录成功与 whoami 必须返回**同一个形状**。
+
+    前端据此在登录后直接 `queryClient.setQueryData(['auth-probe'], data)`,
+    不必再补一次请求。两处形状一旦分叉,那次 setQueryData 写进去的就是一个
+    和探测结果不同构的对象,而它**不会报错** —— 只会让菜单在登录后的第一秒
+    按错误的 is_admin 渲染一次。
+    """
+    return {
+        "name": identity.name,
+        "role": identity.role,
+        "is_admin": identity.is_admin,
+    }
 
 
 @router.get("/auth/whoami")
@@ -41,3 +107,84 @@ def whoami(
         "role": role,
         "is_admin": bool(getattr(identity, "is_admin", False)),
     }
+
+
+@router.post("/auth/login")
+def login(request: Request, payload: LoginRequest) -> dict[str, Any]:
+    """用户名 + 密码换一个 HttpOnly Session Cookie。
+
+    这个接口在 `main.PUBLIC_PREFIXES` 白名单里 —— 它必须匿名可访问,
+    否则登录本身需要先登录。白名单加的是**精确路径段** `/auth/login`,
+    不是 `/auth` 整个前缀:放开前缀会把 `/auth/whoami` 一起放匿名,
+    于是身份探测永远成功,冷启动横幅那套区分整个失效。
+
+    ## 失败一律同一句话
+
+    用户名不存在、密码错误、账号没配密码 —— 三种情况返回**完全一致**的
+    401。分开说会把"哪个账号存在"免费告诉调用方,而这个系统只有两个账号,
+    确认其中一个存在等于把爆破面砍掉一半。
+
+    ## 不记密码
+
+    不打印、不进日志、不进 AppError.detail。`core/redaction.py` 的正则已经
+    覆盖 `password` 这个字段名(`test_logging_redaction` 在守这件事),
+    但那是**兜底**,不是这里可以随手记的理由。
+    """
+    username = payload.username.strip()
+    role = _ACCOUNTS.get(username)
+    matched = _password_matches(payload.password, _configured_password(username))
+
+    if role is None or not matched:
+        # 只记用户名和失败这件事。用户名本身不是秘密(总共就两个),
+        # 而没有它的话,一次真实的爆破在日志里和一次手滑长得一模一样。
+        logger.warning(
+            "browser login rejected",
+            extra={"extra_fields": {"username": username[:64]}},
+        )
+        raise AppError(
+            "用户名或密码错误",
+            code=ErrorCode.AUTH_FAILED,
+            http_status=401,
+        )
+
+    # 先清空,再写入。**顺序是防 session fixation 的关键**:不清空的话,
+    # 攻击者事先塞给受害者的那份 session 里的其余字段会跨越这次登录活下来。
+    # 本轮 session 里只有 name/role 两个字段,清空看起来多余 —— 但"以后
+    # 有人往 session 里加了第三个字段"是必然会发生的事,而那时没有人会
+    # 回头来补这一行。
+    request.session.clear()
+    identity = Identity(name=username, role=role)
+    request.session["name"] = identity.name
+    request.session["role"] = identity.role
+
+    logger.info(
+        "browser login accepted",
+        extra={"extra_fields": {"actor": identity.name, "role": identity.role}},
+    )
+    return _identity_payload(identity)
+
+
+@router.post("/auth/logout")
+def logout(request: Request) -> dict[str, Any]:
+    """退出登录。**幂等** —— 没登录时也返回 200。
+
+    清空 session 之后,Starlette 会在响应上发一个 `max-age=0` 的 Set-Cookie
+    把 Cookie 删掉(仅当这次请求带进来的 session 原本非空;本来就空的话
+    没有 Cookie 可删,也就不必发)。
+
+    所以它同样进匿名白名单:一个已经过期的 Cookie 去调 logout,如果被守卫
+    401 挡住,前端就会陷入"登不出去,也进不去"——而用户此刻想做的事
+    (把本地的登录态清掉)本来就不需要任何权限。
+
+    ## 签名 Cookie 的边界,本轮明确接受
+
+    这只让**当前浏览器**丢掉 Cookie。有人事先复制走一份合法 Cookie 的话,
+    服务端在 TTL 到期前吊销不了那一份 —— 签名 Session 是无状态的,服务端
+    没有一张"哪些 Session 还有效"的表。需要"管理员强制踢人""改密后立即
+    全端失效"时,再上 Redis Session 或 session version,不在本轮扩范围。
+    """
+    actor = (request.scope.get("session") or {}).get("name")
+    request.session.clear()
+    if actor:
+        logger.info("browser logout", extra={"extra_fields": {"actor": str(actor)[:64]}})
+    return {"ok": True}

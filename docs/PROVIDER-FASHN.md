@@ -209,3 +209,16 @@ docker compose exec backend python -m app.scripts.provider_baseline \
 
 fal.ai 需要你先确定**用哪个 model endpoint**,它的输入 schema 因模型而异,
 在此之前 `app/providers/fal.py` 保持骨架状态。
+
+## 基线脚本绕过生成方案(a48)
+
+`make baseline` / `app.scripts.provider_baseline` 现在显式 `override_plan=True`。
+
+理由:a47 之后 `create_task` 会用**方案**的 provider / 模特模板 / 一轮张数覆盖
+调用方传的值。基线对比的全部意义是「差异只来自 Provider 本身」——
+SPU 上有一份 ACTIVE 方案时,`P=mock,fashn` 的两条腿会**双双**跑在方案那个
+Provider 上,而脚本照旧打印一张对比表。不报错,答案是假的。
+
+所以看到基线跑出来的任务 `generation_plan_id` 与 `plan_fingerprint` **两列为空**
+是对的,不是漏写:这批图确实不是按哪份方案出的。绕过方案**不绕过预算**,
+也不绕过 §10.5 / §11 那两道闸。结论在 `docs/DECISIONS.md` §3.73 第二节。

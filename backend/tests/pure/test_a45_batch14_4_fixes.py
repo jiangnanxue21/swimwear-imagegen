@@ -102,26 +102,23 @@ def _routed_paths() -> list[str]:
 # ==========================================================
 
 
-def test_admin_guarded_pages_are_not_in_the_operator_menu():
-    """管理员页只出现在 `adminOnly` 的那一组里。
-
-    这条守的不是权限本身(权限在后端),而是**别让运营看见一扇打不开的门**:
-    `/settings` 出现在普通组里的表现是点进去 403,而运营不知道自己做错了什么。
-    """
-    src = _app_tsx()
-    groups = re.findall(r"\{\s*label:\s*'([^']+)',\s*(adminOnly:\s*true,)?(.*?)\n  \},", src, re.S)
-    assert groups, "解析不出菜单分组 —— NAV 的形状变了,这条守卫要跟着改"
-
-    admin_only_paths = {"/settings", "/providers", "/prompts", "/audit", "/system", "/spend"}
-    for label, admin_flag, body in groups:
-        if admin_flag:
-            continue
-        keys = set(re.findall(r"\{\s*key:\s*'([^']+)'", body))
-        leaked = keys & admin_only_paths
-        assert not leaked, (
-            f"「{label}」这个普通运营分组里出现了管理员页:{sorted(leaked)} —— "
-            f"运营点进去只会得到 403,而界面没告诉他为什么"
-        )
+# ## 这里原来有一条 `test_admin_guarded_pages_are_not_in_the_operator_menu`
+#
+# 它断言 `NAV` 里存在 `adminOnly: true` 的分组、且管理员页只出现在那一组。
+# 后来菜单改成**不再按账号隐藏入口**(理由写在 `App.tsx` 与 `AppLayout.tsx`:
+# 新人第一次进来还不是管理员,也必须找得到设置页;真正的边界在后端
+# `require_admin`),而这条守卫没有跟着改 —— 于是它从那次翻转起就一直红着,
+# 直到 a46-phase2 才被人看见。
+#
+# 更要紧的是它和 `frontend/tests/component/nav-and-url-filters.test.tsx` 里的
+# 「「系统管理」不按账号隐藏」**互为反面**:一条要求 `adminOnly` 存在,
+# 另一条要求它不存在。两条守卫对同一件事给出相反的判据时,红的那一条会被
+# 当成"环境问题"绕过去,而绿的那一条被当成事实 —— 这比只有一条守卫更糟。
+#
+# 删而不是翻转,依据是 `frontend/CLAUDE.md` 第三条:**不要用 Python 扫前端
+# 源码来做断言**。菜单可见性完全落在前端内部,不是跨语言契约;Vitest 那条
+# 读的是真实的 `NAV` 对象,而不是拿正则去猜 TSX 的缩进形状。
+# 判定留一份,在会渲染它的那一侧。
 
 
 def test_nav_is_grouped_and_every_entry_is_routed():
@@ -136,7 +133,27 @@ def test_nav_is_grouped_and_every_entry_is_routed():
     missing = [k for k in keys if k not in routed]
     assert not missing, f"这些菜单项没有对应路由(点了不会有反应):{missing}"
 
-    assert "adminOnly: true" in _app_tsx(), "菜单里没有任何一组是管理员专属 —— 分组塌了"
+    # 这里原来还有一句 `assert "adminOnly: true" in _app_tsx()`。菜单改成不按
+    # 账号隐藏之后它就是错的,和上面删掉的那条同一次翻转、同一个原因。
+    # **剩下的这一半留着**:它验的是"菜单项拼错一个字符"这类只在点击时才暴露的
+    # 问题,offline 门禁跑得到而 Vitest 要 node_modules —— 两者不冲突,
+    # 只要它别再去断言菜单该按角色裁剪。
+
+    # 同一个页面不许出现在两组里。
+    #
+    # 这一条是**补上删那条守卫时漏掉的那个洞**:变异 Q1「把 /settings 挪进普通
+    # 运营菜单」原来由被删的那条抓,删完之后 `mutate_batch14_4.py` 报 19/20 ——
+    # 它只跑本文件这一个套件,而 Vitest 那边的「同一个 key 不出现在两个组里」
+    # 它看不见。
+    #
+    # 和 Vitest 那条**不矛盾,是同一句话**(这正是它和被删那两条的区别:
+    # 那两条说的是相反的话)。留两份的理由是它们跑在不同的门禁里:
+    # 这一份进 `make check-offline`,不需要 node_modules。
+    duplicated = sorted({k for k in keys if keys.count(k) > 1})
+    assert not duplicated, (
+        f"这些菜单项同时出现在两个组里:{duplicated} —— 侧栏会同时点亮两处,"
+        f"而运营会以为那是两个不同的页面"
+    )
 
 
 def test_default_route_lands_on_the_todo_homepage():

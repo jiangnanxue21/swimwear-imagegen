@@ -52,11 +52,22 @@ compose 合并两份文件时,同一服务的 `volumes` 是**合并**而不是�
 ```bash
 cp .env.example .env
 # 至少改这三项:POSTGRES_PASSWORD、PUBLIC_BASE_URL、SECRET 类配置
-docker compose up -d --build
+# 再加浏览器登录那三项 —— 非本机环境不配就起不来,见下一节
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 make migrate
-make seed              # 可选:导入 10 个示例商品
+make seed              # 可选:导入示例商品
 make smoke             # 端到端冒烟,一分钟内给出结论
 ```
+
+**上面用的是类生产编排**(前端构建产物由 Nginx 托管、监听 `127.0.0.1:8080`,
+backend 不再对外发布端口)。只跑 `docker compose up -d --build` 起的是 Vite
+开发服务器,那只适合开发与 UAT 的第一轮。
+
+> **`APP_ENV` 不是 local/dev/development 时,`ADMIN_PASSWORD` /
+> `OPERATOR_PASSWORD` / `AUTH_SESSION_SECRET` 三项必填,配不全后端直接起不来。**
+> 生产 overlay 里这三项写的是 `${KEY:?}`,所以 compose 会在**创建容器之前**
+> 就退出并把缺哪一项打在终端上 —— 而不是让容器起来又反复重启。
+> 三项的含义、怎么生成密钥、换密钥等于全员登出,见 README「浏览器登录」一节。
 
 `make smoke` 通过就意味着:健康检查、商品与素材、异步任务、评分分档、
 多尺寸输出、导出、仪表盘这条链路全部可用。
@@ -73,6 +84,9 @@ make smoke             # 端到端冒烟,一分钟内给出结论
 | `LOG_LEVEL` | `INFO` | 保持 INFO;DEBUG 会打出请求体 |
 | `CELERY_TASK_ALWAYS_EAGER` | `false` | 必须是 false,否则生成会在 HTTP 请求里同步跑 |
 | `DOWNLOAD_ALLOWED_HOSTS` | 空 | 只在自建 ComfyUI 时填,填了等于放行内网下载 |
+| `ADMIN_PASSWORD` | 空 | **必填**,浏览器登录的管理员密码;不填则非本机环境起不来 |
+| `OPERATOR_PASSWORD` | 空 | **必填**,运营账号密码,不能与上面相同 |
+| `AUTH_SESSION_SECRET` | 空 | **必填**,至少 32 字符;多机部署各节点必须同一把,否则用户隔一次请求就掉线 |
 
 ## 四、存储:从本地换到对象存储
 
@@ -163,20 +177,37 @@ docker compose logs backend | grep '"request_id": "<id>"'
 - [ ] 数据库与 Redis 不对公网暴露
 - [ ] `PUBLIC_BASE_URL` 是 HTTPS
 - [ ] `DOWNLOAD_ALLOWED_HOSTS` 只填了确实需要的内网主机
+- [ ] 浏览器登录三项已配(`ADMIN_PASSWORD` / `OPERATOR_PASSWORD` /
+      `AUTH_SESSION_SECRET`),两个密码不同、密钥不是占位值
 - [ ] 后台前端不直接暴露公网,或至少放在反向代理的认证之后
-      (**MVP 没有账号体系** —— 这是当前最大的安全缺口,见下)
+      (登录只有两个固定账号,**不是**完整账号体系 —— 见下)
 - [ ] 上传大小上限 `MAX_UPLOAD_SIZE_MB` 符合实际需要
 - [ ] 日志投递目标本身是受控的(日志里有商品信息)
 
-### 关于没有账号体系
+### 关于账号体系:有登录,但没有用户表
 
-需求第二章把"用户注册、复杂权限和组织管理"排除在 MVP 之外,
-因此**任何能访问到后端的人都能创建任务、通过审核、导出图片**。
-审计日志记的是 `X-Actor` 请求头,缺省 `system` —— 它能追溯"做了什么",
-但不能证明"是谁做的"。
+**这一节以前写的是「MVP 没有账号体系 —— 这是当前最大的安全缺口」。a46 之后
+那句话不再成立**:浏览器打开页面要先登录,两个固定账号 `admin` / `operator`,
+密码由部署的人在 `.env` 里配,服务端发 HttpOnly 签名 Cookie。
+未登录的匿名请求进不了任何业务接口。
 
-在接入真实身份(阶段 7 之后)之前,唯一的防线是网络层:
-把后台放在 VPN 或反向代理的认证之后。这一点必须写进部署方案,不能默认。
+**但它仍然不是完整的账号体系**,三条限制必须写进部署方案:
+
+    没有用户表        账号写死两个,不能注册、不能自助改密。要按人追溯,
+                      下一步是「用户表 + 每人一个账号」,不是去配 OPERATOR_TOKENS
+                      的具名口令(那是机器凭据)
+    审计追不到个人    五个人共用 `operator` 密码时,审计日志里全部记成 operator。
+                      界面顶栏会把这件事**显式说出来**,不让人误以为自己被追踪到了
+    退不了已发的 Cookie  签名 Session 是无状态的,服务端没有"哪些会话还有效"的表。
+                      改密码不会让已登录的人掉线;要立刻全员失效,只能换
+                      `AUTH_SESSION_SECRET` 并重启(那等于把所有人当场登出)
+
+所以网络层那道防线仍然建议保留:把后台放在 VPN 或反向代理的认证之后。
+只是它从"唯一的防线"降级成了"第二道"。
+
+机器凭据(`ADMIN_TOKEN` / `OPERATOR_TOKENS`,给 CLI、脚本、pytest)和上面这套
+浏览器登录是**两回事**,改一边不影响另一边 —— 见 README「浏览器登录」
+与 `docs/DECISIONS.md` §3.66 / §3.68。
 
 ---
 
@@ -364,7 +395,7 @@ WSL2 发行版根目录、Docker Desktop 的数据目录、以及 `storage` 卷�
 
 五个服务(postgres / redis / backend / worker / beat)加上 Pillow 出图,
 Docker Desktop 默认的内存上限偏紧。**Settings → Resources → Memory 给到 6 GB 以上**;
-`make seed` 生成 30 张示例图或批量出图时不够会表现为容器被静默 OOM kill,
+`make seed` 生成示例图或批量出图时不够会表现为容器被静默 OOM kill,
 日志里只看到 worker 突然消失。
 
 ```bash

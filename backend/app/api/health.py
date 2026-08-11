@@ -19,10 +19,50 @@ from app.db.session import engine
 router = APIRouter(tags=["health"])
 
 
+#: 这个部署认哪种凭据。前端据此决定"未登录"该把人送到哪儿。
+#:
+#: ``session``  浏览器登录已配(`ADMIN_PASSWORD` / `OPERATOR_PASSWORD` /
+#:              `AUTH_SESSION_SECRET` 三项里有任意一项非空)。401 的意思是
+#:              "登录失效了",前端跳 `/login`
+#: ``token``    只有 Legacy Header Token。401 的意思是"口令没填或填错",
+#:              前端指向 `/settings`
+AUTH_MODE_SESSION = "session"
+AUTH_MODE_TOKEN = "token"
+
+
 @router.get("/health")
 def health() -> dict:
-    """存活探针:进程起来就返回 200,不依赖 PostgreSQL/Redis。"""
-    return {"status": "ok", "app": settings.APP_NAME, "env": settings.APP_ENV}
+    """存活探针:进程起来就返回 200,不依赖 PostgreSQL/Redis。
+
+    ## 为什么 `auth_mode` 挂在这里
+
+    前端在**未登录**的状态下需要知道该把人送到登录页还是设置页,而那一刻它
+    手上只有一个 401 —— 两种模式的 401 长得一模一样(同一个 `AUTH_FAILED`,
+    同一个状态码)。让前端按后端消息文本去猜是 §3.26 明令禁掉的形状。
+
+    所以由后端说出来,挂在**唯一一个匿名接口**上:未登录时它是前端仅剩的
+    信息来源。挂到 `/auth/whoami` 上是不行的 —— 那个接口未登录时就是 401,
+    正是要回答问题的那一刻它答不了。
+
+    ## 这不是信息泄露
+
+    "这个部署开没开浏览器登录"本来就是匿名可观测的:往 `/auth/login` POST
+    一次就知道。这里只是把一件已经能被探到的事说清楚,省掉前端的猜测,
+    而没有说出任何一个密码、密钥或账号是否存在。
+    """
+    return {
+        "status": "ok",
+        "app": settings.APP_NAME,
+        "env": settings.APP_ENV,
+        # 取 `browser_auth_configured` 而不是"三项齐全":后者在 local 下会把
+        # "只填了密码、没填 secret"报成 token 模式,而 `resolve_identity` 那边
+        # 已经按 Session 在拦了 —— 前端于是被引去设置页填一把根本不会被读的口令。
+        # 两处判据必须是同一个属性,`test_a46_phase2_browser_login_seam.py`
+        # 的「同一个属性」那条钉着这一点。
+        "auth_mode": (
+            AUTH_MODE_SESSION if settings.browser_auth_configured else AUTH_MODE_TOKEN
+        ),
+    }
 
 
 @router.get("/health/ready")
