@@ -13,6 +13,9 @@ import {
 } from '../api/types'
 import { AudienceTag } from '../components/AudienceBadge'
 import { useServerSort } from '../hooks/useServerSort'
+import {
+  enumParam, intParam, oneOfParam, textParam, useUrlFilters,
+} from '../hooks/useUrlFilters'
 import { brandVars } from '../theme'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -21,18 +24,54 @@ export default function ProductListPage() {
   useDocumentTitle('商品与 SKU')
   const navigate = useNavigate()
 
-  const [search, setSearch] = useState('')
-  /** 输入框里的字。与已生效的 `search` 分开:敲字不该每个字符打一次接口,
-      但两者必须能被同一个动作一起清掉(走查 P0-3:非受控输入框会说谎) */
-  const [draft, setDraft] = useState('')
-  const [status, setStatus] = useState<string | undefined>()
-  const [garmentType, setGarmentType] = useState<string | undefined>()
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  /**
+   * 筛选条件住在 URL 里(GAP-033)。这一页有 4 项,全在这张表里 ——
+   * **加筛选项 = 往这张表加一行**,而不是再开一个 useState。
+   *
+   * A45 那一轮的两页(ProductListPage / ReviewQueuePage)是最后两块没搬的;
+   * 它们当时被 STATUS 列为"已知限制",理由是排序一起搬要做 `useServerSort`
+   * 的 store 接进 useUrlFilters。store 已在 §3.74 a49 那一轮写好,这一轮把
+   * 那条缝接上。
+   */
+  const PAGE_SIZES = [10, 20, 50, 100] as const
+const pageSizeParam = oneOfParam(20, PAGE_SIZES)
+
+const filters = useUrlFilters({
+    search: textParam(),
+    status: enumParam<string>(Object.keys(STATUS_LABEL)),
+    garment_type: enumParam<string>(GARMENT_TYPES as readonly string[]),
+    page: intParam(1, { min: 1 }),
+    page_size: pageSizeParam,
+    sort: enumParam<string>(['created_at', 'sku', 'name', 'status']),
+    order: enumParam<'asc' | 'desc'>(['asc', 'desc']),
+  })
+  const {
+    search, status, garment_type: garmentType, page, page_size: pageSize,
+  } = filters.values
+
+  /**
+   * 输入框里的字。**和已生效的 `search` 分开** —— 敲字不该每个字符打一次接口,
+   * 但两者必须能被同一个动作一起清掉(走查 P0-3:非受控输入框会说谎)。
+   *
+   * URL 化之后这一对同步依然必要,而且多了一条:URL 变了(后退 / 前进 / 改地址栏)
+   * 框里要跟着回来,否则框里留着字、列表却是另一组条件。
+   */
+  const [searchDraft, setSearchDraft] = useState(search)
 
   // 服务端排序(不是客户端的 sorter 函数):这张表一页只有 20 行,
   // 在前端排等于对这 20 行排,而运营以为排的是全部命中
-  const sort = useServerSort({ sort: 'created_at', order: 'desc' }, () => setPage(1))
+  // **排序也住 URL 里** —— 只搬一半的代价在 useServerSort 顶部那段写明。
+  const sort = useServerSort(
+    { sort: 'created_at', order: 'desc' },
+    undefined,
+    {
+      value: {
+        sort: filters.values.sort ?? 'created_at',
+        order: filters.values.order ?? 'desc',
+      },
+      set: (next) => filters.patch({ sort: next.sort, order: next.order, page: 1 }),
+    },
+  )
 
   const query = useQuery({
     queryKey: ['products', { search, status, garmentType, page, pageSize, ...sort.params }],
@@ -135,22 +174,16 @@ export default function ProductListPage() {
             allowClear
             placeholder="搜索 SKU / SPU / 名称"
             style={{ width: 260 }}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onSearch={(v) => {
-              setSearch(v)
-              setPage(1)
-            }}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
+            onSearch={(v) => filters.patch({ search: v, page: 1 })}
           />
           <Select
             allowClear
             placeholder="状态"
             style={{ width: 140 }}
             value={status}
-            onChange={(v) => {
-              setStatus(v)
-              setPage(1)
-            }}
+            onChange={(v) => filters.patch({ status: v, page: 1 })}
             options={Object.entries(STATUS_LABEL).map(([value, meta]) => ({
               value,
               label: meta.text,
@@ -161,10 +194,7 @@ export default function ProductListPage() {
             placeholder="服装类型"
             style={{ width: 150 }}
             value={garmentType}
-            onChange={(v) => {
-              setGarmentType(v)
-              setPage(1)
-            }}
+            onChange={(v) => filters.patch({ garment_type: v, page: 1 })}
             options={GARMENT_TYPES.map((v) => ({ value: v, label: v }))}
           />
           <Button icon={<ReloadOutlined />} onClick={() => query.refetch()}>
@@ -205,10 +235,7 @@ export default function ProductListPage() {
           total: query.data?.total ?? 0,
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 个 SKU`,
-          onChange: (p, ps) => {
-            setPage(p)
-            setPageSize(ps)
-          },
+          onChange: (p, ps) => filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) }),
         }}
       />
 

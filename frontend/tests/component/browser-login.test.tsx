@@ -145,6 +145,9 @@ describe('登录页', () => {
       </Harness>,
     )
 
+    expect(screen.queryByText(/共两个账号/)).toBeNull()
+    expect(screen.queryByText(/密码由管理员/)).toBeNull()
+
     await userEvent.type(screen.getByLabelText('用户名'), '  operator  ')
     await userEvent.type(screen.getByLabelText('密码'), 'pw-123456')
     await userEvent.click(screen.getByRole('button', { name: LOGIN_BUTTON }))

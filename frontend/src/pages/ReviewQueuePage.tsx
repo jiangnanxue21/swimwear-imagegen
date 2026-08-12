@@ -18,6 +18,7 @@ import {
 import { brandVars, fontScale } from '../theme'
 import { formatDateTime } from '../utils/datetime'
 import { useServerSort } from '../hooks/useServerSort'
+import { useUrlFilters, enumParam, intParam, oneOfParam } from '../hooks/useUrlFilters'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
@@ -28,6 +29,12 @@ const STATUS_TABS: { value: ReviewStatus; label: string }[] = [
   { value: 'REJECTED', label: '已驳回' },
   { value: 'REGENERATION_REQUESTED', label: '已转重生' },
 ]
+
+/** 后端 REVIEW_SORTABLE 的子集。子集关系由 `test_a45_batch14_17_url_filters.py`
+ *  盯着 —— 加一档不在白名单的键时守卫会红。 */
+const LIST_SORT_KEYS = [
+  'created_at', 'best_score', 'round_count', 'attempt_count', 'status',
+] as const
 
 /** 分档标准面板。运营对着它就能自己回答「这张为什么被判 C」,不用来问工程。 */
 function RuleSetPanel() {
@@ -128,19 +135,47 @@ function RuleSetPanel() {
 
 export default function ReviewQueuePage() {
   useDocumentTitle('图片人工审核')
-  const [status, setStatus] = useState<ReviewStatus>('PENDING')
-  const [reason, setReason] = useState<ReviewReason | undefined>()
-  const [page, setPage] = useState(1)
+
+  /**
+   * 筛选与排序都住 URL 里(GAP-033)。这一页 4 项筛选 + 2 项排序,全在这张表里 ——
+   * 加筛选项 = 往这张表加一行,而不是再开一个 useState。
+   *
+   * PENDING 那一档是默认,刷新之后仍然停在 PENDING;切到「已驳回」再贴链接给同事,
+   * 他打开也是「已驳回」。这一页的评审筛选项(comment by REVIEW III.6 之后)
+   * 仍然在 —— useUrlFilters 接进来时一并搬了。
+   */
+  const PAGE_SIZES = [10, 20, 50, 100] as const
+  const pageSizeParam = oneOfParam(20, PAGE_SIZES)
+
+  const filters = useUrlFilters({
+    status: enumParam<ReviewStatus>(['PENDING', 'APPROVED', 'REJECTED', 'REGENERATION_REQUESTED']),
+    reason: enumParam<ReviewReason>(Object.keys(REVIEW_REASON_LABEL) as ReviewReason[]),
+    page: intParam(1, { min: 1 }),
+    page_size: pageSizeParam,
+    sort: enumParam<string>(LIST_SORT_KEYS),
+    order: enumParam<'asc' | 'desc'>(['asc', 'desc']),
+  })
+  const { status, reason, page, page_size: pageSize } = filters.values
 
   // 服务端排序。这张表上最值钱的排序维度是「最佳候选」的分数:
   // 队列长的时候,先看接近门槛的那批(改一版就能过)比从头翻更省时间。
   // best_score 可空(一张候选图都没跑出来的项),后端把空值压到最后 ——
   // 「没有分」不是「分很低」
-  const sort = useServerSort({ sort: 'created_at', order: 'desc' }, () => setPage(1))
+  const sort = useServerSort(
+    { sort: 'created_at', order: 'desc' },
+    undefined,
+    {
+      value: {
+        sort: filters.values.sort ?? 'created_at',
+        order: filters.values.order ?? 'desc',
+      },
+      set: (next) => filters.patch({ sort: next.sort, order: next.order, page: 1 }),
+    },
+  )
 
   const query = useQuery({
-    queryKey: ['reviews', status, reason, page, sort.params],
-    queryFn: () => reviewsApi.list({ status, reason, ...sort.params, page, page_size: 20 }),
+    queryKey: ['reviews', status, reason, page, pageSize, sort.params],
+    queryFn: () => reviewsApi.list({ status, reason, ...sort.params, page, page_size: pageSize }),
     refetchInterval: status === 'PENDING' ? 15_000 : false,
   })
 
@@ -225,7 +260,10 @@ export default function ReviewQueuePage() {
     {
       title: '状态',
       dataIndex: 'status',
+      key: 'status',
       width: 90,
+      sorter: true,
+      sortOrder: sort.orderFor('status'),
       render: (s: ReviewStatus) => (
         <Tag color={REVIEW_STATUS_LABEL[s]?.color}>{REVIEW_STATUS_LABEL[s]?.text ?? s}</Tag>
       ),
@@ -273,7 +311,7 @@ export default function ReviewQueuePage() {
               style={{ width: 170 }}
               placeholder="按进队原因筛选"
               value={reason}
-              onChange={(v) => { setReason(v); setPage(1) }}
+              onChange={(v) => filters.patch({ reason: v, page: 1 })}
               options={Object.entries(REVIEW_REASON_LABEL).map(([value, meta]) => ({
                 value: value as ReviewReason, label: meta.text,
               }))}
@@ -287,7 +325,7 @@ export default function ReviewQueuePage() {
         <Radio.Group
           size="small"
           value={status}
-          onChange={(e) => { setStatus(e.target.value); setPage(1) }}
+          onChange={(e) => filters.patch({ status: e.target.value, page: 1 })}
           style={{ marginBottom: 12 }}
         >
           {STATUS_TABS.map((t) => (
@@ -308,9 +346,9 @@ export default function ReviewQueuePage() {
             onChange={sort.onTableChange}
             pagination={{
               current: page,
-              pageSize: query.data?.page_size ?? 20,
+              pageSize: query.data?.page_size ?? pageSize,
               total: query.data?.total ?? 0,
-              onChange: setPage,
+              onChange: (p, ps) => filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) }),
               showTotal: (t) => `共 ${t} 条`,
               size: 'small',
             }}

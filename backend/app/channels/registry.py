@@ -122,6 +122,22 @@ SIMULATOR = Transport(
 #: (`FieldSpec.is_todo` + `CHANNEL_SPEC_INCOMPLETE` 启动拒绝,4.1 节 B)。
 #: 在那之前 GENERIC 的发送端就是 Simulator,而这件事必须能被查询到、
 #: 能显示在前端状态条上,不能只写在文档里。
+#:
+#: ## 接第一个真实 transport 时必须先关掉的一条(REVIEW II.1 / DECISIONS §3.75)
+#:
+#: 发布租约是 `publish_policy.LEASE_SECONDS`(=180s):worker 领走一行、租约 180 秒
+#: 内把它做完。今天唯一的发送端是 Simulator,同步返回、不发真实外部调用,所以
+#: 「调用挂住超过租约」这件事不可达。**但第一个真实 HTTP transport 落进这张表的
+#: 那一刻它就变可达:** 调用挂住超过 180 秒 → `publish_service.claim_due()` 把这行
+#: 当成 worker 崩了重新发出 → 同一份报文、同一把幂等键发第二遍。§3.19 论证的是
+#: 「不会重复创建」(三道防线仍在),不覆盖「结果不会被回写」。
+#:
+#: 所以真实 transport 的 submit/poll 实现里,**客户端的总超时必须钳在
+#: `publish_policy.LEASE_SECONDS` 之下**(留出退避与重试的余量),并确认目标平台的
+#: 幂等语义(它是否认 `Idempotency-Key`、认多久)。接入后要真跑已写未跑的
+#: `tests/test_publish_lease_concurrency_db.py`(7 条,需真库)。这条现在是**改动点
+#: 上的不变量**,不是守卫 —— 守卫需要一个真实的超时常量作对象,而那个常量此刻还不
+#: 存在;等它落地,把这条从注释升级成 audit-guards 能盯的反向断言。
 _TRANSPORTS: Mapping[str, Transport] = {
     generic.CHANNEL: SIMULATOR,
 }

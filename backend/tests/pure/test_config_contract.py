@@ -13,7 +13,6 @@ from tests.pure._helpers import BACKEND_ROOT, PROJECT_ROOT
 CONFIG_PY = BACKEND_ROOT / "app" / "core" / "config.py"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 PYPROJECT = BACKEND_ROOT / "pyproject.toml"
-REDIS_TRANSPORT_PY = BACKEND_ROOT / "app" / "tasks" / "redis_transport.py"
 
 #: 这些字段有安全默认值,允许不出现在 .env.example
 OPTIONAL_IN_EXAMPLE = {"APP_NAME"}
@@ -144,11 +143,9 @@ def test_all_provider_keys_default_to_empty_so_app_starts_unconfigured():
 #
 # ## 为什么只钉 result_backend,不钉 broker
 #
-# broker 走的是 **Kombu 自己的 Redis transport**，最终同样由 redis-py 建连；
-# 但 Kombu 没把 `protocol` 暴露为 transport option，而且 Connection 不认 URL 里的
-# 这个 query 参数。`broker_url` 一旦带上它,worker 启动时会在 Kombu 内部直接抛
-# `TypeError: Connection._init_params() got an unexpected keyword argument 'protocol'`。
-# 所以 `broker_url` 必须原样返回，协议由项目的 RESP2RedisTransport 注入。
+# broker 走 Kombu 自己的 Redis transport。真实 worker 已证明 redis-py 8.1 的默认
+# RESP3 可以完整执行任务；把 result backend 的 RESP2 修补扩散过去，会让当前服务端
+# 在第一次握手就返回 `server:RedisError`。所以 `broker_url` 必须原样返回。
 #
 # ## 为什么用 AST/exec,而不是 `Settings(...)`
 #
@@ -232,28 +229,6 @@ def test_redis_dependency_matches_the_runtime_major_version():
     assert '"redis>=8.1,<9"' in source
 
 
-def test_custom_broker_transport_pins_plain_and_tls_connections_to_resp2():
-    """Kombu 不透传 protocol option，两种底层连接都必须由项目子类注入。"""
-    source = REDIS_TRANSPORT_PY.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    classes = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef)
-    }
-    for name in ("RESP2Connection", "RESP2SSLConnection"):
-        class_source = ast.get_source_segment(source, classes[name]) or ""
-        assert 'kwargs["protocol"] = 2' in class_source
-        assert "health_check_interval: int = 0" in class_source
-
-    channel_source = ast.get_source_segment(source, classes["RESP2RedisChannel"]) or ""
-    assert "connection_class = RESP2Connection" in channel_source
-    assert "connection_class_ssl = RESP2SSLConnection" in channel_source
-
-    transport_source = ast.get_source_segment(source, classes["RESP2RedisTransport"]) or ""
-    assert "Channel = RESP2RedisChannel" in transport_source
-
-
 def test_only_result_backend_pins_resp2_not_broker():
     """result_backend 必须调 `_pin_resp2`,broker_url 必须不调。
 
@@ -265,11 +240,8 @@ def test_only_result_backend_pins_resp2_not_broker():
       (RESP3 默认)下写不回任务结果 —— broker 能连、任务能跑、但结果落不回去,
       排查方向永远不会落到这里。
 
-    - **broker_url 不调它**:broker 走 Kombu 的 Redis transport，最终虽然也使用
-      redis-py，但 Kombu 没暴露 `protocol` 参数；URL 带上它会让 worker 启动失败
-      (`TypeError: unexpected keyword argument 'protocol'`)。这条挡的是「为了对称
-      把两个 property 都钉」那个顺手之举 —— 错误信息里那句 TypeError 不会让人
-      联想到 query 参数,排查起来极慢。
+    - **broker_url 不调它**:真实 worker 已证明 redis-py 8.1 默认 RESP3 可以跑完
+      任务；强制 RESP2 会在当前服务端首次握手直接失败。两边不是对称问题。
     """
     source = CONFIG_PY.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -292,9 +264,8 @@ def test_only_result_backend_pins_resp2_not_broker():
         "redis-py 8.x 默认 RESP3,远端 Redis 在 HELLO 3 阶段断连,结果写不回去。"
     )
     assert pins.get("broker_url") is False, (
-        "broker_url property 调了 _pin_resp2 —— kombu.Connection 不认 ?protocol=,\n"
-        "worker 会启动失败:TypeError: Connection._init_params() got an unexpected "
-        "keyword argument 'protocol'。broker 的 RESP2 兼容由自定义 transport 保证。"
+        "broker_url property 调了 _pin_resp2 —— 当前 broker 使用 redis-py 8.1 的 "
+        "RESP3 可以跑完任务，强制 RESP2 会在首次握手返回 server:RedisError。"
     )
 
 
@@ -306,9 +277,16 @@ def test_worker_cancels_late_ack_tasks_when_broker_connection_is_lost():
     assert "worker_cancel_long_running_tasks_on_connection_loss=True" in celery_source
 
 
-def test_celery_uses_the_resp2_broker_transport():
+def test_celery_keeps_native_broker_protocol_and_enables_recovery_options():
     celery_source = (
         BACKEND_ROOT / "app" / "tasks" / "celery_app.py"
     ).read_text(encoding="utf-8")
-    expected = 'broker_transport="app.tasks.redis_transport:RESP2RedisTransport"'
-    assert expected in celery_source
+    assert "broker_transport=" not in celery_source
+    for expected in (
+        '"health_check_interval": 15',
+        '"socket_keepalive": True',
+        '"retry_on_timeout": True',
+        "broker_connection_retry_on_startup=True",
+        "broker_connection_retry=True",
+    ):
+        assert expected in celery_source

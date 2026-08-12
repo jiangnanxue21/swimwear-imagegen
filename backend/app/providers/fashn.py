@@ -482,6 +482,32 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
         ]
         return any(base and url.startswith(base + "/") for base in bases)
 
+    def _oversize_error(self, size_bytes: int, limit_bytes: int) -> ProviderInputError:
+        """把「素材超过 FASHN 单图上限」拼成运营看得懂、能自己修的报错。
+
+        四个 oversize 现场(声明大小、边读边算、本地 stat、内联后复核)统一走
+        这里。原来它们各写一句「素材超过 N MB」——既没点名这是 FASHN 的限制、
+        也没告诉运营上传其实放行了、更没给修复路径。于是运营看到的是:上传成功、
+        建任务后报一句「超过 10 MB」,而上传上限明明是 20MB。这条落差在 REVIEW
+        II.8 点名。文案逻辑放在 `upload_validation.provider_inline_size_message`,
+        那里有不依赖配置/网络的纯单测;这里只负责补上「上传闸放行到多少」这个
+        本地事实,并包成 Provider 层的错误类型。
+        """
+        from app.core.config import settings
+        from app.services.upload_validation import provider_inline_size_message
+
+        upload_cap: int | None = None
+        cap_mb = getattr(settings, "MAX_UPLOAD_SIZE_MB", None)
+        if isinstance(cap_mb, int) and cap_mb > 0:
+            upload_cap = cap_mb * 1024 * 1024
+        message = provider_inline_size_message(
+            size_bytes,
+            provider_name=self.provider_name,
+            provider_limit_bytes=limit_bytes,
+            upload_limit_bytes=upload_cap,
+        )
+        return ProviderInputError(message, provider=self.provider_name)
+
     async def _prepare_image(self, url: str) -> str:
         """把素材变成 FASHN 收得下的形式:HTTPS URL 或 base64 data-URI。
 
@@ -519,10 +545,7 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
         limit = provider_int("FASHN_MAX_IMAGE_MB", 10) * 1024 * 1024
         payload, mime_type = await self._read_bytes(url, limit=limit)
         if len(payload) > limit:
-            raise ProviderInputError(
-                f"素材超过 {limit // 1024 // 1024} MB,无法内联提交",
-                provider=self.provider_name,
-            )
+            raise self._oversize_error(len(payload), limit)
         return data_uri(payload, mime_type)
 
     async def _read_bytes(self, url: str, *, limit: int | None = None) -> tuple[bytes, str]:
@@ -599,19 +622,13 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
                                 and declared.isdigit()
                                 and int(declared) > limit
                             ):
-                                raise ProviderInputError(
-                                    f"素材声明大小超过 {limit // 1024 // 1024} MB,拒绝读取",
-                                    provider=self.provider_name,
-                                )
+                                raise self._oversize_error(int(declared), limit)
                             chunks: list[bytes] = []
                             total = 0
                             async for chunk in response.aiter_bytes():
                                 total += len(chunk)
                                 if limit is not None and total > limit:
-                                    raise ProviderInputError(
-                                        f"素材超过 {limit // 1024 // 1024} MB,已中止读取",
-                                        provider=self.provider_name,
-                                    )
+                                    raise self._oversize_error(total, limit)
                                 chunks.append(chunk)
                             mime_type = response.headers.get(
                                 "content-type", "image/jpeg"
@@ -647,10 +664,7 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
         # 也就是"读完再判断"。文件是自有存储、上传时校验过大小,所以风险低,
         # 但一个说谎的 docstring 会让下一个人以为这里已经守住了。
         if limit is not None and resolved.stat().st_size > limit:
-            raise ProviderInputError(
-                f"素材超过 {limit // 1024 // 1024} MB,已中止读取",
-                provider=self.provider_name,
-            )
+            raise self._oversize_error(resolved.stat().st_size, limit)
         suffix = resolved.suffix.lower()
         mime_type = "image/png" if suffix == ".png" else "image/jpeg"
         return resolved.read_bytes(), mime_type

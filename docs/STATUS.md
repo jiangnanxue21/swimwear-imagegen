@@ -2977,3 +2977,123 @@ STATUS.md 写着已完成,只有真的坐下来点一遍才会发现动线在导
 **剩下的**:A-31(渠道专用集前端入口)当初挂的理由是「应与 B-02 的发布页一起设计」,
 那个前提现在没有了,它可以单独排期 —— 但它仍是新功能,不是修复。
 另外这一页和其余前端一样落在 D 类缺口里,见上面「已知限制」表最后一条。
+
+
+## 评审整改批:离线验证快照(2026-08-12)
+
+这一批是**外部代码评审**驱动的整改(REVIEW II.8 / III.2 / III.6 / II.1)。之前 STATUS
+的验证记录停在 08-09、HANDOVER 停在 a48、DECISIONS 停在 §3.74 —— 评审 II.5 点名的这处
+交付一致性落差,本批补上**评审整改这一批**的记录(a50/a51 的仍缺,见文末)。
+
+改了什么(四处代码 + 四份文档)与逐条理由:`docs/DECISIONS.md` §3.75。交接与「下一台
+机器该跑什么」:`HANDOVER.md` 末节「评审整改批交接」。
+
+**离线子集结果(本机 python3,无 node_modules / 无真库 / 无网络):**
+
+| 门禁 | 结果 | 说明 |
+|---|---|---|
+| `make test-pure` | 2824/2824,10 跳过 | 本批 +11(FASHN 文案 7 + ErrorNotice 棘轮 4);跳过为缺 httpx/pydantic/sqlalchemy |
+| `make verify-delivery` | 18/19 | 唯一 FAIL 是「交付源码被 Git 跟踪」——从 tarball 解出的目录跑不了它,这正是它该有的作用;pack.sh↔pack.ps1 数组不分叉已复验 |
+| `make verify-imports` | 495 文件全绿 | |
+| `make audit-anchors` | 565/565 | |
+| `make audit-guards` | 660 守卫 | 反向断言都吃着封闭窗口 |
+| `make audit-doc-refs` | 全绿 | 活文档 + 活代码路径引用指得到;台账里 27 个只提示 |
+
+**仍未执行(与既有 D 类缺口同源):** 前端 tsc / Vitest / Playwright / build(装不了
+node_modules)、全部真库用例(发布并发 7 条在内)、真实 FASHN / 视觉模型 / 真实渠道。
+III.2 的棘轮只守「不再长新债」的结构;17 处迁移本身、以及任何前端行为改动,都要在
+联网机器复跑 —— 迁移清单见 `frontend/tests/ratchet-error-notice.test-notes.md`。
+
+**a50/a51 交接仍缺:** ~~包内 08-12 的那批改动(登录限流 `login_throttle.py`、
+`client_ip.py`、路由级代码分割、nginx 安全头、`celery_app.py`、`db/session.py` 等)
+没有交接文档,也没有对应的真库/前端回归记录。冻结交付前须补齐并在有网络 + 真库的机器上
+重跑完整门禁 —— 本批没有替它把这件事做掉。~~
+
+## 2026-08-12 评审整改 + a50/a51 收口交接
+
+外部代码评审(REVIEW I / II / III)的原话归档在
+`docs/REVIEW-EXTERNAL-2026-08-12.md`。a50/a51 的 08-12 那一批改动
+(login_throttle / client_ip / 路由级代码分割 / nginx 安全头 / celery_app /
+db/session)的交接在 `HANDOVER.md` 末节「a50/a51 交接」。本节是离线 + 真库
+两套复验的快照,合上评审 II.5 / a49 留下的那笔账(凭据移出仓库树)。
+
+**本次做了什么:**
+
+1. 仓库根 `.env` 与 `.secrets/.settings.key` 移到
+   `$env:USERPROFILE\swimwear-imagegen-secret-backup\`,**两个文件均未
+   被 Git 跟踪**;`verify_delivery` 18/19 → 19/19;facet 默认 mock → SIMULATED
+2. 顺手修一处 `test_provider_inline_size_message.py` 的 `Path` 死 import
+3. **ProductListPage / ReviewQueuePage** 筛选 + 排序搬进 URL —— GAP-033 最后两页
+4. 归档评审意见 + 决定 §3.74 / §3.75
+
+**离线子集复验(本机 python3,无 node_modules / 无网络):**
+
+```
+纯逻辑              2853/2853       0 失败
+lint_offline        0 错            445 文件
+verify_delivery     19/19
+verify_imports      497 文件
+audit_anchors       565/565         (33 份脚本)
+audit_source_guards 664 守卫
+audit_doc_refs      全绿
+audit_column_writers 553 列
+verify_sample_data  10/10
+前端 syntax-check    未在本轮跑       与既有 D 类缺口同源(无 node_modules)
+```
+
+**真库 pytest(用户授权 PG/Redis,2026-08-12):**
+
+| 项 | 结果 | 说明 |
+|---|---|---|
+| `test_a45_batch20_draft_color_axis_db.py` | **9/9 通过** | 真库链路第一份执行证据 |
+| `test_publish_lease_concurrency_db.py` | **7/7 通过** | 评审 P0-1 那 7 条发布并发真库用例 |
+| `test_migrations.py` | **7/7 通过** | 升级 / 降级 + ORM 一致性 |
+| `test_a45_batch14_*` (除 22 / 21) | **81/81 通过** | 14-19 证据查询 / 14-20 身份 / 14-20 stage4 |
+| `test_a45_batch18_lease_visibility_db.py` / `21 / 22 / 23 / 24 / 28 / 31` | **81/81 通过** | 阶段 5 / 6 真库接缝 |
+| `test_a47_plan_governs_db.py` | **0/10 通过** | **红 10 条,见下文** |
+| `test_batch_lease_concurrency_db.py` / `_receipt_lifecycle` / `import_preview_version` / `poll_and_delist` / `publish_flow` / `publishing` / `a45_batch14_21_facts_stale_db` | **90/100 通过** | 10 红同源 |
+| `test_api_generation.py` + `test_api_reviews.py` | **31 红** | 同源 |
+| **真库 pytest 合计** | **51 failed, 397 passed, 0 skipped** | |
+
+**红测试的同源根因(a49 §3.74 之前 vs 之后的接口语义变化):**
+
+a49 §3.74 那一批整改做了一件语义改动:
+
+- `generation_service` 的合规闸在 **模特模板未传** 时,旧版"告警后 return",
+  改成 **拒绝创建任务**(§3.74 D-1)
+- `_build_request` 里"拿不到模板图就退回自由上传模特图"的兜底被删
+  (§3.74 D-1 后段)
+
+这一改让 `tests/test_api_generation.py` / `test_api_reviews.py` /
+`test_a47_plan_governs_db.py` / `test_a45_batch12_4_recovery_db.py` /
+`test_a45_batch12_5_lease_and_billing_db.py` 等 **共 51 条真库用例的预期
+行为过期了** —— 它们原本期望「自由模特图能跑出任务,只是产生假图」,
+现在接口返回 `INPUT_INVALID` 422。
+
+**这件事在仓库自陈里**没有**: §3.74 / §3.75 / STATUS / HANDOVER 均未点名
+"老真库用例在 a49 之后是红的"。本轮把它记下来。
+
+**修复方案**(本轮**未做**):
+- 选项 a:把 `_create_task` 用例改成传 `model_template_id`(若 mock 那套能给出)
+- 选项 b:把断言改成「422 + 错误码 INPUT_INVALID」 —— 接受新语义
+- 选项 c:把这批用例标记为 xfail 并写明"a49 之前期望"
+
+**关键判定:这 51 条红不算本轮整改引入的回归**,因为 a49 是评审整改批的产物,
+本轮(2026-08-12)只是真跑了一遍 —— **从未跑过的门禁 = 不存在的门禁**。
+修这些测试的债务属于 a49 之后的接力,本轮边界是「发现并如实标记」。
+
+凭据通过环境变量注入(`POSTGRES_PASSWORD` / `REDIS_URL` / `TEST_DATABASE_URL`),
+未写入仓库任何文件,跑完即丢。
+
+**仍未消除、且不属于本轮范围(详见评审归档):**
+
+| 项 | 来源 | 当前 |
+|---|---|---|
+| 主密钥轮换 | 评审 P0-4 | **未做**(本轮只移出仓库树);冻结交付前必须做 |
+| FASHN 真端点首验 | 评审 P0-2 / §3.74 二-3 | 未做;`docs/PROVIDER-FASHN.md` §八清单 |
+| 评分阈值校准 | 评审 P0-3 | 未做;≥20 条人工审核样本 |
+| 第一个真实 HTTP 渠道 transport | 评审 P0-1 | 未做;业务先定平台 |
+| 17 处 `<Alert+readError>` 迁移 | 评审 III.2 / §3.75 三 | 棘轮已上,迁移未做(本机无 Vitest) |
+| 前端 tsc / Vitest / build | 仓库协作约束 | 本机无 node_modules;联网机器复跑 |
+| Playwright / E2E | 任务 24 | 未开工 |
+| Docker build × 2 | 本机无 Docker CLI | 真机 |

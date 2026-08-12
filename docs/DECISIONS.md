@@ -5306,3 +5306,153 @@ FRONT/FRONT/FRONT,而 §6.5 严格要求两个角度各有覆盖。
     合规字段的 403                      要起 FastAPI + 真身份
     LOCAL 半配拒绝启动                  已用构造 `Settings()` 逐组合验过(六种),
                                         但没验"真的起不来的那个进程"
+
+
+## §3.75 评审整改(REVIEW II.8 / III.2 / III.6 / II.1):四条能在离线门禁里真跑的,加上两条只能记下来的
+
+这一节整理的是**一次外部代码评审**驱动的整改。评审把缺口分成两类:真跑得动的
+(接真实 FASHN / 视觉模型 / 真实渠道)与今天就能改的。本轮只碰第二类,且每一条都
+配了能进 `make check-offline` 的验证 —— 沿用本仓的铁律:**从未执行过的门禁 =
+不存在的门禁**(§3.74 一)。真跑那一类留给有真实凭据/网络的机器,不在这里假装做过。
+
+### 一、个人设置文件随交付包出去了(III.6)
+
+`\.claude/settings.local.json` 被打进过交付包。它是 Claude Code 的个人权限配置,
+里面是**开发机的绝对路径**(实测带出 `/c/Users/<user>/.claude/…` 这样的 Windows
+用户名与本地路径)。它不像凭据那样致命,但和那张 5.8MB 的 `data/s1.jpg`(pack.sh
+顶部记的那次)同类:**没有任何机制拦着它** —— 既不在 `.gitignore`、也没有代码或
+文档引用,而它泄露的是打包者的机器信息。
+
+处理走本仓既有的**两道拦截**(pack.sh 顶部的口径:`.gitignore` 与 `tools/pack.sh`
+是两道):
+
+    第一道  `.gitignore` 加 `\.claude/settings.local.json` —— 从源头不跟踪
+    第二道  pack.sh 的 `FORBIDDEN_FILES` 与 pack.ps1 的 `$ForbiddenFiles` 各加
+            `settings.local.json`(basename,任意层级都拦),打包后 FORBIDDEN 复验
+            命中即删包退出
+
+用 basename 而不是整棵 `.claude/`:约定上 `settings.local.json` 恒为个人文件,共享
+设置走 `settings.json`,后者该跟着交付走。
+
+**踩到一个坑,值得记下来给下一个加数组条目的人:** verify_delivery 有一条
+「Linux/Windows 打包规则不许分叉」,它逐元素比较两个脚本的数组。pack.sh 侧用
+`shlex.split(..., comments=True)` 解析,注释被整行剥掉;但 pack.ps1 侧用的是朴素
+正则 `@\(...\)` **非贪婪**,遇到第一个 ASCII 右括号就截断 —— 于是在 `$ForbiddenFiles`
+的注释里写了一对 ASCII 括号,就把括号后面的条目全漏在数组之外,两侧比较不相等、
+门禁当场红,而错误信息只说「分叉」,不会告诉你是注释里的括号干的。**结论:
+pack.ps1 的数组内注释不能出现 ASCII 括号。** 已在该处留了一行注释说明。
+
+### 二、上传闸 20MB 与 FASHN 内联上限 10MB 的落差(II.8)
+
+`MAX_UPLOAD_SIZE_MB`(默认 20)与 `FASHN_MAX_IMAGE_MB`(默认 10)是两道**不同且
+不等**的门。一张 15MB 的商品图能通过上传、却在建任务后于 FASHN 侧才失败。原文案
+四处各写一句「素材超过 10 MB」,运营无从判断:哪个环节的限制?上传明明放行了、
+为什么现在不行?怎么修?
+
+**为什么是改文案,不是把两个数字对齐:** 两道门服务不同目的 —— 上传闸是通用的,
+Provider 内联上限是 FASHN 特有的,换个 Provider 可能允许 20MB。把它们钉成相等是错的。
+
+**为什么没做「建任务期前置校验」:** 那才是评审说的「前置校验的时机」的最优解,
+但它需要**建任务时就拿到确切的源图文件列表**,而这份列表是在 worker 里按 plan
+解析出来的(`generation_service` 建任务时只定 provider,不定具体送哪几张图)。
+在建任务路径上做校验会拿不到数据。所以本轮的取舍是:
+
+    收敛四个 oversize 现场到同一条**运营可操作**的文案(`_oversize_error`)
+    文案点名是 FASHN 的限制、说明上传闸其实更宽、给出修复动作(压到 10MB 以内再重试)
+    失败仍发生在 provider 层、但在计费/提交之前 —— 时机没变差,可读性变好
+
+**这条文案的初版自己踩了一次「给不出的建议」,记下来:** 初版结尾还写了「**或改用
+不受此限的渠道**」。但 `providers/registry.py` 里注册的换装 Provider 只有 `mock` 与
+`fashn`(`backend/app/providers/comfyui.py` 等有文件,没进那张表),运营照着去找会找到一片空白。
+**一句办不到的建议比一句简略的报错更糟** —— 简略报错只是让人困惑,办不到的建议是
+让人去做一件做不到的事,还会让他以为是自己没找到那个设置。写文案时想的是「要给修复
+路径」,漏了回头问一句「这条路径存在吗」。已删掉该半句,并加了一条反向断言
+(`test_message_does_not_advise_switching_to_a_channel_that_does_not_exist`)钉住它;
+等真有第二个可用 Provider,由**调用方**把它作为参数传进来,而不是在文案里假设它存在。
+
+文案逻辑落在 `app/services/upload_validation.py::provider_inline_size_message`,
+它不读配置、不碰网络,所以有**能真跑的纯单测**(给字节数直接断言产出的句子)。
+四处接线是否都改到、有没有一处还留着简略文案,压在读源码的
+`tests/pure/test_provider_inline_size_message.py` 上(FASHN 的行为测试需要 httpx,
+离线跳过,跑不到)。
+
+### 三、`<ErrorNotice>` 迁移的棘轮(III.2)
+
+失败提示的统一出口 `<ErrorNotice>`(A12)是全站口径,但仍有 **17 处**页面直接把
+error 拍平成一句话喂给 antd 的 `<Alert description={readError(…)}>`,于是那些页面上
+管理员拿不到请求编号与技术详情。评审的关键一句是「**且没有棘轮测试防止新增**」——
+没有守卫,新页面照样会再写一个,债务不降反增。
+
+本轮**不盲改这 17 处**(迁移是行为改动,而 tsc / Vitest / Playwright 在只有 python3
+的机器上跑不了,盲改等于发一个没跑过的改动)。改为补上那道棘轮:
+`tests/pure/test_error_notice_ratchet.py` 读前端源码冻结债务,只减不增。
+
+**这道棘轮的第一版是弱的,而它弱在一个值得记的地方。** 初版只数
+`<Alert…readError(…>` 这一种形状,数出 17 处、与评审点名的 17 吻合 —— 于是「吻合」
+被当成了口径正确的证据。但那条正则只认现存代码恰好长的那个样子:
+
+    <Alert type="error">{readError(e)}</Alert>            初版看不见(写成子元素)
+    <Alert description={<span>{readError(e)}</span>} />    初版看不见(属性里套 JSX)
+    <Result subTitle={readError(e)} />                     初版看不见(换个组件)
+
+**而棘轮的全部意义就是拦新增的** —— 一道只认旧形状的守卫对新写法一律放行,
+它看起来在守、实际不守,正是 §3.70 点名的「绿着的守卫说着一件不一定成立的事」。
+数字对得上不等于口径对,这次是自己把巧合当成了验证。
+
+现在的口径不解析 JSX,只问「这个 `readError` 是不是 toast」:
+
+    宽口径(主基线)   pages/ + components/ 里**非 toast** 的 readError 调用点,合计 24
+    窄口径(锚点)     `<Alert…readError(` 那一种,合计 17 —— 保留是为了不丢与评审
+                     那条记录的对应,不是因为它够用
+
+换写法绕不过宽口径。`message.error(readError())` / `notification.*` 是 `readError` 的
+正当用法(一句话的浮层本就不展开技术详情),明确排除。另加一条**检测器自检**
+(`test_the_detector_sees_the_shapes_that_defeated_the_first_version`),用合成样本钉住
+上面三种形状,防止检测器再退回只认一种。
+
+宽口径 24 是窄口径 17 的**超集,不等于「24 处都必须迁成 `<ErrorNotice>`」** —— 有些
+计入的点(例如把错误串进「模特列表没拉到,下面是空的不代表没有模特」这类提示)未必
+值得整块 `<ErrorNotice>`。这里守的是**这个数只能下降**,不是「每一处都是错的」。
+
+**限度也要写下来:** 它仍是读源码的结构守卫,证明不了迁移后的页面真的渲染出了请求
+编号(那属于 Vitest / Playwright,离线跑不了);而且任何基于文本的检测器都有边界 ——
+把 `readError` 先赋给变量再渲染,它同样看不见。**它抬高门槛,不是不可绕过。**
+
+17 处的迁移本身(改成 `<ErrorNotice error={原始error}>`)留给有前端依赖的机器,
+清单在 `frontend/tests/ratchet-error-notice.test-notes.md`。
+
+### 四、发布传输层的一条不变量:客户端超时必须钳在 LEASE_SECONDS 之下(II.1,预防)
+
+评审把「发布重叠投递窗口」列为 P0 里的最高一条:worker A 领走租约 180 秒、发出真实
+外部调用,调用挂住超过 180 秒,`claim_due()` 把它当成 A 崩了重新发出,于是同一份
+报文发两遍(§3.19 论证的是「不会重复创建」,不覆盖「结果不会被回写」;A45-batch17-2
+关掉了回写那一面)。
+
+关键事实:**这条今天不可达。** `channels/registry.py` 里唯一的传输层是 Simulator,
+没有任何真实 HTTP transport,也就**没有一个可以钳的客户端超时常量**。为一个尚不
+存在的 transport 造一个投机守卫,是在钳一个还没有的东西 —— 那是过早的。
+
+所以本轮把它落成**改动点上的不变量**,而不是守卫:在 `channels/registry.py` 传输层
+注册处写清楚「第一个真实 transport 接入时,客户端总超时必须 < `publish_policy.LEASE_SECONDS`
+(=180s),并确认平台幂等语义」。下一个加 transport 的人会在他正要改的那一行看到它。
+等 transport 真的落地、有了那个常量,再把这条从文档升级成守卫(那时它才有对象),
+并真跑已写未跑的 `test_publish_lease_concurrency_db.py`(7 条,需真库)。
+
+### 五、本轮验不到什么(以及 a50/a51 的交接仍缺)
+
+按仓库约定,本地协作默认不跑真实基础设施验证,需用户明确指令。因此本轮的验证是
+**离线子集**:`test-pure`(2824/2824,含本轮新增 11 条)、`verify-delivery`
+(18/19,唯一 FAIL 是「非 Git 工作树」——从 tarball 解出来的目录本就跑不了那条,
+这正是它该有的作用)、`verify-imports` / `audit-*` 全绿。下面这些**没有**在本轮跑过:
+
+    前端 tsc / Vitest / Playwright     装不了 node_modules —— III.2 的棘轮只守结构,
+                                        迁移后的行为、以及任何前端改动都要在联网机器复跑
+    真库 pytest / Alembic / Redis      发布并发那 7 条、FASHN 计费口径都要真库或真端点
+    真实 FASHN / 视觉模型 / 真实渠道    评审 P0 的另一半,本轮一个字都没碰
+
+**另外,交付一致性本身有一处欠账(评审 II.5,本轮未消除):** 包内时间戳显示 08-12
+有一批改动(a50/a51:登录限流 `login_throttle.py`、`client_ip.py`、路由级代码分割、
+nginx 安全头、`celery_app.py`、`db/session.py` 等),但 HANDOVER 停在 a48、STATUS 的
+验证记录停在 08-09、本决策日志此前停在 §3.74(a49)。本节补上的是**评审整改**这一批
+的交接;a50/a51 的完整交接 + 在有网络 + 真库的机器上重跑一遍完整门禁,仍是冻结交付
+前的必办项。冻结前请补齐,别让「改了但没有交接记录」的批次带着一片离线绿出门。

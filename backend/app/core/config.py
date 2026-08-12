@@ -28,11 +28,10 @@ def _pin_resp2(url: str) -> str:
     由 redis-py 建连；项目连的远端 Redis(或前置代理)在 `HELLO 3 AUTH` 阶段会
     直接断连，于是任务做完后结果写不回去。
 
-    **只用在 Redis result backend 上。** broker 虽然最终也用 redis-py 建连，
-    但参数由 Kombu 的 Redis transport 筛选，它没有暴露 `protocol`；把参数写进
-    broker URL 会在 worker 启动时直接抛
-    `TypeError: Connection._init_params() got an unexpected keyword argument 'protocol'`。
-    broker 的协议兼容性因此由 `app.tasks.redis_transport` 保证。
+    **只用在 Redis result backend 上。** broker 由 Kombu 管理，而且真实 worker
+    已经用 redis-py 8.1 的默认 RESP3 完整执行过任务；强制 broker 改成 RESP2 会在
+    当前服务端的首次握手直接收到 ``server:RedisError``。两条连接不能凭“对称”共用
+    同一个协议修补。
 
     用户**显式**写了 `?protocol=...` 时不覆盖 —— 那是有人刻意选了另一档。
     """
@@ -558,9 +557,8 @@ class Settings(BaseSettings):
 
     @property
     def broker_url(self) -> str:
-        # broker 经 Kombu 的 Redis transport 建连；它不把 protocol 暴露成 transport
-        # option，而 URL query 又会落到不接收该参数的 Kombu Connection。因此这里
-        # 不能注入 protocol=2，RESP2 由 celery_app 配置的自定义 transport 注入。
+        # 保持原样交给 Kombu。真实 worker 已证明 redis-py 8.1 的默认 RESP3 可用；
+        # result backend 的 RESP2 兼容修补不能扩散到 broker。
         return self.CELERY_BROKER_URL or self.REDIS_URL
 
     @property

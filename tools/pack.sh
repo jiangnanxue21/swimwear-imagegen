@@ -157,6 +157,13 @@ FORBIDDEN_FILES=(
   '*.pyo'
   '*.tsbuildinfo'
   '.DS_Store'
+  # Claude Code 的个人权限配置。里面是**开发机的绝对路径**(实测带出过
+  # `/c/Users/<user>/.claude/…` 这样的 Windows 用户名与本地路径),对收包方
+  # 没有任何用处,而且泄露了打包者的机器信息。它不像凭据那样致命,但和
+  # `data/` 那张 5.8MB 图同类:没有任何机制拦着它 —— 它既不在 .gitignore、
+  # 也没有代码或文档引用。**basename 匹配**,任意层级都拦(约定上
+  # `settings.local.json` 恒为个人文件,共享设置走 `settings.json`)。
+  'settings.local.json'
 )
 
 # `.env.example` 是零凭据模板,解包后的配置契约与 `make init` 都依赖它。

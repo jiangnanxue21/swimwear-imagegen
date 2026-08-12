@@ -91,10 +91,17 @@ celery_app.conf.beat_schedule = {
 }
 
 celery_app.conf.update(
-    # redis-py 8.1 默认使用 RESP3；项目的 Redis 前置代理会在 HELLO 3 阶段断连。
-    # result backend 可用 URL query 指定协议，Kombu broker 不行，所以走自定义
-    # transport 给底层 redis.Connection 显式传 protocol=2。
-    broker_transport="app.tasks.redis_transport:RESP2RedisTransport",
+    # 远端 broker 曾在任务完成后主动断开消费连接。Kombu 会重连；这里把保活、
+    # 超时重试和启动/运行期重连语义显式固定，避免依赖升级后默认值改变。
+    # 协议刻意不在这里覆写：redis-py 8.1 的默认 RESP3 已在真实 worker 上跑通，
+    # 强制 RESP2 反而会让当前服务端在首次握手返回 server:RedisError。
+    broker_transport_options={
+        "health_check_interval": 15,
+        "socket_keepalive": True,
+        "retry_on_timeout": True,
+    },
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],

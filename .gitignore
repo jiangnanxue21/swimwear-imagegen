@@ -36,3 +36,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+# Claude Code 个人权限配置(含开发机绝对路径)。随包出去过一次 —— 见 DECISIONS。
+# 共享设置走 .claude/settings.json,个人设置恒为 settings.local.json。
+.claude/settings.local.json

@@ -42,7 +42,7 @@ import { useMemo, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, Empty, Skeleton, Space, Tag, Tooltip, Typography } from 'antd'
 import {
-  ExportOutlined, EyeOutlined, FileTextOutlined, LoadingOutlined, PictureOutlined,
+  ClockCircleOutlined, ExportOutlined, EyeOutlined, FileTextOutlined, LoadingOutlined, PictureOutlined,
   ProfileOutlined, StopOutlined, TagsOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
@@ -141,6 +141,12 @@ function CountCard({ spec, onOpen }: { spec: CardSpec; onOpen: (to: string) => v
       </Space>
     </Card>
   )
+}
+
+function RunningTaskIcon({ count }: { count: number | undefined }) {
+  // LoadingOutlined 自带无限旋转。没有运行中任务时仍然用它，会让首页看起来像
+  // 一直没有加载完；只有后端明确报告有运行中任务时，旋转才表达真实状态。
+  return count !== undefined && count > 0 ? <LoadingOutlined /> : <ClockCircleOutlined />
 }
 
 export default function TodayPage() {
@@ -251,7 +257,7 @@ export default function TodayPage() {
       {
         key: 'IN_FLIGHT',
         label: '运行中任务',
-        icon: <LoadingOutlined />,
+        icon: <RunningTaskIcon count={tasks.data?.tasks.in_flight} />,
         count: tasks.data?.tasks.in_flight,
         to: '/tasks',
         hint: '在等 Provider 出图,不用做什么。点开是全部任务列表',

@@ -81,6 +81,11 @@ $ForbiddenFiles = @(
     '*.pyo'
     '*.tsbuildinfo'
     '.DS_Store'
+    # Claude Code 个人权限配置,内含开发机绝对路径。与 pack.sh 的 FORBIDDEN_FILES
+    # 逐条对齐 —— verify_delivery 盯着两侧不许分叉。basename 匹配,任意层级都拦。
+    # 注:本数组内的注释不能出现 ASCII 右括号 —— verify_delivery 的解析正则
+    # 非贪婪,遇到第一个右括号即截断,会把它后面的条目漏在数组之外。
+    'settings.local.json'
 )
 
 $EnvExamples = @(

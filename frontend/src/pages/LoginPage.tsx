@@ -210,15 +210,9 @@ export default function LoginPage() {
     <Shell>
       <Card>
         <Space direction="vertical" size={space.lg} style={{ width: '100%' }}>
-          <Space direction="vertical" size={2}>
-            <Typography.Title level={3} style={{ margin: 0 }}>
-              登录
-            </Typography.Title>
-            <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-              共两个账号:<code>admin</code>(可改配置、Provider、提示词)与
-              <code>operator</code>(日常生产)。密码由管理员在服务器上配置。
-            </Typography.Text>
-          </Space>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            登录
+          </Typography.Title>
 
           {failure && <Alert type="error" showIcon message={failure} />}
 

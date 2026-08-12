@@ -113,9 +113,6 @@ body { background: var(--brand-canvas, #F6F7F8); -webkit-font-smoothing: antiali
   .settings-meta { text-align: left; padding-top: 0; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-}
 :focus-visible { outline: 2px solid var(--brand-marine, #1B4B5A); outline-offset: 2px; }
 
 /* 工作台:冲突属性行。红只用在行首细条与浅底,不整行染红——

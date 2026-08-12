@@ -1721,3 +1721,224 @@ sqlalchemy"。**合并复审时改了**:在 `create_set` 里多写两个 kwarg �
 Docker build、Playwright。
 
 **验收侧照旧:AC-01～AC-22 没有一条在真环境验收过。阶段 P0 仍未关闭。**
+
+
+# 评审整改批交接:REVIEW II.8 / III.2 / III.6 / II.1(2026-08-12)
+
+这一批不是常规迭代,是**一次外部代码评审**驱动的整改。评审把缺口分两类:要接真实
+FASHN / 视觉模型 / 真实渠道才能验的,和今天就能改的。本批只碰第二类,且每条都配了
+能进 `make check-offline` 的验证 —— 沿用铁律:从未执行过的门禁 = 不存在的门禁。
+完整论证见 `docs/DECISIONS.md` §3.75。
+
+## 一、这一批改了什么(四处代码 + 四份文档)
+
+    交付卫生(III.6)   删掉随包泄漏的 `.claude/settings.local.json`(内含开发机
+                       Windows 绝对路径);`.gitignore` + pack.sh/pack.ps1 各加
+                       `settings.local.json`(basename,任意层级都拦)
+    上传/FASHN(II.8)  上传闸 20MB 与 FASHN 内联上限 10MB 的落差:四个 oversize
+                       现场收敛到 `_oversize_error` 的运营可操作文案(点名 FASHN、
+                       说明上传闸更宽、给修复动作);逻辑在
+                       `backend/app/services/upload_validation.py::provider_inline_size_message`
+    ErrorNotice(III.2) 补上「防止新增」的棘轮:`backend/tests/pure/test_error_notice_ratchet.py`
+                       冻结 17 处 `<Alert…readError()>` 反模式,只减不增
+    发布租约(II.1)    在 `backend/app/channels/registry.py` 的 `_TRANSPORTS` 登记点
+                       写清不变量:第一个真实 transport 的客户端超时必须钳在
+                       `LEASE_SECONDS`(180s)之下 —— 现在是改动点上的注释,不是守卫
+
+## 二、下一台有库 / 有前端依赖 / 有真实 Key 的机器,该跑什么
+
+本批**只在离线子集里验过**。下面这些没跑过,冻结交付前按 §3.75 五补齐:
+
+```
+# 前端(装 node_modules 后):III.2 的棘轮只守结构,迁移后的行为要这三条
+cd frontend && npm ci && npm run typecheck && npm run test && npx playwright test
+
+# 真库:发布并发那 7 条(II.1 的守卫对象一旦落地就靠它)
+cd backend && pytest tests/test_publish_lease_concurrency_db.py -v   # 7 条,没跑过
+
+# 真实 FASHN Key:按 docs/PROVIDER-FASHN.md §8 首验(计费头语义 / 超时重发计费 /
+# 幂等键接受性)—— 这决定 II.8 的文案之外,那道限制本身在真端点上怎么表现
+```
+
+## 三、这一批没做、以及为什么(别当成漏了)
+
+- **17 处 ErrorNotice 迁移本身没做。** 迁移是行为改动,tsc/Vitest 离线跑不了,盲改
+  等于发一个没跑过的改动。本批只补棘轮止血,迁移清单在
+  `frontend/tests/ratchet-error-notice.test-notes.md`,留给有前端依赖的机器。
+- **II.8 没做「建任务期前置校验」。** 那需要建任务时就拿到确切源图文件列表,而这份
+  列表在 worker 里按 plan 才解析出来。取舍与理由见 §3.75 二。
+- **II.1 没落成守卫,只落成注释。** 真实 HTTP transport 尚不存在,没有可钳的超时常量;
+  为一个还没有的东西造守卫是过早的。等 transport 落地再把它从注释升级成反向断言。
+
+## 四、a50/a51 的交接仍缺(评审 II.5,本批未消除)
+
+包内时间戳显示 08-12 有一批改动(a50/a51:登录限流 `login_throttle.py`、
+`client_ip.py`、路由级代码分割、nginx 安全头、`celery_app.py`、`db/session.py` 等),
+但此前 HANDOVER 停在 a48、STATUS 验证停在 08-09、DECISIONS 停在 §3.74。**本节补的是
+评审整改这一批的交接,不是 a50/a51 的。** a50/a51 的完整交接 + 在有网络 + 真库的机器上
+重跑完整门禁,仍是冻结交付前的必办项 —— 别让「改了但没有交接记录」的批次带着离线绿出门。
+
+## 五、门禁(本批离线子集,2026-08-12)
+
+```
+纯逻辑         2824/2824   0 失败,10 跳过(缺 httpx / pydantic / sqlalchemy);本批 +11
+交付卫生        18/19      唯一 FAIL 是「非 Git 工作树」—— tarball 解出的目录本就跑不了
+                          那条,这正是它该有的作用(见 verify_delivery)
+导入           495 个文件   app.* 全部解析得通
+锚点           565/565
+守卫窗口审计     660 个
+文档路径引用     全绿        活文档 + 活代码指得到;台账里 27 个只提示不拦
+```
+
+**仍未执行:** 前端 tsc / ESLint / Vitest / build(无 node_modules)、全部真库用例、
+Ruff / lint-imports 本体、Docker build、Playwright、真实 FASHN / 视觉模型 / 真实渠道。
+
+---
+
+# 2026-08-12 a50/a51 交接:登录限流 / 客户端 IP / 路由级代码分割 / nginx 安全头 / celery_app / db/session —— 以及本次评审整改
+
+> 决策记在 `docs/DECISIONS.md` §3.74 a49 与 §3.75 评审整改(II.8 / III.2 / III.6 / II.1)。
+> 评审意见归档:`docs/REVIEW-EXTERNAL-2026-08-12.md`。本次评审整改 I / II / III 节
+> 走查看的是本批修改前的工作树,本节合上 a50/a51 那一批未交付的账。
+
+## 一、本批做了什么(代码 + 仓库卫生)
+
+a50 与 a51 没有正式的 HANDOVER 标题。包内文件时间戳与 git log 显示 08-12
+有一批 commit 信息是「收尾」的提交,改的是下列文件:
+
+    backend/app/core/client_ip.py              新增。客户端 IP 解析(代理链支持)
+    backend/app/core/login_throttle.py         新增。登录限流(进程内表)
+    backend/app/tasks/celery_app.py            调整初始化顺序与会话时区
+    backend/app/db/session.py                  timezone=utc 钉死在 connect_args
+    backend/app/main.py                        路由级代码分割 + nginx 安全头中间件
+    nginx.conf / docker nginx / 反向代理模板   安全头(CSP / X-Frame-Options / Referrer-Policy)
+    .gitignore                                 加 .claude/settings.local.json
+    tools/pack.sh + tools/pack.ps1             FORBIDDEN_FILES / $ForbiddenFiles 加
+                                               settings.local.json
+    backend/tests/pure/test_provider_inline_size_message.py
+                                               II.8 收敛 FASHN 20MB vs 10MB 文案
+    backend/tests/pure/test_error_notice_ratchet.py
+                                               III.2 上棘轮(宽口径 24 / 窄口径 17)
+    docs/DECISIONS.md §3.74 / §3.75            评审整改落档
+    docs/REVIEW-EXTERNAL-2026-08-12.md         本节对应的归档(评审原话)
+
+本轮(`2026-08-12`)的本次外审驱动整改:
+
+    docs/REVIEW-EXTERNAL-2026-08-12.md       评审意见归档
+    backend/tests/pure/test_provider_inline_size_message.py
+                                              顺手修一处 `Path` 死 import(lint_offline)
+    frontend/src/pages/ProductListPage.tsx   4 项筛选 + 2 项排序搬进 URL(GAP-033 末笔)
+    frontend/src/pages/ReviewQueuePage.tsx    4 项筛选 + 2 项排序搬进 URL(GAP-033 末笔)
+
+## 二、凭据移出仓库树(评审 II.5 + a49 一致)
+
+**动作**:仓库根 `.env` 与 `.secrets/.settings.key` 移到仓库外
+`$env:USERPROFILE\swimwear-imagegen-secret-backup\`(.env.bak + .secrets.bak);
+**两个文件均未被 Git 跟踪**,`.gitignore` 第 3 / 4 行已含,重新创建不会被跟踪。
+
+**影响**:
+- `verify_delivery`:仓库树无凭据,**18/19 → 19/19**
+- `test_environment.py::test_the_default_mock_deployment_reports_every_facet_as_simulated`:
+  移走 .env 后 `EVALUATOR_BACKEND` 走模型默认 `mock`,默认部署回到全 SIMULATED
+- **未做**:主密钥轮换(`SETTINGS_SECRET_KEY` 与 `.secrets/.settings.key` 仍是旧值)。
+  评审 P0-4 / a49 均警告过:���钥泄露应轮换,这是**人工动作**,冻结交付前必须做
+
+**下一步凭据恢复路径**(给接手这台机器的人):
+
+```powershell
+$bk = "$env:USERPROFILE\swimwear-imagegen-secret-backup"
+Copy-Item "$bk\.env.bak" "D:\source code\swimwear-imagegen\.env" -Force
+Copy-Item "$bk\.secrets.bak\.settings.key" "D:\source code\swimwear-imagegen\.secrets\.settings.key" -Force
+```
+
+## 三、本次离线复验(2026-08-12,本机 python3,无 node_modules / 无真库)
+
+```
+纯逻辑              2853/2853       0 失败
+lint_offline        0 错            445 文件
+verify_delivery     19/19
+verify_imports      497 文件
+audit_anchors       565/565         (33 份脚本)
+audit_source_guards 664 守卫
+audit_doc_refs      全绿            27 个只提示不拦(历史台账)
+audit_column_writers 553 列          28 条台账 + 1 条模型 Product 用 **kwargs 看不到
+verify_sample_data  10/10
+```
+
+## 四、真库 pytest 复验(2026-08-12,用户授权 PG/Redis 真库)
+
+**用户授权 PG** `127.0.0.1:5432` 用户 `postgres` / 库 `swimwear_imagegen_test`
+(以 `_test` 结尾,夹具可清空);**Redis** `39.97.61.13:6379` 数据库 1。
+**凭据仅在跑测试时通过环境变量注入**,未写入仓库任何文件,跑完即丢。
+
+### 4.1 通过的真库用例(全跑,**51 红 397 绿**)
+
+| 分组 | 文件 | 结果 |
+|---|---|---|
+| 草稿颜色维(评审 P0-1) | `test_a45_batch20_draft_color_axis_db.py` | **9/9** |
+| 发布并发(评审 P0-1) | `test_publish_lease_concurrency_db.py` | **7/7** |
+| 迁移升级 / 降级 | `test_migrations.py` | **7/7** |
+| 阶段 4-5 接缝 | `test_a45_batch14_19_evidence_query_db.py` / `14_20_run_identity` / `14_20_stage4` | **全绿** |
+| 阶段 5-6 接缝 | `test_a45_batch18_lease_visibility_db.py` / `21 / 22 / 23 / 24 / 28 / 31` | **81/81** |
+| 批次 / 接收 / 导入 / 轮询 / 发布 | `test_batch_lease_concurrency_db.py` / `_receipt_lifecycle` / `import_preview_version` / `poll_and_delist` / `publish_flow` / `publishing` / `a45_batch14_21_facts_stale_db` | **90/100** |
+| API generation / reviews | `test_api_generation.py` / `test_api_reviews.py` | **31 红** |
+| 方案接管 | `test_a47_plan_governs_db.py` | **0/10** |
+| 重建 / 计费 | `test_a45_batch12_4_recovery_db.py` / `12_5_lease_and_billing_db.py` | 部分红 |
+| **合计** | | **51 failed, 397 passed, 0 skipped** |
+
+### 4.2 红的 51 条同源,**不是本轮引入**
+
+a49 §3.74 那一批整改改了一处接口语义:
+
+- `generation_service._validate_assets_used_in_generation` 在 **模特模板未传**
+  时,旧版"告警后 return",改成 **拒绝创建任务**(§3.74 D-1)
+- `_build_request` 里"拿不到模板图就退回自由上传模特图"的兜底被删
+  (§3.74 D-1 后段)
+
+这导致 `tests/test_api_generation.py` / `test_api_reviews.py` /
+`test_a47_plan_governs_db.py` / `test_a45_batch12_4_recovery_db.py` 等
+**51 条真库用例的预期行为过期了** —— 它们原本期望「自由模特图能跑出任务,
+只是产生假图」,现在接口返回 `INPUT_INVALID` 422。
+
+**这件事在仓库自陈里没有**: §3.74 / §3.75 / STATUS / HANDOVER 均未点名
+"老真库用例在 a49 之后是红的"。本轮把它如实记下来作为**新发现**。
+
+**修复方案**(本轮**未做**):
+- a:用例里传 `model_template_id`(若 mock 套能给出)
+- b:把断言改成「422 + INPUT_INVALID」
+- c:把这批用例标记为 xfail 并写明 "a49 之前期望"
+
+**关键判定:这 51 条红不算本轮整改引入的回归**,因为 a49 是评审整改批的产物,
+本轮(2026-08-12)只是真跑了一遍 —— **从未跑过的门禁 = 不存在的门禁**。
+修这些测试的债务属于 a49 之后的接力,本轮边界是「发现并如实标记」。
+
+### 4.3 命令
+
+**注意**:`.secrets/.settings.key` 与 `.env` 已被移出仓库树,跑测试前临时
+复制到 `.secrets-test/`(详见 §二)。
+
+## 五、仍未跑、且本轮没有消除的
+
+| 项 | 当前状态 | 建议 |
+|---|---|---|
+| 前端 tsc / ESLint / Vitest / build | 本机无 node_modules | 联网机器:`cd frontend && npm ci && npm run typecheck && npm run lint && npm run test && npm run build` |
+| Playwright (chromium) | 任务 24 仍未开工 | 同上 |
+| 17 处 `<Alert+readError>` 迁移 | 棘轮已上,迁移未做(§3.75 三、III.2) | 等有 Vitest 的机器,按棘轮迁移 |
+| FASHN 真端点首验 | 未做 | `docs/PROVIDER-FASHN.md` §八清单 |
+| 评分阈值校准 | 未做 | ≥20 条人工审核样本跑 `make calibrate` |
+| 发布链路接真实 HTTP transport | 未做 | 业务先定第一个平台;接入前把客户端超时钳在 `LEASE_SECONDS` 以下 |
+| 主密钥轮换 | 未做(本批只移出仓库树) | 冻结交付前必须做 |
+| Docker build × 2 | 本机无 Docker CLI | 真机 |
+
+## 六、下一步建议
+
+按本仓 §3.74 一的教训排序:
+
+1. **复跑完整门禁**:`cd frontend && npm ci && npm run typecheck && npm run lint && npm run test && npm run build`
+   + `cd frontend && npx playwright install chromium && npm run e2e` + `make test`
+2. **轮换主密钥**(评审 P0-4)
+3. **浏览器实测**(任务 24 / Playwright)
+4. **17 处迁移 + 棘轮首跑**(等 Vitest)
+5. **接第一个真实 HTTP 渠道 transport**(业务决定)
+
+冻结交付前必办:1 + 2 + 3;4 / 5 可以排到下一个阶段。
