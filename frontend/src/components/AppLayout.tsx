@@ -38,7 +38,6 @@ import { authApi } from '../api/auth'
 import { describeError } from '../api/client'
 import { brandVars, layoutMax } from '../theme'
 import ColdStartBanner from './ColdStartBanner'
-import EnvironmentBanner from './EnvironmentBanner'
 import SpendAlertBanner from './SpendAlertBanner'
 import ErrorBoundary from './ErrorBoundary'
 import { useIdentity } from '../hooks/useIdentity'
@@ -308,9 +307,6 @@ export default function AppLayout({ groups }: Props) {
             <ColdStartBanner />
             {/* 预算告警(A23)。排在冷启动之后:后端连不上时先说那件事,
                 「预算快满了」在一个连不上的系统里不是当务之急 */}
-            {/* 环境真实性排在预算前面(任务 6):「你看到的是假数据」比
-                「这个月花超了」更早影响运营该不该相信这一屏 */}
-            <EnvironmentBanner />
             <SpendAlertBanner />
             {/* 子页面从这里出来(A11 之后 AppLayout 是布局路由,不再收 children)。
                 边界挂在这里而不是更外面:一页崩了侧栏还在,运营能自己走去别的页面,

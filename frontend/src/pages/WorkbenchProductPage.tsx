@@ -23,7 +23,7 @@
  * §3.5 步骤 5 的验收是「刷新商品详情页,当前步骤、完成度和问题状态不丢失」。
  * tab 放在查询参数里而不是 useState,刷新、后退、把链接发给同事都能停在原处。
  */
-import { useMemo, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Badge, Button, Skeleton, Space, Tabs } from 'antd'
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons'
@@ -73,6 +73,7 @@ export default function WorkbenchProductPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [params, setParams] = useSearchParams()
+  const [headerTarget, setHeaderTarget] = useState<WorkbenchTab | null>(null)
 
   // 不认识的 tab 值一律退回总览,不白屏
   const raw = params.get('tab') ?? ''
@@ -89,6 +90,36 @@ export default function WorkbenchProductPage() {
     merged.set('tab', next)
     setParams(merged, { replace: false })
   }
+
+  const jumpFromHeader = (next: WorkbenchTab) => {
+    if (next === 'material' && tab === 'material') {
+      document.getElementById('workbench-material-upload')?.click()
+      return
+    }
+    setHeaderTarget(next)
+    goTab(next)
+  }
+
+  useEffect(() => {
+    if (!headerTarget || headerTarget !== tab) return
+
+    const frame = window.requestAnimationFrame(() => {
+      // 顶部“下一步”原来只负责切标签。已经在目标标签时,点击不会产生任何
+      // 可见变化,看起来就是按钮坏了。素材步骤直接落到上传按钮,其余步骤落到
+      // 对应面板；聚焦同时让键盘用户能从真正的操作处继续。
+      const targetId =
+        headerTarget === 'material'
+          ? 'workbench-material-upload'
+          : `workbench-tab-${headerTarget}`
+      const target = document.getElementById(targetId)
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      target?.focus({ preventScroll: true })
+      if (headerTarget === 'material') target?.click()
+      setHeaderTarget(null)
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [headerTarget, tab])
 
   // 走查 P1-5:带上 SKU。同时开几个详情标签时,标签栏上四个
   // 「商品展示图生产台」是分不出来的
@@ -180,7 +211,7 @@ export default function WorkbenchProductPage() {
         product={product}
         flow={flow}
         thumbnail={data.thumbnail_url}
-        onJump={goTab}
+        onJump={jumpFromHeader}
         actionPending={query.isFetching}
       />
 
@@ -226,7 +257,12 @@ export default function WorkbenchProductPage() {
               t.label
             ),
             // 只渲染当前标签:八个标签各自都有请求,全挂上去等于一进详情就打八次接口
-            children: tab === t.key ? content[t.key] : null,
+            children:
+              tab === t.key ? (
+                <div id={`workbench-tab-${t.key}`} tabIndex={-1}>
+                  {content[t.key]}
+                </div>
+              ) : null,
           }
         })}
       />

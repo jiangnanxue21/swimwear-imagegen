@@ -285,7 +285,13 @@ export default function MaterialTab({
                 return false
               }}
             >
-              <Button size="small" type="primary" icon={<UploadOutlined />} loading={upload.isPending}>
+              <Button
+                id="workbench-material-upload"
+                size="small"
+                type="primary"
+                icon={<UploadOutlined />}
+                loading={upload.isPending}
+              >
                 上传素材
               </Button>
             </Upload>
