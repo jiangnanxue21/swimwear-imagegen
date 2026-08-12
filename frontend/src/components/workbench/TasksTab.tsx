@@ -174,7 +174,7 @@ export default function TasksTab({ productId }: { productId: string }) {
         title="开始出图"
         confirmLoading={create.isPending}
         onCancel={() => setCreating(false)}
-        onSubmit={(values) => create.mutate(values as TaskCreatePayload)}
+        onSubmit={(values) => create.mutate(values)}
       />
     </Card>
   )

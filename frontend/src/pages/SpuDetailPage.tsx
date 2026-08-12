@@ -189,9 +189,24 @@ export default function SpuDetailPage() {
               </span>
             }
           >
-            {/* 面板只要主键与颜色显示名。它自己拉方案列表、自己处理失败 ——
-                这一页不替它再判一次"哪一份生效",那条规则在后端 */}
-            <GenerationPlanPanel spuId={spu.id} variantLabels={variantLabels} />
+            {/* 面板只要主键、颜色显示名与受众。它自己拉方案列表、自己处理失败 ——
+                这一页不替它再判一次"哪一份生效",那条规则在后端。
+
+                `productAudience` 是补的(2026-08-11 评审):不传它,面板拉
+                模特候选集时**不带 `for_product_audience`**,于是 §10.5 的
+                候选收窄在这个入口上完全不生效 —— 女装 SPU 的下拉里会出现
+                男模特,而运营选中它、存下来、启用,一路都不会有人说什么。
+                后端从这一轮起会拦(`_assert_model_template_usable`),
+                但拦在保存那一刻仍然是"让他先选错再报错";候选集收窄才是
+                让他选不到。两处都要有。
+
+                SPU 的 `audience` 非空(建档第一步就要选),所以这里没有
+                "待确认"那一档 —— 面板的 `null` 分支服务的是别的入口。 */}
+            <GenerationPlanPanel
+              spuId={spu.id}
+              variantLabels={variantLabels}
+              productAudience={spu.audience}
+            />
           </Card>
 
           <Card size="small" title={`SKU(${spu.skus.length})`}>

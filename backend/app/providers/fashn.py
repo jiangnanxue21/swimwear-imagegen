@@ -52,6 +52,7 @@ from app.providers.base import (
     ImageGenerationProvider,
     ProviderCapabilities,
     ProviderUsage,
+    work_units,
 )
 from app.providers.errors import (
     NotConfiguredError,
@@ -657,9 +658,21 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
     # ---------------- 请求映射 ----------------
 
     async def build_inputs(
-        self, request: GenerationRequest, model: FashnModel, *, count: int, seed: int | None
+        self,
+        request: GenerationRequest,
+        model: FashnModel,
+        *,
+        count: int,
+        seed: int | None,
+        prompt: str | None = None,
     ) -> dict[str, Any]:
-        """构造 ``inputs``。只放该模型参数表里真实存在的键。"""
+        """构造 ``inputs``。只放该模型参数表里真实存在的键。
+
+        `prompt` 传了就用它,不传退回 `request.prompt`。这个参数是角度
+        work-unit 的落点(2026-08-11 评审):同一份请求按角度拆成几次提交,
+        每次带的是"本次只出 FRONT"那一版提示词,而 `request.prompt` 仍然是
+        进幂等键的那份基础提示词 —— 两者不是一回事,所以不能在这里就地覆盖。
+        """
         inputs: dict[str, Any] = {
             model.product_field: await self._prepare_image(request.garment_image_url),
         }
@@ -667,8 +680,9 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
         if request.model_image_url and model.model_image_field:
             inputs[model.model_image_field] = await self._prepare_image(request.model_image_url)
 
-        if model.supports_prompt and request.prompt:
-            inputs["prompt"] = request.prompt
+        effective_prompt = request.prompt if prompt is None else prompt
+        if model.supports_prompt and effective_prompt:
+            inputs["prompt"] = effective_prompt
 
         if model.candidate_field and count > 1:
             inputs[model.candidate_field] = min(count, model.max_per_call)
@@ -761,7 +775,18 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
                 f"{model.model_name} 必须提供模特图", provider=self.provider_name
             )
 
-        sizes = batch_sizes(request.candidate_count, model.max_per_call)
+        # 先按**角度**拆,再按每家模型的单次上限拆(2026-08-11 评审)。
+        #
+        # 顺序不能反。反过来(先按上限拆再摊角度)会让一次 `num_images=3`
+        # 的调用横跨两个角度,而那一次只能带一句提示词 —— 于是"这三张里
+        # 前两张是正面、第三张是背面"变成一句我们自己相信、模型没听见的话。
+        #
+        # `work_units()` 在没有方案时给出一个 `angle=None` 的单元,
+        # 于是这段代码在存量路径上等价于原来的 `batch_sizes(candidate_count, ...)`。
+        plan: list[tuple[str | None, int]] = []
+        for unit in work_units(request):
+            for size in batch_sizes(unit.count, model.max_per_call):
+                plan.append((unit.prompt, size))
         ids: list[str] = []
         #: **发出去几个 POST**,不是受理成功几个(A45-batch18 / P2-2)。
         #: 在 `_request` **之前**加,不在之后 —— 计的是"发出去了几次",
@@ -769,11 +794,13 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
         #: 超时不退钱。与识别链路 `llm/transport` 的 `on_attempt` 同一条口径
         attempted = 0
         try:
-            for index, size in enumerate(sizes):
+            for index, (unit_prompt, size) in enumerate(plan):
                 # 每次提交换一个 seed:同 seed 同输入会得到同一张图,拿 4 张一样的没有意义
                 seed = None if request.seed is None else request.seed + index
                 # 素材准备在计数之前:它失败时一个请求都没发出去
-                inputs = await self.build_inputs(request, model, count=size, seed=seed)
+                inputs = await self.build_inputs(
+                    request, model, count=size, seed=seed, prompt=unit_prompt
+                )
                 attempted += 1
                 body, _ = await self._request(
                     "POST", RUN_PATH, json={"model_name": model.model_name, "inputs": inputs}

@@ -125,6 +125,7 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "generation_tasks:cancel_task": "取消一次生成是往回走",
     "attributes:cancel_extraction": "取消一次识别是往回走",
     "generation_tasks:retry_task": "重试的前置是上一次失败,不是流程前置",
+    "generation_tasks:delete_task": "删掉一条任务记录是清理,往前一步都不走",
     "media_library:quarantine": "隔离一张素材是纠错,不是往前走一步",
     "media_library:release": "放行被隔离的素材是纠错,不是往前走一步",
     # ---- 素材步是自阻断步(`wizard.SELF_BLOCKING_STEPS`),闸恒放行 ----
@@ -182,6 +183,16 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "prompts:reset_prompt": "配置面,不属于任何商品",
     "settings:update_settings": "配置面,不属于任何商品",
     "settings:reset_settings": "配置面,恢复默认值,不属于任何商品",
+    # ---- 认证面:它在商品流程之外,而且闸的前提本身依赖它 ----
+    #
+    # 这两条和上面所有豁免不是一类。别的豁免是"这个动作不推进流程";
+    # 这两条更强:**闸根本不可能拦它们**。`ensure_*` 要先有 `product_id` 才
+    # 判得出前置,而登录发生在任何商品被选中之前 —— 拿不到判定对象。
+    #
+    # 反过来说更清楚:一道拦得住登录的闸,会把人锁在"没登录所以过不了闸,
+    # 过不了闸所以登不上"的死循环里。
+    "auth:login": "登录在商品流程之外,而且闸的前置判定本身要求已登录",
+    "auth:logout": "退出登录在商品流程之外,更不是前进动作",
 }
 
 #: 没有对应写端点的动作码 -> 为什么。**穷举 `NextActionCode` 的另一半。**

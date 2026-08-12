@@ -40,6 +40,30 @@ def available_names() -> list[str]:
     return list(PROVIDER_FACTORIES)
 
 
+def selectable_names() -> list[str]:
+    """**现在真的能选**的 Provider:已实现 + 已配置。排序过。
+
+    ## 它补的是"方案里能选一家后端明确拒绝的 Provider"
+
+    2026-08-11 评审:前端的方案表单硬编码 `mock / fashn / comfyui` 三项,
+    而 `IMPLEMENTED_PROVIDERS` 只有 `{mock, fashn}`,`_assert_usable` 会对
+    comfyui 抛 `CONFIG_INVALID`。于是运营能一路走完"选 comfyui -> 存草稿 ->
+    启用",三天后创建任务才拿到报错,而那时错误指向的是任务,不是方案。
+    FASHN 没配 Key 也是同一条动线。
+
+    **不看生成模式** —— 方案里没有"生成模式"这个字段(那是建任务时才定的),
+    所以这里只回答"这家用不用得上"。模式支持仍由 `resolve()` 在建任务时判,
+    它有 `generation_mode` 可用。两道闸问的不是同一个问题,不要合并。
+
+    只读配置、不发网络请求(同 `describe_all`)。
+    """
+    return sorted(
+        name
+        for name in PROVIDER_FACTORIES
+        if name in IMPLEMENTED_PROVIDERS and get_provider(name).is_configured()
+    )
+
+
 def get_provider(name: str) -> ImageGenerationProvider:
     factory = PROVIDER_FACTORIES.get((name or "").strip().lower())
     if factory is None:

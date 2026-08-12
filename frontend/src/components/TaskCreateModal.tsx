@@ -51,7 +51,21 @@ interface Props {
   title?: string
   confirmLoading?: boolean
   onCancel: () => void
-  onSubmit: (values: Record<string, unknown>) => void
+  /**
+   * 提交这次出图。**入参是 `TaskCreatePayload`,不是 `Record<string, unknown>`。**
+   *
+   * 2026-08-11:原来是后者,于是三个调用点各自把它强转回来 —— 两个写
+   * `as never`(TS 对它一声不吭),第三个写 `as TaskCreatePayload`,
+   * 而那一个**当场 TS2352**:`Record<string, unknown>` 缺 `product_id` 与
+   * `mode`,两个类型不够重叠。也就是说 `npm run typecheck` 在这一行是红的,
+   * CI 的 frontend job 到不了 lint 那一步。
+   *
+   * 强转本身就是那道缝:这个弹窗**确实**会补上 `product_id`(路由里那个)
+   * 与 `mode`(默认 `virtual_try_on`),所以它产出的就是一个完整的
+   * `TaskCreatePayload` —— 那件事应该由类型说出来,而不是靠三处
+   * 各写一遍的 `as`。改成正着声明之后,三个 `as` 全部删掉。
+   */
+  onSubmit: (values: TaskCreatePayload) => void
 }
 
 export default function TaskCreateModal({
@@ -201,12 +215,17 @@ export default function TaskCreateModal({
            * 对缺席与 false 是同一个默认,但请求体里有它才说得清
            * "这一次没有绕过方案"是一个决定,不是一个遗漏。
            */
-          onSubmit({
+          // 显式收成 `TaskCreatePayload`:两个必填项在这里各有一个确定来源
+          // (`product_id` 来自路由或下拉,`mode` 有 setFieldsValue 的默认值),
+          // 所以类型上它们不该是可选的 —— 见 `Props.onSubmit` 那一段
+          const payload: TaskCreatePayload = {
             ...rest,
-            product_id: productId ?? rest.product_id,
+            product_id: String(productId ?? rest.product_id),
+            mode: String(rest.mode),
             override_plan: Boolean(override_plan),
             provider_params: providerParams,
-          })
+          }
+          onSubmit(payload)
         })
       }
     >
@@ -362,16 +381,21 @@ export default function TaskCreateModal({
         <Form.Item
           name="model_template_id"
           label="模特模板"
-          // 留空这条路径绕过 §11 的授权/年龄检查(`media_assets` 上没有那几列,
-          // 见 docs/STATUS.md 的已知缺口)。**编号只能待在注释里** ——
-          // 运营手里没有那份文档,ESLint 的 no-restricted-syntax 拦的就是它。
-          // 下面那句话必须把"跳过了什么"说成人话,而不是甩一个编号。
+          // 2026-08-11:留空**不再是一条能走的路**。后端原来会退回商品自带的
+          // 「模特参考图」并跳过 §10.5 受众与 §11 授权/年龄检查,那条缝已经
+          // 关掉了(`generation_service._assert_assets_are_usable`,按 PRD §6.4
+          // 「自由上传模特图不得绕过 ModelTemplate 校验」)。
+          // 这里的文案必须跟着改 —— 让人照着一句过期的提示留空,
+          // 拿到的会是一个他无法从提示里预料到的报错。
+          //
+          // **编号只能待在注释里**:运营手里没有那份文档,ESLint 的
+          // no-restricted-syntax 拦的就是把编号写进界面文案。
           extra={
             planGoverns && plan?.model_template_id
               ? '方案已经指定了模特 —— 这一项由方案决定,选了不算数'
               : productAudience
                 ? `候选集已按商品受众(${AUDIENCE_LABEL[productAudience]})收窄:受众不匹配的模特不会出现在这里`
-                : '留空则使用商品自带的模特参考图 —— 那张图没有授权与年龄记录,不走授权检查'
+                : '虚拟试穿必须选一个模特模板。商品自带的「模特参考图」不能直接用 —— 那张图没有受众、年龄与授权记录,合规检查无从执行'
           }
         >
           <Select
@@ -382,7 +406,9 @@ export default function TaskCreateModal({
             placeholder={
               planGoverns && plan?.model_template_id
                 ? '由方案指定'
-                : '不指定(使用商品自带模特参考图)'
+                // 原来是"不指定(使用商品自带模特参考图)"—— 那条路已经关了,
+                // 留着这句话等于在下拉框里推荐一个必定失败的选择
+                : '选一个模特模板'
             }
             loading={templates.isLoading}
             notFoundContent={

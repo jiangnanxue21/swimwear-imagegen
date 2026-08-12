@@ -7,6 +7,7 @@
  * 已批准的集只给「基于这一版新建」。
  */
 import { apiClient } from './client'
+import type { ImageAngle } from './generationPlans'
 import type { MediaRole } from './media'
 
 export interface ImageSetItem {
@@ -18,9 +19,32 @@ export interface ImageSetItem {
   is_primary: boolean
   enabled: boolean
   derivative_purpose: string | null
+  /**
+   * 这一项覆盖的拍摄角度(§6.5)。**后端从一开始就有这一列并且真的拿它验收**,
+   * 而前端一直没读没写 —— 见 `ImageSetItemInput.angle` 上那一段。
+   */
+  angle: ImageAngle | null
+  /** §6.5「通用图默认不混入颜色附图」。批准时真的按它拦 */
+  shared_opt_in: boolean
 }
 
-/** 提交用的一项。没有 id —— 保存是整批替换,不做逐项 diff */
+/**
+ * 提交用的一项。没有 id —— 保存是整批替换,不做逐项 diff。
+ *
+ * ## `angle` 与 `shared_opt_in` 是补的(2026-08-11 评审),缺了它们是一个真缺陷
+ *
+ * 保存 = 派生新版 = **整批重建 items**,后端按 `item.get(...)` 取值,取不到就落
+ * 默认值。这两个字段不在这里的后果不是"少一个功能",是**运营点一次「保存编排」
+ * 就把已有数据清掉**:
+ *
+ *     已有 angle          -> NULL   -> 配了 FRONT/BACK 的方案永远报「缺正面图」,
+ *                                     而他补多少张图都没用
+ *     已有 shared_opt_in  -> false  -> 通用图批准时报 `UNMARKED_SHARED_IMAGE`
+ *
+ * 界面上因此必须同时有编辑入口 —— 与 `derivative_purpose`(A-19)那次不同:
+ * 那一次的结论是"至少原样带回去",而这两个字段是**批准闸真的会读**的,
+ * 只带回去等于让运营看得见阻断、找不到开关。
+ */
 export interface ImageSetItemInput {
   media_asset_id: string
   role: MediaRole
@@ -29,6 +53,8 @@ export interface ImageSetItemInput {
   is_primary?: boolean
   enabled?: boolean
   derivative_purpose?: string | null
+  angle?: ImageAngle | null
+  shared_opt_in?: boolean
 }
 
 export interface ImageSetViolation {

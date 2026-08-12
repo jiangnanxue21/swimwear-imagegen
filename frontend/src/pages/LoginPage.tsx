@@ -95,25 +95,66 @@ export default function LoginPage() {
     )
   }
 
-  // 这个部署根本不走浏览器登录。**不是空白页,也不是一句"登录失败"** ——
-  // 那两种都会让人一直试密码。直说没有这条路,并指向真正该去的地方
+  /*
+   * 这个部署根本不走浏览器登录。**不是空白页,也不是一句"登录失败"** ——
+   * 那两种都会让人一直试密码。直说没有这条路,并指向真正该去的地方。
+   *
+   * ## 这一支原来只有一句话,而它服务着两种完全不同的部署(2026-08-11 评审)
+   *
+   * 那句话是「到<系统设置>页填一次口令即可」,而它同时被两种情况读到:
+   *
+   *     免登录模式(dev)   本机三种凭据全空。**根本不需要登录**,任何请求都通;
+   *                        人会走到这一页只是因为点了侧栏的"退出登录"
+   *     口令模式(token)   只配了 Header 口令。浏览器**进不来**,
+   *                        而且设置页里那个口令输入框随 localStorage
+   *                        口令链一起删掉了 —— 那句指引指向一个不存在的输入框
+   *
+   * 现在按 `auth_mode` 分开说。两句话指向的动作完全相反:前者"直接用",
+   * 后者"改服务器配置"。
+   */
   if (!identity.backendDown && !identity.sessionAuth) {
     return (
       <Shell>
-        <Alert
-          type="info"
-          showIcon
-          message="这个部署没有开启浏览器登录"
-          description={
-            <Typography.Text style={{ fontSize: fontScale.body }}>
-              后端当前认的是 Header 口令(ADMIN_TOKEN / OPERATOR_TOKENS),这里没有
-              账号密码可填。到 <Link to="/settings">系统设置</Link> 页填一次口令即可;
-              要改成账号密码登录,由管理员在 <code>.env</code> 里配
-              <code>ADMIN_PASSWORD</code> / <code>OPERATOR_PASSWORD</code> /
-              <code>AUTH_SESSION_SECRET</code> 后重启后端。
-            </Typography.Text>
-          }
-        />
+        {identity.tokenOnly ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="这个部署的浏览器登录没有开启,现在无法从界面登录"
+            description={
+              <Typography.Text style={{ fontSize: fontScale.body }}>
+                后端只配置了 Header 口令(<code>ADMIN_TOKEN</code> /{' '}
+                <code>OPERATOR_TOKENS</code>),而浏览器不使用它 —— 界面上没有、
+                也不应该有填口令的地方。两条出路,都需要改服务器配置后重启后端:
+                <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+                  <li>
+                    要用账号密码登录:配 <code>ADMIN_PASSWORD</code> /{' '}
+                    <code>OPERATOR_PASSWORD</code> / <code>AUTH_SESSION_SECRET</code>
+                  </li>
+                  <li>
+                    本机开发想免登录:清空 <code>ADMIN_TOKEN</code> 与{' '}
+                    <code>OPERATOR_TOKENS</code>
+                  </li>
+                </ul>
+              </Typography.Text>
+            }
+          />
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="这台机器处于免登录的开发模式"
+            description={
+              <Typography.Text style={{ fontSize: fontScale.body }}>
+                后端没有配置任何凭据,所以这里没有账号密码可填,也不需要登录 ——
+                直接<Link to="/today">回到工作台</Link>即可。要真的验证
+                admin / operator 的差异、退出登录与 403,由管理员在{' '}
+                <code>.env</code> 里配 <code>ADMIN_PASSWORD</code> /{' '}
+                <code>OPERATOR_PASSWORD</code> / <code>AUTH_SESSION_SECRET</code>{' '}
+                后重启后端。
+              </Typography.Text>
+            }
+          />
+        )}
       </Shell>
     )
   }

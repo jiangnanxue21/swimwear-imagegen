@@ -36,6 +36,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       STORAGE_LOCAL_DIR: /data/storage
       SETTINGS_KEY_DIR: /data/secrets
+      # 后端端口只绑 127.0.0.1(见下面 ports 那段的说明),外面只有 nginx /
+      # Vite 代理进得来,所以可以信任反代传来的来源头 —— 登录限流按它计。
+      TRUST_PROXY_HEADERS: "true"
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"

@@ -131,6 +131,62 @@ def test_an_account_without_a_configured_password_cannot_be_logged_into(api, mon
         assert resp.status_code == 401, f"空密码账号被 {password!r} 登进去了"
 
 
+def test_repeated_failures_start_getting_rejected_before_the_password_is_checked(api):
+    """连续失败到阈值之后回 429,而且**不再比对口令**(a51)。
+
+    这条钉的是限流真的接上了。它此前一条都没有:登录可以被无限次尝试,
+    而这套系统只有两个账号、口令是配置里的共享明文。
+
+    ## 为什么用"正确口令也被拦"来判断顺序
+
+    "闸在验密码之前"这件事,从外面只有一个可观测的痕迹:被限住的那一刻,
+    **正确的口令也进不来**。如果实现写成"先验密码、对了就放行、只对错的计数",
+    这条用例会拿到 200 —— 而那样的限流一次也没有限制过猜测速率。
+    """
+    from app.workflows.login_throttle import MAX_FAILURES
+
+    for _ in range(MAX_FAILURES):
+        assert api.post(LOGIN, json={"username": "admin", "password": "wrong"}).status_code == 401
+
+    blocked = api.post(LOGIN, json={"username": "admin", "password": BROWSER_ADMIN_PASSWORD})
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "RATE_LIMITED"
+
+
+def test_the_throttle_is_scoped_to_the_username_that_was_being_guessed(api):
+    """猜 admin 猜到被拦,不该把 operator 一起拦掉。
+
+    键是 (来源, 用户名) 而不是只有来源:同一间办公室共用出口 IP 时,
+    只按来源计会让一个人手滑连累所有人。
+    """
+    from app.workflows.login_throttle import MAX_FAILURES
+
+    for _ in range(MAX_FAILURES):
+        api.post(LOGIN, json={"username": "admin", "password": "wrong"})
+
+    other = api.post(LOGIN, json={"username": "operator", "password": BROWSER_OPERATOR_PASSWORD})
+    assert other.status_code == 200
+
+
+def test_a_successful_login_clears_the_counter(api):
+    """成功清零 —— 连错几次之后终于想起来的人不该带着惩罚走路。
+
+    这也不给攻击者任何东西:他要先猜对才清得掉。
+    """
+    from app.workflows.login_throttle import MAX_FAILURES
+
+    for _ in range(MAX_FAILURES - 1):
+        api.post(LOGIN, json={"username": "admin", "password": "wrong"})
+
+    assert api.post(
+        LOGIN, json={"username": "admin", "password": BROWSER_ADMIN_PASSWORD}
+    ).status_code == 200
+
+    # 清零之后又能重新错满一轮,而不是"再错一次就被拦"
+    for _ in range(MAX_FAILURES - 1):
+        assert api.post(LOGIN, json={"username": "admin", "password": "x"}).status_code == 401
+
+
 def test_the_password_never_reaches_the_response_or_the_log(api, caplog):
     """密码不进响应体,也不进日志。
 
@@ -293,27 +349,73 @@ def test_health_tells_an_anonymous_caller_which_auth_mode_this_deployment_uses(a
     assert resp.json()["auth_mode"] == "session"
 
 
-def test_health_reports_token_mode_when_browser_login_is_not_configured(monkeypatch):
-    """没配浏览器登录时报 `token` —— 前端据此指向设置页而不是登录页。
+def _anonymous_auth_mode(monkeypatch, *, admin_token: str) -> str:
+    """把浏览器登录三项清空、`ADMIN_TOKEN` 设成给定值,读匿名 `/health` 的 `auth_mode`。
 
-    反向的那一半:少了它,`auth_mode` 可以被写成恒为 `"session"` 而上面那条
-    照样绿,于是只配 Legacy Token 的部署会把人送进一个永远登不进去的登录页。
+    提成函数是因为下面两条用例的差别**只有 `ADMIN_TOKEN` 一项** —— 而那一项
+    恰好就是 `token` 与 `dev` 的全部区别。抄两遍的话,差别会藏在两段几乎一样的
+    setup 里,读的人得逐行比对才看得出这两条到底在测什么。
+
+    `APP_ENV` 钉成 `local` 是刻意的:`dev` 那一档要求 `_is_local_env()`,
+    不钉就是靠"这台机器恰好是 local"。而 local 同时是评审第 8 条点名的那个
+    死锁组合的前提(local + 配了 Header 口令 + 没配浏览器密码),
+    所以两条都在 local 下跑,差别才真的只剩那一项。
     """
     from fastapi.testclient import TestClient
 
     from app.core.config import settings
     from app.main import app
 
+    monkeypatch.setattr(settings, "APP_ENV", "local")
     monkeypatch.setattr(settings, "ADMIN_PASSWORD", "")
     monkeypatch.setattr(settings, "OPERATOR_PASSWORD", "")
     monkeypatch.setattr(settings, "AUTH_SESSION_SECRET", "")
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", admin_token)
+    monkeypatch.setattr(settings, "OPERATOR_TOKENS", "")
 
     app.dependency_overrides[deps.db_session] = lambda: None
     try:
         with TestClient(app) as c:
-            assert c.get("/api/health").json()["auth_mode"] == "token"
+            return c.get("/api/health").json()["auth_mode"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_health_reports_token_mode_when_only_the_legacy_header_token_is_configured(
+    monkeypatch,
+):
+    """**只配了 Legacy Header Token** 时报 `token` —— 那一档意味着浏览器进不来。
+
+    反向的那一半:少了它,`auth_mode` 可以被写成恒为 `"session"` 而上面那条
+    照样绿,于是只配 Legacy Token 的部署会把人送进一个永远登不进去的登录页。
+
+    ## 这条用例的 setup 曾经描述不了它自称的场景(2026-08-11 回归测出来的)
+
+    原来它只清空浏览器登录三项,**没有配 `ADMIN_TOKEN`** —— 而"三种凭据都没配
+    的 local 机器"是 `dev` 那一档,不是 `token`。它当时能绿,只是因为 `dev` 与
+    `token` 在后端合报成 `token`:两种部署一个值,用例落在哪个分支上没人看得出来。
+
+    评审第 8 条把这两档拆开之后,它就当场变红了 —— 变红是对的,**它一直没在
+    测自己那句 docstring**。要它真的落在 `token` 分支,`ADMIN_TOKEN` 必须有值:
+    那正是「只配了 Header 口令」这句话的字面意思。
+    """
+    assert _anonymous_auth_mode(monkeypatch, admin_token="legacy-header-token") == "token"
+
+
+def test_health_reports_dev_mode_when_no_credential_of_any_kind_is_configured(
+    monkeypatch,
+):
+    """三种凭据一个都没配的 local 机器报 `dev`,**不报 `token`**。
+
+    这是上面那条的另一半,也是评审第 8 条要的那个区分。合报成 `token` 的年代里,
+    默认开发机(什么都没配)会让界面说出"这个部署只认 Header 口令,浏览器进不来"
+    —— 而它其实免登录、一切正常。一句为另一种部署准备的告警,贴在了最常见的
+    那种部署上。
+
+    这条钉的是 `dev` 分支真的会被走到。少了它,`AUTH_MODE_DEV` 可以是一个
+    定义了却永远取不到的常量,而上面那条(配了 token)照样绿。
+    """
+    assert _anonymous_auth_mode(monkeypatch, admin_token="") == "dev"
 
 
 # ---------------------------------------------------------------- 角色语义

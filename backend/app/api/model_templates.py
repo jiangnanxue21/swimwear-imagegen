@@ -11,12 +11,17 @@ from sqlalchemy.orm import Session
 from app.api.deps import (
     current_actor,
     db_session,
+    has_admin_rights,
     read_within_limit,
     require_operator,
 )
 from app.core.config import settings
-from app.core.errors import ErrorCode, ValidationError
-from app.schemas.asset import ModelTemplateForm, ModelTemplateUpdateForm
+from app.core.errors import AppError, ErrorCode, ValidationError
+from app.schemas.asset import (
+    LICENSE_ENDORSEMENT_FIELDS,
+    ModelTemplateForm,
+    ModelTemplateUpdateForm,
+)
 from app.schemas.generation import ModelTemplateOut
 from app.services import model_template_service as mts
 from app.services.storage import asset_url, build_storage
@@ -36,6 +41,67 @@ def get_storage():
         settings.PUBLIC_BASE_URL,
         settings.API_PREFIX,
     )
+
+
+def _assert_may_endorse(request: Request, endorsed: set[str]) -> None:
+    """签 §11 合规字段要管理员权限(2026-08-11 评审)。
+
+    `endorsed` 是这次请求里**真的在写**背书字段的那些键。空集合直接放行 ——
+    上传一个"全部未核实"的模特模板仍然是 operator 的日常动作,那条动线不动。
+
+    ## 为什么判的是"写了什么"而不是"挂哪个依赖"
+
+    整个路由器挂的是 `require_operator`(上传素材要它)。把 create / patch
+    整体换成 `require_admin` 会把「传一张模特图」也变成管理员动作,而那
+    既不是 PRD 的意思,也会当场打断现有的素材上传动线 —— 这正是
+    `update_template` 的 docstring 当初拒绝只锁一边的理由的另一面。
+
+    所以闸开在**字段**上:描述字段谁都能写,签字字段只有管理员能写。
+    两个入口共用这一个函数与
+    `schemas/asset.LICENSE_ENDORSEMENT_FIELDS` 一份清单 —— 只锁一边等于没锁,
+    而分别写两份判断迟早会分叉成"create 松一格"。
+
+    码用 `AUTH_FORBIDDEN` / 403,不是 401:这把凭据是**对的**,只是权限不够。
+    用 AUTH_FAILED 的话前端会点亮"后端不认这把口令"的横幅,
+    然后运营去改一把本来就正确的口令(`deps.rejection` 顶部记着那件事)。
+    """
+    if not endorsed or has_admin_rights(request):
+        return
+    raise AppError(
+        "修改模特的授权与合规字段需要管理员权限(这些字段是合规背书,"
+        "生成前的授权闸直接拿它们做判断):" + "、".join(sorted(endorsed)),
+        code=ErrorCode.AUTH_FORBIDDEN,
+        http_status=403,
+    )
+
+
+def _endorsements_asserted(payload: dict) -> set[str]:
+    """这次请求把哪些背书字段写成了**和默认值不同**的值。
+
+    创建路径用它。判"给了值"是不行的:界面上那张表单每次都把十个字段
+    连同默认值一起发出来(`ModelTemplatesPage.LicenseFields`),按"给了值"
+    判会让每一次正常创建都 403。
+
+    判据是"和 `ModelTemplateForm` 的默认值不同" —— 也就是**真的在断言什么**:
+    `UNVERIFIED` / false / 空列表 / None 的含义都是"没人核实过",
+    那不是签字,不需要管理员。
+
+    默认值从 `model_fields` 现取,不在这里抄一份字面量:抄下来的那份会在
+    有人改动 schema 默认值时静默过期,而过期的方向是**把签字当成默认放行**。
+    枚举默认值(`ModelLicenseStatus.UNVERIFIED`)和 `model_dump(mode="json")`
+    出来的字符串能直接比,因为本仓的枚举一律是 `StrEnum`。
+    """
+    defaults = {
+        field: ModelTemplateForm.model_fields[field].get_default(
+            call_default_factory=True
+        )
+        for field in LICENSE_ENDORSEMENT_FIELDS
+    }
+    return {
+        field
+        for field, default in defaults.items()
+        if payload.get(field) != default
+    }
 
 
 def _out(template, storage) -> ModelTemplateOut:
@@ -173,11 +239,15 @@ async def create_template(
             f"{field}: {first.get('msg', '取值不合法')}", code=ErrorCode.INPUT_INVALID
         ) from None
 
+    body = form.model_dump(mode="json")
+    # 合规背书要管理员。**放在写库之前**:403 之后不该有一个已经落盘的文件
+    _assert_may_endorse(request, _endorsements_asserted(body))
+
     template = mts.create_template(
         session,
         data=data,
         filename=file.filename or "model.jpg",
-        payload=form.model_dump(mode="json"),
+        payload=body,
         storage=storage,
         actor=current_actor(request),
     )
@@ -208,24 +278,35 @@ def update_template(
     **一次都不会触发**。§0.3 第一条底线("模特必须是已确认成年人,
     且授权覆盖本次用途")的后半句因此无法执行。
 
-    ## 权限:与 create 一致,都是 operator
+    ## 权限:描述字段 operator,合规背书字段 admin(2026-08-11 评审)
 
     这里签的确实是合规的字("已确认成年"、"授权覆盖本次用途"),第一版
-    因此挂了 `require_admin`。**改回来了,理由是那个门是假的**:
-    `create` 是 operator,而它同样接收全部十二个授权字段 —— 包括
-    `age_verified` 和 `license_status`。同一份背书,建的时候不用口令、
-    改的时候要,那么想绕开的人重建一条就行。一道能被日常动作绕过的闸
-    比没有闸更糟,因为它看起来像已经管住了。
+    因此挂了 `require_admin`,后来又被改回 operator —— 理由是**那个门是假的**:
+    `create` 是 operator,而它同样接收全部授权字段。同一份背书,建的时候
+    不用口令、改的时候要,那么想绕开的人重建一条就行。一道能被日常动作
+    绕过的闸比没有闸更糟,因为它看起来像已经管住了。
 
-    「授权字段该不该收归管理员」是一个真问题,但它必须**两个入口一起
-    回答** —— 只锁一边等于没锁。这条记进 STATUS 的已知缺口,
-    不在本轮偷偷改掉 create 的权限(那会动到现有的素材上传动线)。
+    那一版同时写下了正确解法:「授权字段该不该收归管理员」必须**两个入口
+    一起回答**。这一轮就是那次回答 —— 但闸不开在整个端点上,而开在**字段组**上:
+
+        name / pose / tags / notes / source ...   operator,不动
+        §11 的十个背书字段                        admin,两个入口同一份清单
+
+    整个端点收归 admin 是不行的:那会把"传一张模特图"也变成管理员动作,
+    打断现有的素材上传动线 —— 而那正是上一版拒绝只锁 patch 的另一半理由。
+    清单与判定在 `schemas/asset.LICENSE_ENDORSEMENT_FIELDS` 与
+    `_assert_may_endorse()` 各**一处**。
     """
     body = payload.model_dump(mode="json", exclude_unset=True)
     if not body:
         raise ValidationError(
             "没有要修改的字段", code=ErrorCode.INPUT_INVALID
         )
+    # PATCH 判的是"这次改了它没有",不是"值和默认一样不一样":`exclude_unset`
+    # 已经把"没传"筛掉了,而 PATCH 里显式传一个默认值(把 LICENSED 改回
+    # UNVERIFIED、把已确认的年龄抹掉)**本身就是一次背书变更**,
+    # 恰恰是最需要管理员的那一种
+    _assert_may_endorse(request, LICENSE_ENDORSEMENT_FIELDS & set(body))
     template = mts.update_template(
         session, template_id, body, actor=current_actor(request)
     )

@@ -1703,6 +1703,41 @@ def _dispatch_next_round(session, task_id: str) -> None:
     dispatch_service.deliver_pending(session, UUID(task_id))
 
 
+def _task_plan_angles(session, task: GenerationTask):
+    """这份任务按哪些角度出图。没有方案就是空元组。
+
+    读的是 `task.generation_plan_id` —— 也就是**创建任务那一刻**解析并记下的
+    那一份,不是"现在这个颜色生效的那一份"。区别是真实的:方案可以在任务
+    排队期间被换掉,而这一轮图是按旧方案的角度提交的。用新方案的角度去标
+    候选图,等于给一批图贴上它们没有被要求过的标签。
+
+    `override_plan` 建的任务这两列都是空的(§5.3),所以它自然走"没有方案"
+    那条路 —— 绕过了方案就不该有方案角度。
+    """
+    from app.models.generation_plan import GenerationPlan
+    from app.workflows import generation_plan as gp
+
+    plan_id = getattr(task, "generation_plan_id", None)
+    if not plan_id:
+        return ()
+    row = session.get(GenerationPlan, plan_id)
+    if row is None:
+        # 方案行被删了。**不拦**:图已经在生成或已经生成完,这里只是标角度
+        logger.warning(
+            "generation plan row is gone; candidates will not carry a target angle",
+            extra={"extra_fields": {"task_id": str(task.id), "plan_id": str(plan_id)}},
+        )
+        return ()
+    return gp.normalize_angles(row.angles_json)
+
+
+def _plan_angle_assignments(session, task: GenerationTask, total: int):
+    """第 i 张候选图该覆盖哪个角度。判定在 `generation_plan.angle_assignments`。"""
+    from app.workflows import generation_plan as gp
+
+    return gp.angle_assignments(_task_plan_angles(session, task), total)
+
+
 def _build_request(
     session, task: GenerationTask, provider: ImageGenerationProvider
 ) -> GenerationRequest:
@@ -1752,8 +1787,33 @@ def _build_request(
         template = session.get(ModelTemplate, template_id)
         if template and template.enabled:
             model_url = image_reference(template.storage_path)
+    # ---- 这里原来有一条退回自由上传模特图的兜底,已删(2026-08-11 评审)----
+    #
+    #     if model_url is None and "MODEL_REFERENCE" in by_type:
+    #         model_url = image_reference(by_type["MODEL_REFERENCE"].storage_path)
+    #
+    # 它是 C-10 那条合规绕行缝的**第二道门**,而且比第一道更隐蔽:创建任务
+    # 那一刻模板是好的、四道检查全过了,而执行时模板可能已经被停用或换掉
+    # (`change_model_template` 挑不到别的启用模板时会原样返回),于是
+    # worker **静默地**换成一张没有受众、没有年龄确认、没有授权范围的图,
+    # 把钱花出去。日志里连一行都没有。
+    #
+    # 现在拿不到模板图就让它按缺模特图失败:`validate_request` 会以
+    # 「虚拟试穿必须提供模特图」拦在发请求之前,一分钱不花。
+    #
+    # **代价说明白**:改之前建的、依赖这条兜底的排队任务会失败。那是刻意的 ——
+    # 一个合规闸的正确失败方向是拒绝执行,不是换一张图继续跑。
     if model_url is None and "MODEL_REFERENCE" in by_type:
-        model_url = image_reference(by_type["MODEL_REFERENCE"].storage_path)
+        logger.warning(
+            "task has no usable model template; refusing to fall back to the "
+            "free-uploaded MODEL_REFERENCE asset (PRD 6.4)",
+            extra={
+                "extra_fields": {
+                    "task_id": str(task.id),
+                    "model_template_id": str(template_id or ""),
+                }
+            },
+        )
 
     task.current_round = (task.current_round or 0) + 1
     base = task.base_seed if task.base_seed is not None else 20240101
@@ -1777,6 +1837,49 @@ def _build_request(
         height=task.output_height,
         seed=seed,
         options=options,
+        angle_units=_angle_units_for(session, task, prompt),
+    )
+
+
+def _angle_units_for(session, task: GenerationTask, prompt: str | None):
+    """把方案的角度翻成 Provider 层的工作单元(2026-08-11 评审)。
+
+    翻译在这里而不是让 Provider 去读方案:`providers/` 不认识
+    `app.workflows`,同 `channels` 只接 `CanonicalProduct` 是一条规矩。
+
+    **角度张数之和与 `task.candidate_count` 必须相等**,而这一点是由
+    `create_task` 保证的(`gp.governed_candidate_count` 就是那个和)。
+    对不上时**不拆**:`validate_request` 会在发请求前把不一致拦成
+    `ProviderInputError`,但那时任务已经建好、运营看到的是"生成失败"。
+    这里退回一次出完并留一条日志 —— 少了角度约束是可以接受的降级,
+    而角度和张数对不上会让**每一张**候选图的角度都标错。
+
+    能走到这个分支的只有一种情况:任务建好之后有人原地改了方案的角度
+    (DRAFT 可以原地改,而 `create_task` 解析到的可能正是它)。
+    """
+    from app.providers.base import AngleWorkUnit
+    from app.workflows import generation_plan as gp
+
+    angles = _task_plan_angles(session, task)
+    if not angles:
+        return ()
+    units = gp.angle_units(angles, base_prompt=prompt)
+    planned = sum(u.count for u in units)
+    if planned != task.candidate_count:
+        logger.warning(
+            "plan angle counts no longer match the task candidate count; "
+            "submitting without per-angle work units",
+            extra={
+                "extra_fields": {
+                    "task_id": str(task.id),
+                    "planned": planned,
+                    "candidate_count": task.candidate_count,
+                }
+            },
+        )
+        return ()
+    return tuple(
+        AngleWorkUnit(angle=u.angle, count=u.count, prompt=u.prompt) for u in units
     )
 
 
@@ -2167,6 +2270,11 @@ def _persist_candidates(session, task, attempt, candidates) -> _PersistOutcome:
     }
     outcome = _PersistOutcome(provider_count=len(candidates))
     touched: list[GenerationCandidate] = []
+    # 第 i 张**本来该覆盖**哪个角度(2026-08-11 评审)。从任务上那份方案
+    # 现算,不从请求里带 —— `_await_and_collect` 有一条续跑进入路径
+    # (PROVIDER_RUNNING),那时手上没有 request。方案是同一份、
+    # `angle_assignments` 是纯函数,所以两条路径算出来一样
+    intended_angles = _plan_angle_assignments(session, task, len(candidates))
 
     for index, item in enumerate(candidates):
         row = existing.get(index)
@@ -2197,6 +2305,26 @@ def _persist_candidates(session, task, attempt, candidates) -> _PersistOutcome:
         row.candidate_metadata = {
             k: v for k, v in item.metadata.items() if k != "inline_bytes"
         }
+        # ---- 这一张打算覆盖的角度(2026-08-11 评审)----
+        #
+        # 落在 `candidate_metadata` 而不是新开一列:JSONB 已经在那儿,
+        # 加列要一次迁移,而这个值的消费者只有一个
+        #(`image_set_service` 在入集时缺省继承它)。
+        #
+        # **Provider 自己报的优先。** Mock 会在 metadata 里回带 `target_angle`,
+        # 那是它自己按角度分段的结果;按位置推是给不回带的 Provider 用的兜底。
+        # 顺序反过来的话,一家不保序的 Provider 明明说了角度,我们还是按位置
+        # 猜一个 —— 而猜错的表现是"明明有背面图却说缺背面"。
+        reported = item.metadata.get("target_angle")
+        intended = intended_angles[index] if index < len(intended_angles) else None
+        target_angle = reported or intended
+        if target_angle:
+            row.candidate_metadata["target_angle"] = str(target_angle)
+        else:
+            # 没有方案(或方案没配角度)时**不写这个键**,而不是写 None:
+            # 缺席的含义是"这一维不参与",而一个值为 null 的键读起来像
+            # "算过了,答案是没有角度"
+            row.candidate_metadata.pop("target_angle", None)
         row.error_message = None
         try:
             payload = _load_bytes(item)

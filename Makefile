@@ -1,4 +1,4 @@
-.PHONY: help init up down logs migrate revision seed test test-pure smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-columns audit-doc-refs fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
+.PHONY: help init up down logs migrate revision seed test test-pure test-nodb smoke-optimized smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-columns audit-doc-refs fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
 
 # `core.autocrlf=true` used to turn pack.sh into a mixed-CRLF script on Windows.
 # Route the documented make entrypoint to the native packer there; .gitattributes
@@ -14,7 +14,7 @@ endif
 help:
 # 字符类里带上数字:`p0-gate` 这类带编号的目标原来会被这条 grep 静默滤掉 ——
 # 目标在、`make help` 里看不见,而看不见的入口等于没有。
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 init: ## 首次准备:生成 .env
 	@test -f .env || cp .env.example .env
@@ -43,6 +43,54 @@ test: ## 容器内运行全部 pytest
 
 test-pure: ## 无需任何三方依赖的纯逻辑测试(本机 python3 即可)
 	cd backend && $(PYTHON) tools/run_pure_tests.py
+
+# ---------------------------------------------------------------- 非真库 pytest(a50)
+#
+# ## 这条命令补的是一个真实存在过的洞
+#
+# `tests/` 底下有两类用例,而本地入口只覆盖了一类:
+#
+#   tests/pure/*      零依赖         `test-pure` 跑(run_pure_tests.py)
+#   tests/*_db.py 等  要真 PostgreSQL `test` 跑(容器内),本地默认不跑
+#   **剩下的那一批**  要 pytest + FastAPI TestClient,但**一行库都不碰**
+#                     ← 在此之前没有任何本地目标跑它
+#
+# 第三类不是边角:`test_auth_session.py`(44 条)、
+# `test_a45_batch31_action_gate.py`(8 条)、`test_vision_http.py`(21 条)
+# 都在里面。它们不需要库,却因为归在 pytest 名下而被"真库验证要用户明确触发"
+# 那条约定连带挡在了本地之外。
+#
+# a50 实测的后果:两条门禁红着交付出去,而**本地跑什么都看不到** ——
+#
+#   test_a45_batch31_action_gate  三个写端点没进闸表(8437445 与 c63ff48 各带进来一批)
+#   test_auth_session            /health 的 auth_mode 拆成三档后,一条用例的
+#                                setup 描述不了它自称的场景
+#
+# 前者按设计变红了,红了两个提交没人看见。判据不是"谁疏忽了",是
+# **这条门禁在本地没有执行者**,而 CI 的 backend job 又要真库才起得来。
+#
+# ## 为什么不并进 `test-pure`
+#
+# `run_pure_tests.py` 的全部价值在于"只有 python3 的机器也能跑",它靠 AST
+# 拦住 `tests/pure/` 里出现 `import pytest`。把需要 pytest 的用例塞进去
+# 等于把那条保证作废。两个运行器分开是刻意的(见 backend/CLAUDE.md),
+# 这里是**第三个入口**,不是把第三类塞进前两个。
+# 用 `$(PYTHON) -m pytest` 而不是裸 `pytest`:PATH 上的 `pytest` 可以属于**另一个**
+# 环境(a50 的这台机器上它是 uv 装的独立工具 venv,把系统那个盖住了,表现是
+# `ModuleNotFoundError: No module named 'sqlalchemy'` —— 报在 conftest 的 import 上,
+# 看起来像"依赖没装",实际是"跑的不是装了依赖的那个解释器")。
+# `-m` 形式把用哪个 python 这件事钉死成和 test-pure / verify-* 同一个。
+# CI 里保持裸 `pytest` 不动:那是干净环境,而且 verify_delivery 在 ci.yml 里
+# 找的就是 `pytest` 这个命令字面量。
+test-nodb: ## 不碰真库的全部 pytest 用例(需已装 dev 依赖;不需要 PostgreSQL / Redis)
+	cd backend && $(PYTHON) -m pytest -m "not requires_db"
+
+# CI 的 backend job 里那条 `-O 冒烟`。它不要库也不要 Redis,却一直只存在于
+# ci.yml 里 —— 本地想跑得自己去 YAML 里把命令抄出来,而抄出来的命令会和
+# CI 分叉。断言在 `python -O` 下会被整条跳过,所以这一步验的是
+# **守卫在优化模式下真的还在执行**,而不是"导入不报错"。
+smoke-optimized: ## CI 的 -O 冒烟(守卫在优化模式下真的执行;零外部依赖)
+	cd backend && $(PYTHON) -O -c "import app.workbench.batch, app.workflows.dispatch_policy"
 
 lint: ## Ruff
 	cd backend && ruff check app tests
@@ -123,31 +171,48 @@ fe-build: ## 只构建前端产物到 frontend/dist
 
 # ---------------------------------------------------------------- 门禁(v4.1 Phase 0)
 #
-# `check` 覆盖**离线子集 + 前端全部四条**。
+# `check` 覆盖**离线子集 + 非真库 pytest + 前端全部四条**。
 #
-# **它不覆盖 CI 的全部。** 这里原来写的是「`check` 现在覆盖全部门禁」,
-# 而 check = check-offline + fe-check,两者都不跑 pytest。漏掉的是三个 job:
+# **它仍然不覆盖 CI 的全部。** 这里原来写的是「`check` 现在覆盖全部门禁」,
+# 那是假的;订正之后写的是「check = check-offline + fe-check,两者都不跑
+# pytest,漏掉三个 job」—— 那句话**当时准确,a50 起不再准确**,
+# 而且它错的方向恰好是这段注释自己在警告的那个方向:
 #
-#     backend  真库 pytest + Alembic 升降级 + -O 冒烟   要 PostgreSQL + Redis
-#     e2e      Playwright                              要 npx playwright install
-#     images   docker build ×2                         要 docker daemon
+# 「backend job 整块跑不到」把一件**本机做得到**的事写成了做不到,于是
+# 非真库的 pytest 用例在本地没有任何执行者。a50 实测的代价是两条门禁
+# 红着交付(理由写在 `test-nodb` 目标上面)。**一句把本地说得比实际更窄的
+# 话,和说得更宽一样危险** —— 前者让人不去跑那些其实跑得动的东西。
+#
+# a50 之后的实际分界:
+#
+#     backend  的非真库部分   ← `test-nodb` 跑得到
+#     backend  的真库部分     requires_db 用例 + Alembic 升降级   要 PostgreSQL + Redis
+#     e2e      Playwright                                        要 npx playwright install
+#     images   docker build ×2                                   要 docker daemon
+#
+# `-O 冒烟`原来也列在"跑不到"里,同样不成立:它是一句 `python -O -c import`,
+# 不要库也不要 Redis。a50 给了它 `smoke-optimized` 这个目标 —— 在此之前
+# 它只存在于 ci.yml 里,本地要跑就得去 YAML 里把命令抄一遍,
+# 而抄出来的命令会和 CI 分叉。别再把它算进"本机无等价物"。
 #
 # 方案 4.1 节 G-0 写得很直接:没有 CI 之前,清单写多长都没有意义;
 # 而退而求其次的最低要求是「把 fe-check 并入 make check」。那件事做到了,
-# 「一条命令跑全部」没有 —— 三个 job 各自要一件本机不一定有的外部依赖。
+# 「一条命令跑全部」仍然没有 —— 剩下三样各要一件本机不一定有的外部依赖。
 # 把这句话写准的理由和写它的理由一样:本地与 CI 的范围分叉时,
-# 分叉的方向永远是本地更松,而人是在本地决定"这版可以推了"的。
+# 人是在本地决定"这版可以推了"的。
 #
 # 想要旧的那个离线子集,用 `check-offline`,它会明说自己漏了什么。
 
-check: check-offline fe-check ## 离线子集 + 前端全部门禁(需联网:前端要装依赖)
+check: check-offline test-nodb fe-check ## 离线子集 + 非真库 pytest + 前端全部门禁(需联网 + 已装后端 dev 依赖)
 	@echo
-	@echo "通过 —— 后端纯测试 + 架构 + 交付自检 + 前端类型/lint/测试/构建。"
+	@echo "通过 —— 后端纯测试 + 非真库 pytest + 架构 + 交付自检 + 前端类型/lint/测试/构建。"
 	@echo
-	@echo "**这不等于 CI 会绿。** 没有跑到的是三个 job:"
-	@echo "  backend  真库 pytest + Alembic 升降级   要 PostgreSQL + Redis(make test)"
+	@echo "**这不等于 CI 会绿。** 仍然没有跑到的是:"
+	@echo "  backend  的**真库那一半**:requires_db 用例 + Alembic 升降级(make test)"
 	@echo "  e2e      Playwright                     make fe-e2e"
 	@echo "  images   docker build ×2                本地无等价物"
+	@echo
+	@echo "a50 起 backend job 不再是整块跑不到:它的非真库部分归 test-nodb。"
 
 # ---------------------------------------------------------------- 离线子集(A45 batch12-5 收尾)
 #

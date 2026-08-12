@@ -40,10 +40,34 @@ REQUIRED_NODE_SLOTS = (
 )
 
 
+#: 已经能从 yaml 读出来、但**还没有任何代码读它**的配置项 -> 接线时该由谁读。
+#:
+#: ## 为什么要有这张表(a51)
+#:
+#: 这个 Provider 的三个方法都还是 `NotImplementedError`,而配置解析已经完整
+#: 落地了 —— 于是 `timeout_seconds` / `poll_interval_seconds` / `max_retries`
+#: 三项**从 yaml 一路解析进 dataclass,然后停在那里**。
+#:
+#: 这和本仓 `audit-columns`(每一列都答得出"谁写它")防的是同一件事,
+#: 只是发生在配置上:一个解析得好好的、样例文件里也写着的配置项,
+#: 改它不会有任何反应,而且不报错。阶段 5 接线的人多半会重新发明一遍超时,
+#: 然后 `comfyui/` 下那份配置样例就永远对不上了。
+#:
+#: 空着比写错更危险 —— 一个没有理由的"暂时没用"下次会被当成"本来就没用"。
+#: `tests/pure/test_a51_comfyui_config_wiring.py` 逐条比对:接线之后要把
+#: 对应的行删掉,而漏掉一项会让那条测试红。
+UNWIRED_CONFIG_FIELDS: dict[str, str] = {
+    "timeout_seconds": "submit / get_status / fetch_results 的 HTTP 客户端超时",
+    "poll_interval_seconds": "get_status 轮询队列与历史的间隔",
+    "max_retries": "提交失败的重试次数(注意与 workflows/ 的退避判定对齐,别自己发明一套)",
+}
+
+
 @dataclass
 class ComfyUIConfig:
     base_url: str = ""
     workflow_file: str = ""
+    #: 下面三项目前**没有任何读者**,清单与理由见 `UNWIRED_CONFIG_FIELDS`。
     timeout_seconds: int = 300
     poll_interval_seconds: float = 2.0
     max_retries: int = 2

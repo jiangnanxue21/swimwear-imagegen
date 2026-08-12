@@ -375,6 +375,75 @@ def _is_version_collision(exc: IntegrityError) -> bool:
     return "uq_listing_image" not in text and "ix_listing_image" not in text
 
 
+def _inherit_generated_angles(session: Session, items: list[dict]) -> list[dict]:
+    """调用方没给角度时,从这张图的生成候选那里继承(2026-08-11 评审)。
+
+    ## 它接的是 §6.5 那句「候选入集时由调用方带上生成任务的方案角度」
+
+    `ListingImageItem.angle` 是 `MISSING_REQUIRED_ANGLE` 的**唯一判据**
+    (`image_set_rules.coverage` 拿它和方案 `angles_json` 的键比集合)。
+    生成链路现在会把每张候选图打算覆盖的角度记在
+    `GenerationCandidate.candidate_metadata["target_angle"]` 上,
+    而候选图落素材时 `candidate.media_asset_id` 就是这里的 `media_asset_id` ——
+    也就是说这条链是通的,只差把它接上。
+
+    不接的后果不是"少一个便利":运营配了「正面 + 背面」的方案、出图也真的
+    按角度出了,而入集时角度全是 NULL,于是批准被拦、提示"缺正面图",
+    他去补图 —— 补进来的图角度还是 NULL。**一个补多少次都解不掉的阻断。**
+
+    ## 三条边界
+
+    1. **只填空缺,不覆盖。** 调用方明确给了角度(界面上那个下拉、或者
+       人工纠正)就用他给的 —— 生成时的"打算"不该压过人后来的判断。
+    2. **一张素材对多个候选时不猜。** 同一张图理论上可以被多个候选行指着
+       (重跑、认领)。取到多个不同角度时**留空**并记一条日志:
+       猜一个的代价是给一张图贴上它没被要求过的角度,而留空的代价只是
+       运营手选一次。
+    3. **查不到候选就留空。** 人工上传的图本来就没有目标角度,那是正常状态。
+    """
+    from app.models.generation import GenerationCandidate
+
+    wanted = {
+        UUID(str(item["media_asset_id"]))
+        for item in items
+        if not _angle_value(item.get("angle")) and item.get("media_asset_id")
+    }
+    if not wanted:
+        return items
+
+    by_asset: dict[UUID, set[str]] = {}
+    rows = session.scalars(
+        select(GenerationCandidate).where(
+            GenerationCandidate.media_asset_id.in_(wanted)
+        )
+    )
+    for row in rows:
+        angle = _angle_value((row.candidate_metadata or {}).get("target_angle"))
+        if angle and row.media_asset_id is not None:
+            by_asset.setdefault(row.media_asset_id, set()).add(angle)
+
+    for item in items:
+        if _angle_value(item.get("angle")) or not item.get("media_asset_id"):
+            continue
+        found = by_asset.get(UUID(str(item["media_asset_id"])))
+        if not found:
+            continue
+        if len(found) > 1:
+            logger.warning(
+                "media asset traces back to candidates with different target angles; "
+                "leaving the image set item angle empty",
+                extra={
+                    "extra_fields": {
+                        "media_asset_id": str(item["media_asset_id"]),
+                        "angles": sorted(found),
+                    }
+                },
+            )
+            continue
+        item["angle"] = next(iter(found))
+    return items
+
+
 def create_set(
     session: Session,
     *,
@@ -407,6 +476,7 @@ def create_set(
     # 两个标签会被当成两项放行,翻译完变成同一项,而唯一约束在库里 ——
     # 报出来是 500,不是那句能读的 422。
     items = _resolve_variant_refs(session, spu=spu, items=items)
+    items = _inherit_generated_angles(session, items)
     _reject_duplicates(items)
     # 归属校验放在拿锁**之前**:它只读、可能查一批素材,没有理由把
     # 同 scope 的建集串行化窗口拉长

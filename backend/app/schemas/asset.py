@@ -40,6 +40,48 @@ class AssetUploadResult(BaseModel):
     deduplicated: bool
 
 
+#: §11 里属于**合规背书**的那些字段。**这一份清单是唯一的**,创建与更新
+#: 两个入口都读它(`api/model_templates.py`)。
+#:
+#: ## 为什么要把它单独列出来
+#:
+#: 这些字段不是描述,是**签字**:「这个人已确认成年」「这份授权允许 AI 换装」
+#: 「授权到期日是这一天」。`services/model_license.assert_usable` 拿其中四个
+#: 当硬阻断的依据 —— 也就是说,能写它们的人就能让一个未核实的模特通过授权闸。
+#: 而 PRD 的权限矩阵把 ModelTemplate 划在 Admin 一栏。
+#:
+#: 2026-08-11 评审之前,create 与 patch 都只挂 `require_operator`,于是普通运营
+#: 经 API 就能把 `UNVERIFIED` 改成 `LICENSED`、把 `allow_ai_dressing` 打开,
+#: 然后生成阶段拿这些值当合规判断依据。`update_template` 的 docstring 当时
+#: 记着这个缺口,并且说清了正确解法:**两个入口一起回答,只锁一边等于没锁**
+#: (锁了 patch 的话,想绕开的人重建一条就行)。这份清单就是那次的落点。
+#:
+#: ## 不在里面的三样,以及为什么
+#:
+#:     name / pose / background / tags / notes   描述,谁上传谁填
+#:     audience / body_type                      模特本人的属性,且创建时必填。
+#:                                               §10.5 靠它筛候选,但它不是背书 ——
+#:                                               填错的表现是候选列表里出现不匹配的
+#:                                               模特,而那一条在生成前有独立硬阻断
+#:     source                                    自由文本的来源备注,没有任何闸读它。
+#:                                               放进来会让"上传时顺手记一句来源"
+#:                                               变成 403,而那条动线本来是好的
+LICENSE_ENDORSEMENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "license_status",
+        "commercial_scope",
+        "allowed_platforms",
+        "allowed_regions",
+        "license_start_at",
+        "license_expires_at",
+        "allow_ai_dressing",
+        "allow_derivative_images",
+        "age_verified",
+        "prohibited_categories",
+    }
+)
+
+
 class ModelTemplateForm(BaseModel):
     """模特模板的表单字段。
 

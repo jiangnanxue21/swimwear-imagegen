@@ -100,6 +100,56 @@ class Settings(BaseSettings):
     #: 显式覆盖用,留空则由上面各项拼接
     DATABASE_URL: str = ""
 
+    # --- 连接池与请求并发(a51)---
+    #
+    # ## 这一组在此之前**一个都不存在**,而两侧的默认值是冲突的
+    #
+    # `create_engine()` 只传了 `pool_pre_ping`,于是走 SQLAlchemy 的默认:
+    # `pool_size=5` + `max_overflow=10` = **同时最多 15 条连接**。
+    #
+    # 而 API 层有 209 个同步 `def` 端点(只有 9 个 `async def`)。FastAPI 把
+    # 同步端点全部丢进 anyio 的线程池,默认容量 **40**。也就是说:
+    #
+    #     40 个并发请求  ->  抢 15 条连接  ->  25 个在池上排队
+    #                    ->  `pool_timeout` 默认 30 秒后抛
+    #                        `QueuePool limit of size 5 overflow 10 reached`
+    #
+    # 这不是"调优",是两个默认值互相不知道对方存在。而且此前**没有任何
+    # 环境变量能改它们** —— 出了事既不能扩池也不能限流,只能改代码重发版。
+    #
+    # 有意思的是这个现象被预见过:`frontend/src/api/client.ts` 的超时提示里
+    # 写着「或数据库连接被占满」。**症状写进了文案,旋钮一直没有。**
+    #
+    # ## 为什么默认值是 10 + 20 对 30,而不是把池扩到 40
+    #
+    # 池容量要 >= 线程池容量,否则多出来的线程只能在池上排队;但连接不是免费的
+    # —— PostgreSQL 的 `max_connections` 默认 100,而这套还有 Celery worker
+    # (prefork,每个子进程一套自己的池)要分。所以两边一起收到 30:
+    # API 进程最多 30 条,给 worker 和运维留出余量。
+    #
+    # 要撑更高并发,**两个数一起调**。只调其中一个不会报错,只会让另一个
+    # 变成瓶颈 —— `tests/pure/test_a51_pool_capacity.py` 钉的就是这个关系。
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    #: 池满之后等多久放弃。默认 30 秒是 SQLAlchemy 的默认值,这里显式写出来 ——
+    #: 一个"请求挂 30 秒然后 500"的行为不该是没人知道自己选过的。
+    DB_POOL_TIMEOUT_SECONDS: int = 30
+    #: 连接活多久就主动换掉。防的是中间件(pgbouncer / 云厂商 LB / 防火墙)
+    #: 单方面掐掉空闲连接而池子并不知情。`pool_pre_ping` 已经能兜住大部分,
+    #: 但它是"用之前探一次",探测本身也有代价;定期回收让长连接不至于老到
+    #: 需要每次探。1800 秒明显短于常见的 3600 秒空闲上限。
+    DB_POOL_RECYCLE_SECONDS: int = 1800
+    #: 同时能有多少个同步端点在跑。**它就是 DB 连接的真实需求量上限** ——
+    #: 每个同步端点拿一条连接(`get_session` 每请求一个 Session)。
+    SERVER_THREADPOOL_SIZE: int = 30
+
+    #: 信不信 `X-Real-IP` / `X-Forwarded-For`。**默认关**,理由与打开的前提
+    #: 写在 `core/client_ip.py` 顶部 —— 一句话是:只有"能连到这个进程的
+    #: 东西都是我们的反代"时才能打开。本仓 compose 把后端绑在 127.0.0.1,
+    #: 生产用本仓的 nginx,所以那两种部署下应当打开(compose 里已设)。
+    #: 直接把后端暴露到公网时必须保持关闭,否则登录限流可以被伪造头绕过。
+    TRUST_PROXY_HEADERS: bool = False
+
     # --- Redis / Celery ---
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = ""
@@ -352,18 +402,44 @@ class Settings(BaseSettings):
         和其余几十行一样,没有人会因为它去改配置。配置不全的后果是登录页
         永远登不进去、或者更糟 —— 用一把空密钥签 Cookie。所以在这里拦死。
 
+        ## local 也校验,只是「全空」额外放行(2026-08-11 评审第 9 条)
+
+        原来 local 直接 `return self`,于是下面这些配置都能正常启动:
+
+            只配 ADMIN_PASSWORD,另外两个空
+            AUTH_SESSION_SECRET 只有几个字符
+            ADMIN_PASSWORD 与 OPERATOR_PASSWORD 相同(两个角色形同一个)
+
+        而 `browser_auth_configured` 只要三项**任意一项**非空就返回 True ——
+        也就是说系统会认为"这个部署启用了 Session 登录",而登录配置其实不可用。
+
+        最难查的是只配密码没配 `AUTH_SESSION_SECRET` 那一种:`main.py` 会
+        `secrets.token_urlsafe(48)` **随机生成**一把签名密钥。单 worker 时
+        表现正常;多 worker 时每个 worker 各一把,于是
+
+            worker A 登录成功 -> 下一个请求落到 worker B -> Cookie 验签失败
+
+        看起来就是"随机掉登录",而没有任何一处会说为什么。
+
+        所以 local 的规则变成:**三项全空 -> 免登录模式;否则按非 local 的
+        标准全部校验。** 半配一律起不来 —— 与这个校验器"配不全就起不来"
+        的整体姿态一致,只是把"配不全"的判据从"非 local"扩到"动过这一组"。
+
         照 `_check_spend_ratios` 的写法。
         """
-        if self.APP_ENV.strip().lower() in LOCAL_ENVS:
-            # 本机开发:三个全空时沿用旧的 Legacy Token + ROLE_DEV 模式。
-            # 但只要有任意一个非空,就必须真的走 Session 登录(见 deps.py),
-            # 否则本地人工验收永远测不到 admin/operator 的差异、logout、403。
-            return self
-
-        problems: list[str] = []
         admin = (self.ADMIN_PASSWORD or "").strip()
         operator = (self.OPERATOR_PASSWORD or "").strip()
         secret = (self.AUTH_SESSION_SECRET or "").strip()
+
+        if self.APP_ENV.strip().lower() in LOCAL_ENVS and not (
+            admin or operator or secret
+        ):
+            # 本机开发且三项全空:沿用旧的 Legacy Token + ROLE_DEV 模式。
+            # 只要动过其中任意一项,就落到下面的完整校验 —— 半配的登录
+            # 比没有登录更难查,见 docstring。
+            return self
+
+        problems: list[str] = []
 
         if not admin:
             problems.append("ADMIN_PASSWORD 为空")
@@ -396,9 +472,20 @@ class Settings(BaseSettings):
             )
 
         if problems:
+            # 报错第一句要说清**为什么轮到我校验**:非 local 是"这个环境必须配",
+            # local 半配是"你动过这一组,那就得配全"。两句话指向的下一步不同 ——
+            # 后者还有"三项一起清空"这条出路,而那正是本机开发最常想要的那条
+            why = (
+                f"APP_ENV={self.APP_ENV} 不属于 {sorted(LOCAL_ENVS)},必须配置浏览器登录"
+                if self.APP_ENV.strip().lower() not in LOCAL_ENVS
+                else (
+                    "浏览器登录只配了一半 —— 三项要么全空(本机免登录模式),"
+                    "要么全部配齐。半配的表现是「系统认为登录已启用而它其实不可用」,"
+                    "多 worker 下还会因为随机签名密钥而反复掉登录"
+                )
+            )
             raise ValueError(
-                f"APP_ENV={self.APP_ENV} 不属于 {sorted(LOCAL_ENVS)},"
-                "必须配置浏览器登录:" + ";".join(problems)
+                why + ":" + ";".join(problems)
                 + "。生成密钥:python3 -c \"import secrets;"
                 "print(secrets.token_urlsafe(48))\""
             )
@@ -483,6 +570,36 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @model_validator(mode="after")
+    def _check_cors_is_not_a_credentialed_wildcard(self):
+        """`CORS_ORIGINS=*` 与带凭据的跨域不能并存(a51)。
+
+        `main.py` 那个中间件是 `allow_credentials=True` 写死的(它必须是 ——
+        浏览器登录靠 Cookie)。配上 `*` 之后 Starlette 会把请求的 Origin
+        原样回显,效果等于**任何站点都能带着用户的登录态调这套 API**。
+
+        ## 今天它不可利用,而这正是要拦的理由
+
+        Session Cookie 是 `SameSite=Lax`,跨站 XHR 根本不带它 —— 所以真配成
+        `*` 也打不进来。也就是说这个洞现在被**另一处配置**兜着,而那一处
+        与它没有任何显式关联:哪天为了别的需求把 Cookie 改成 `SameSite=None`
+        (跨站嵌入、第三方 iframe 是最常见的两个理由),这里会当场变成一个
+        真的洞,而改 Cookie 的人没有任何理由去看 CORS 配置。
+
+        拦在启动期,两处就不必互相记得对方。
+
+        ## 为什么不是"把 `*` 悄悄换成默认值"
+
+        那样起得来、也不报错,而运维以为自己开的跨域生效了 —— 排查会从
+        "为什么跨域没生效"开始,而不是从"这个配置被拒绝了"开始。
+        """
+        if "*" in self.cors_origin_list:
+            raise ValueError(
+                "CORS_ORIGINS 不能是 `*`:跨域是带凭据的(allow_credentials=True),"
+                "通配符会让任何站点都能用用户的登录态调这套 API。请逐条列出来源。"
+            )
+        return self
 
     @property
     def storage_dir(self) -> Path:

@@ -509,6 +509,25 @@ def session_operator_client(client, browser_auth):
 # ---------------------------------------------------------------- 会话末尾复查
 
 
+@pytest.fixture(autouse=True)
+def _clean_login_throttle() -> Iterator[None]:
+    """每条用例开始前清空登录失败计数(a51)。
+
+    `api/auth.py` 那张表是**模块级**的,而 TestClient 的对端恒为
+    `testclient` —— 也就是说整个进程里所有用例的失败登录都堆在同一个键上。
+    不清的话,`test_auth_session.py` 里那几条故意登错的用例会把计数堆过阈值,
+    然后**后面所有登录用例一起变成 429**。
+
+    表现会非常难查:失败的不是制造失败的那几条,而是排在它们后面的;
+    单独跑每一条都是绿的,全量跑才红,顺序一变红的还是另一批。
+    """
+    from app.api.auth import reset_login_throttle
+
+    reset_login_throttle()
+    yield
+    reset_login_throttle()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _no_key_file_left_in_the_working_tree() -> Iterator[None]:
     """跑完之后确认仓库树里没有多出主密钥文件。

@@ -28,6 +28,7 @@ from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.core.errors import NotFoundError
 from app.models.product import Product
+from app.providers import registry
 from app.schemas.generation_plan import (
     EffectivePlanOut,
     GenerationPlanCreate,
@@ -105,7 +106,16 @@ def effective_plan(
         scope="COLOR" if row.color_variant_id is not None else "SPU_DEFAULT",
         candidates_per_round=gp.total_candidates(view.angles),
         required_angles=sorted(gp.required_angles(view.angles)),
-        problems=[p.message for p in gp.plan_problems(view)],
+        # `usable_providers` 递的是环境事实(装了什么、配了什么 Key)。
+        # 不递的话,一份指着 comfyui 或未配 Key 的 FASHN 的方案在这里
+        # **一个问题都不报**,而创建任务时它会 CONFIG_INVALID —— 而
+        # 这个接口存在的意义正是"提前把问题说出来"
+        problems=[
+            p.message
+            for p in gp.plan_problems(
+                view, usable_providers=registry.selectable_names()
+            )
+        ],
     )
 
 

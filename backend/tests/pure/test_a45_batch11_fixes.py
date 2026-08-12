@@ -51,6 +51,19 @@ def _code_only(source: str) -> str:
     return re.sub(r"(?m)^\s*//.*$", "", without_block)
 
 
+def _py_code_only(source: str) -> str:
+    """同上,但针对 Python:只去掉**整行**注释。
+
+    这个仓库删一段代码时习惯把原文以注释形式留在原处(记着它为什么被删),
+    于是"这一行不许再出现"的断言会被那段注释骗成红的 —— 本文件里
+    `test_the_model_reference_bypass_is_closed` 第一版正是这么假红的。
+
+    刻意只处理整行注释:行尾 `#` 可能落在字符串字面量里,而把
+    `foo("a # b")` 截成 `foo("a ` 会造出比它要防的问题更难看的假红。
+    """
+    return re.sub(r"(?m)^\s*#.*$", "", source)
+
+
 # ================================================================ C-06 审计 JSON 安全
 
 
@@ -374,17 +387,40 @@ def test_smoke_exercises_the_license_gate_instead_of_the_bypass():
     assert "不覆盖" in smoke, "覆盖边界的声明没了 —— 脚本不许再自称完整闭环"
 
 
-def test_the_model_reference_bypass_now_leaves_a_trace():
-    """C-10 仍未关闭:溯源列已落,但自由素材尚未解析到等价授权主体。
+def test_the_model_reference_bypass_is_closed():
+    """C-10 已关闭(2026-08-11 评审):自由上传的模特参考图不再放行。
 
-    在闭环落地之前,每次走缝必须留下结构化日志 —— "这批图有没有过授权闸"
-    要答得上来。
+    ## 这条断言换过方向,别照旧版本改回去
+
+    旧版本叫 `..._now_leaves_a_trace`,断言的是那条分支里有一句
+    `logger.warning` 然后 `return` —— 也就是**钉着绕行缝本身存在**,只要求
+    它出声。当时的理由是"溯源列已落,但自由素材尚未解析到等价授权主体"。
+
+    而 PRD §6.4 明写自由上传模特图不得绕过 ModelTemplate 校验,所以那条
+    `return` 是一条与明文要求相反的执行路径,不是一个"还没做的功能"。
+    评审给的方向同时写了 fail-closed 兜底,而今天**确实**解析不到授权主体
+    (`MediaAsset.consent_id` 全仓没有写入点),所以落点就是拒绝。
+
+    两道门都要钉:创建任务那一道,和 worker 里那条退回自由素材的兜底 ——
+    后者更隐蔽,它发生在四道检查都过了之后。
     """
     src = _be("services/generation_service.py")
     branch = re.search(
-        r'if "MODEL_REFERENCE" in roles:(.*?)return', src, re.S
+        r'if "MODEL_REFERENCE" in roles:(.*?)\n        raise ValidationError', src, re.S
     )
     assert branch, "找不到 MODEL_REFERENCE 分支"
+    assert "return" not in branch.group(1), (
+        "MODEL_REFERENCE 分支又放行了 —— 那条路跳过 §10.5 受众与 §11 "
+        "授权/年龄/AI 换装/禁用品类的全部检查(PRD §6.4 明令禁止)"
+    )
     assert "logger.warning" in branch.group(1), (
-        "绕行缝的告警没了 —— 已知缺口可以存在,不可以无声"
+        "拒绝也要出声 —— 人工测试期间「有多少次试图走这条路」要答得上来"
+    )
+
+    # 看**代码**不看注释:删掉的那一行以注释形式留在原处(记着它为什么被删),
+    # 而按原文搜索会把那段注释算成"它又回来了" —— 第一版就是这么假红的
+    worker = _py_code_only(_be("tasks/generation_tasks.py"))
+    assert 'model_url = image_reference(by_type["MODEL_REFERENCE"]' not in worker, (
+        "worker 又退回自由上传的模特图了 —— 这是同一条缝的第二道门:"
+        "创建时模板是好的,执行时模板被停用,于是静默换一张没有授权记录的图把钱花掉"
     )

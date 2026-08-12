@@ -362,6 +362,120 @@ def spent_for_generation_plan(session: Session, plan_id) -> Decimal | None:
     return Decimal(int(micros)) / Decimal(MICROS_PER_UNIT)
 
 
+def _is_simulator(provider: str) -> bool:
+    """这一家出的是本地假图吗。判据是 Provider 实现类自己声明的 `is_simulator`。
+
+    **不查名单** —— 与 `registry.describe_all()` 里那一行同一条理由:
+    名单和实现类会分开演化,而问它自己不会。认不出这个名字时返回 False
+    (当成"会花钱"),那是安全方向:一个拼错的 Provider 名不该顺带
+    把预算闸变成永远放行。
+    """
+    from app.providers.registry import get_provider
+
+    try:
+        return bool(get_provider(provider).is_simulator)
+    except Exception:  # noqa: BLE001 - 未知 Provider 一律按会花钱处理
+        return False
+
+
+def estimated_cost(provider: str, *, operation: str, units: int) -> Decimal | None:
+    """一次**还没发生**的调用大概花多少。返回 None = 估不出来。
+
+    2026-08-11 评审:`budget_verdict` 一直收 `estimated`,而唯一的调用方
+    从来没传过它 —— 于是那道闸判的是"已经超了没有",不是"这一次会不会超"。
+    这个函数是补上的那个数。
+
+    **None 不是 0。** 与 `core/pricing.resolve_unit_price` 和 `record_cost`
+    同一条口径:NULL 是"不知道",0 是"免费"。调用方(`budget_verdict`)
+    收到 None 会 fail-closed 拒绝 —— 设了预算上限却没配单价时,
+    "这一次不会超支"这件事**证明不了**。
+
+    ## 「没配价」分两种,只有一种该 fail-closed
+
+    没配价时直接一律返回 None 是不对的,而且代价很具体:默认部署
+    (`DEFAULT_PROVIDER=mock`,`PROVIDER_PRICE_BOOK` 空)下,任何一份设了
+    预算上限的方案都会**永久无法创建任务** —— 而 Mock 出的是本地假图,
+    它一分钱都不花。那不是 fail-closed,那是把演示环境锁死。
+
+    所以判据不是"配了价没有",是**这一家会不会真的花钱**:
+
+        配了价              用配的价。Mock 也一样 —— 配了就按配的记账,
+                            `record_cost` 走的是同一份表
+        没配价 + 模拟器      0 元。台账对这类调用记的确实是 0,两边一致
+        没配价 + 真 Provider None。它会收钱而我们不知道收多少,
+                            于是"不会超"证明不了 —— 这一种才该拒
+
+    单位是货币单位的 Decimal,与 `spent_for_generation_plan` 和
+    `GenerationPlan.budget_cap` 同型;`micros` 是内部表示,不外泄到判定层。
+    """
+    from app.core.pricing import resolve_unit_price
+
+    count = max(int(units), 0)
+    price = resolve_unit_price(price_book(), provider, operation)
+    if price is None:
+        return Decimal(0) if _is_simulator(provider) else None
+    return Decimal(price.cost_for(count)) / Decimal(MICROS_PER_UNIT)
+
+
+def reserved_for_generation_plan(session: Session, plan_id) -> Decimal | None:
+    """这份方案上**已经建好、但一分钱还没记账**的任务合计要花多少。
+
+    ## 为什么必须有它(2026-08-11 评审的 TOCTOU 那一半)
+
+    花费台账是 worker 在**真的调用 Provider 之后**才写的。于是即使把
+    "本次预估"算进去,并发两次创建仍然会各自读到同一个 `spent`:
+
+        任务 A 查:已花 9.9,本次 5,上限 10 -> 该拒
+        任务 B 查:已花 9.9,本次 5         -> 也该拒
+        两个都在 worker 里花掉钱
+
+    真正的预占要一张表(或一列),而本轮不加列。退一步的做法是:
+    **把"已经建好但还没记账"的任务当成预占**。配合 `create_task` 里那把
+    按方案 id 的 advisory lock(锁持有到提交),第二个请求读到的就是
+    第一个已经落库的任务行 —— 竞态那一段被锁掉了。
+
+    ## 三条边界
+
+    1. **只算"一条流水都没有"的任务。** 已经开始记账的任务,它花掉的部分
+       已经在 `spent` 里;把它整份预估再加一遍会重复计算,表现是预算比
+       实际早耗尽 —— 一个方向相反但同样错的偏差。
+    2. **终态任务不算。** FAILED / CANCELLED 不会再花钱。判据走
+       `state_machine.TERMINAL_STATES`,不在这里抄一份状态名。
+    3. **有任何一条估不出价就返回 None。** 与 `estimated_cost` 同一条:
+       估不出来时说"不知道",不说 0。
+    """
+    from app.workflows import state_machine as sm
+
+    if plan_id is None:
+        return None
+    terminal = sorted(s.value for s in sm.TERMINAL_STATES)
+    try:
+        rows = session.execute(
+            select(GenerationTask.provider, GenerationTask.candidate_count)
+            .where(
+                GenerationTask.generation_plan_id == plan_id,
+                GenerationTask.status.notin_(terminal),
+                ~GenerationTask.id.in_(
+                    select(ProviderUsageRecord.task_id).where(
+                        ProviderUsageRecord.task_id.isnot(None)
+                    )
+                ),
+            )
+        ).all()
+    except SQLAlchemyError:  # pragma: no cover - 读不到就 fail-closed
+        return None
+
+    total = Decimal(0)
+    for provider, candidate_count in rows:
+        one = estimated_cost(
+            provider or "", operation="submit", units=candidate_count or 0
+        )
+        if one is None:
+            return None
+        total += one
+    return total
+
+
 def record_cost(
     record: ProviderUsageRecord,
     *,

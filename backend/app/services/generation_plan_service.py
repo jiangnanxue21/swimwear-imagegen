@@ -35,10 +35,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_attribute
 
+from app.core import audience as audience_rules
 from app.core.enums import AuditAction, GenerationPlanStatus
 from app.core.errors import DuplicateError, ErrorCode, NotFoundError, ValidationError
 from app.models.generation_plan import GenerationPlan
 from app.models.spu import ColorVariant, Spu
+from app.providers import registry
 from app.services import audit, model_template_service
 from app.services.model_license import assert_usable
 from app.workflows import generation_plan as gp
@@ -121,11 +123,79 @@ def _assert_scope(session: Session, *, spu_id: UUID, color_variant_id: UUID | No
 
 
 def _assert_plan_usable(view: gp.PlanView, *, raw_angle_count: int) -> None:
-    problems = gp.plan_problems(view, raw_angle_count=raw_angle_count)
+    """方案本身能不能用。判定在 `gp.plan_problems`,这里只把环境事实递进去。
+
+    `usable_providers` 从注册表现取(2026-08-11 评审):它是"这个部署装了
+    什么、配了什么 Key",不是一个可穷举的判定,所以不能写进纯模块 ——
+    理由与 `plan_problems` 那个参数上的说明是同一条。
+    """
+    problems = gp.plan_problems(
+        view,
+        raw_angle_count=raw_angle_count,
+        usable_providers=registry.selectable_names(),
+    )
     if problems:
         raise ValidationError(
             ";".join(p.message for p in problems), code=ErrorCode.INPUT_INVALID
         )
+
+
+def _assert_model_template_usable(
+    session: Session, *, spu_id: UUID, model_template_id: UUID | None
+) -> None:
+    """这份方案选的模特,拿去给这个 SPU 出图会不会被拒(2026-08-11 评审)。
+
+    ## 改之前只查了四分之一
+
+    `save_plan` 只做 `assert_usable(get_template(...))` —— 也就是只查授权
+    状态与到期。三样没查:
+
+        template.enabled                  已停用的模特照样能存进方案
+        受众匹配(§10.5 / §12.4)          女装 SPU 能配 MEN 模特
+        禁用品类(assert_usable 的第四条)  没传 category_id,那一条恒不触发
+
+    而 `activate()` **一次都不验**。于是这条动线是真实可走的:
+
+        女装 SPU -> 选到 MEN 模特 -> 保存成功 -> 启用成功 -> 旧的正确方案被归档
+        -> 真正创建任务时才被 `generation_service` 拒 -> 这个颜色出不了图,
+           而那份能出图的方案已经不在 ACTIVE 了
+
+    也就是说**坏方案能成为正式 ACTIVE 方案,并且顶掉一份好的**。所以
+    `activate()` 必须重验,而且要**先验证再归档**(见 `activate`)。
+
+    ## 受众与品类都从 SPU 取,不从某一行 SKU 取
+
+    方案是 SPU + 颜色作用域的,没有唯一的"那一行商品"。`Spu.audience`
+    非空、`Spu.base_category` 也非空,而规则包键的派生只有
+    `core/audience.category_code_for` 一处(§23.5)—— 这里递的就是那一处,
+    与 `channels/generic.category_id_for` 是同一个函数,不是另写一份。
+
+    派生不出规则包时(受众与品类码里编入的前缀冲突)**只跳过"禁用品类"
+    那一条**,其余三条照判 —— 与 `generation_service` 里那段同一个取舍:
+    不因为派生不出就整个放行。
+    """
+    if model_template_id is None:
+        return
+    template = model_template_service.get_template(session, model_template_id)
+    if not template.enabled:
+        raise ValidationError(
+            "选中的模特模板已停用,不能写进生成方案", code=ErrorCode.INPUT_INVALID
+        )
+
+    spu = session.get(Spu, spu_id)
+    spu_audience = getattr(spu, "audience", None)
+    block = audience_rules.generation_block_reason(spu_audience, template.audience)
+    if block is not None:
+        raise ValidationError(block, code=ErrorCode.INPUT_INVALID)
+
+    category_id = None
+    try:
+        category_id = audience_rules.category_code_for(
+            spu_audience, getattr(spu, "base_category", "") or ""
+        )
+    except Exception:  # noqa: BLE001 - 见 docstring 最后一段
+        category_id = None
+    assert_usable(template, category_id=category_id)
 
 
 def _draft_for_scope(
@@ -184,14 +254,18 @@ def save_plan(
     """保存同作用域的唯一 DRAFT。**不直接生效**。"""
     _assert_scope(session, spu_id=spu_id, color_variant_id=color_variant_id)
 
-    if model_template_id is not None:
-        # §6.4:「ModelTemplate 可用(现有授权闸 + 受众筛选 §10.5 + 生成前阻断)」。
-        # 走既有的 assert_usable,不在这里重写一遍判断 —— 方案不是绕过
-        # 授权的第二条路,那正是 §6.4 保留 v3.0 那条约束的原因。
-        #
-        # **在这里就挡,而不是等创建任务那一刻**:方案是运营会反复看的对象,
-        # 一份挂着已吊销模特的方案摆在界面上,每个人都会以为它能用
-        assert_usable(model_template_service.get_template(session, model_template_id))
+    # §6.4:「ModelTemplate 可用(现有授权闸 + 受众筛选 §10.5 + 生成前阻断)」。
+    # 走既有的判定,不在这里重写一遍 —— 方案不是绕过授权的第二条路,
+    # 那正是 §6.4 保留 v3.0 那条约束的原因。
+    #
+    # **在这里就挡,而不是等创建任务那一刻**:方案是运营会反复看的对象,
+    # 一份挂着已吊销模特的方案摆在界面上,每个人都会以为它能用。
+    #
+    # 2026-08-11:这里原来只调 `assert_usable`,漏了 enabled / 受众 / 禁用品类
+    # 三样。三样都在 `_assert_model_template_usable` 里,`activate()` 也调它。
+    _assert_model_template_usable(
+        session, spu_id=spu_id, model_template_id=model_template_id
+    )
 
     normalized = gp.normalize_angles(angles)
     raw_count = len(angles) if isinstance(angles, (list, tuple, dict)) else 0
@@ -283,13 +357,35 @@ def save_plan(
 
 
 def activate(session: Session, plan_id: UUID, *, actor: str = "system") -> GenerationPlan:
-    """启用一份方案:归档同层的旧方案,再把这一份置 ACTIVE。
+    """启用一份方案:**先重验**,再归档同层的旧方案,最后把这一份置 ACTIVE。
 
     两步必须在同一个事务里,理由见模块文档最后一段。
+
+    ## 为什么 activate 必须自己再验一遍(2026-08-11 评审)
+
+    保存与启用之间可以隔任意长时间,而这中间会变的东西不少:模特被停用、
+    授权到期或吊销、FASHN 的 Key 被撤掉、SPU 的受众被改过。改之前这里
+    **一次都不验** —— 于是一份保存时合法的草稿可以在这些前提全部失效之后
+    被启用,而运营看到的是"启用成功"。
+
+    ## 顺序:验证在归档之前
+
+    `activate()` 会把同作用域的旧 ACTIVE 归档。验证放在归档之后(哪怕
+    同一个事务会回滚)也是错的写法 —— 一次异常路径上的顺序依赖,
+    读代码的人无法从这里看出它安全。放在最前面,失败时什么都没动过。
+
+    这一条正是评审那句"activate 应先验证,再 archive 旧方案"。
     """
     row = get_plan(session, plan_id)
     if row.status == GenerationPlanStatus.ARCHIVED.value:
         raise DuplicateError("已归档的方案不能重新启用,请复制一份新的")
+
+    # 重验:模特(enabled / 受众 / 授权 / 禁用品类)与方案本身(角度、张数、
+    # Provider 可用性)。两者都可能在保存之后失效
+    _assert_model_template_usable(
+        session, spu_id=row.spu_id, model_template_id=row.model_template_id
+    )
+    _assert_plan_usable(to_view(row), raw_angle_count=len(row.angles_json or []))
 
     scope_filter = (
         GenerationPlan.color_variant_id.is_(None)

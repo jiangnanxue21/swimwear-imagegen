@@ -77,6 +77,43 @@ export default function ColdStartBanner() {
   if (identity.loading) return null
 
   /*
+   * 只配了 Header 口令的部署:**这是横幅还必须说话的唯一一种情况**
+   * (2026-08-11 评审第 8 条)。
+   *
+   * 这一档没人接手:`needsLogin` 要求 `sessionAuth`,所以 `AppLayout`
+   * **不会**把人送去登录页;而浏览器又不发 Header 口令,于是他停在一个
+   * 正常渲染的界面上,每一个请求 401,没有任何地方说为什么。
+   *
+   * 与下面被删掉的三支不同:那三支指向一个已经不存在的口令输入框,
+   * 这一支指向的是**服务器配置**,而且它是唯一的真出路。
+   */
+  if (identity.tokenOnly) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="这个部署的浏览器登录没有开启 —— 界面上的操作都会失败"
+        description={
+          <Typography.Text style={{ fontSize: fontScale.body }}>
+            后端只配置了 Header 口令(<code>ADMIN_TOKEN</code> /{' '}
+            <code>OPERATOR_TOKENS</code>),浏览器不使用它,界面上也没有填口令的地方。
+            {identity.isAdmin ? (
+              <>
+                {' '}要用账号密码登录,配 <code>ADMIN_PASSWORD</code> /{' '}
+                <code>OPERATOR_PASSWORD</code> / <code>AUTH_SESSION_SECRET</code>{' '}
+                后重启后端;本机开发想免登录,清空那两把 Header 口令。
+              </>
+            ) : (
+              <> 这不是你操作错了,请联系管理员改服务器配置。</>
+            )}
+          </Typography.Text>
+        }
+      />
+    )
+  }
+
+  /*
    * 会话模式:这条横幅整个让位给登录页(a46-phase2)。
    *
    * 下面每一支说的都是**口令**的事 —— 去设置页填、去设置页改、别拿管理口令

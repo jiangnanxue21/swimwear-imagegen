@@ -312,6 +312,27 @@ def budget_verdict(
     `spent` 来自现有花费台账(`provider_usage_records`),`estimated` 是本次
     预估。两个都用 Decimal:金额用 float 比较会在边界上给出
     "已花 9.999999999 < 上限 10" 这种放行,而那正是上限存在的意义所在。
+
+    ## `estimated=None` 是「估不出来」,不是「零」(2026-08-11 评审)
+
+    这里原来写的是 `plan = _decimal(estimated) or Decimal(0)` —— 于是 None、
+    0、和一个解析不出来的值全部塌成 0。而调用方
+    (`generation_service.plan_budget_verdict`)当时**连 `estimated` 都没传**,
+    所以这道闸实际执行的是:
+
+        已花 9.9,上限 10,本次预计 5   ->   9.9 < 10   ->   放行
+
+    也就是说它是「**已经超了以后不再生成**」,而不是「保证不超过预算」。
+    §6.4 要的是后者。
+
+    修法有两半,这一半是语义:`None` 单独一档,含义与 `spent=None` 完全
+    一致 —— **证明不了这一次不会超,就不能去花钱**,所以它也走 UNKNOWN。
+    与 `core/pricing` 反复写的那条同源:NULL 是"不知道",0 是"免费"。
+    默认值仍然是 `0`(不是 None),这样没有预估概念的调用方行为不变;
+    "我算不出来"必须由调用方**显式**说出来。
+
+    另一半在服务层:预估要含**在途但还没计费**的任务,否则并发两次创建
+    会各自看到同一个 `spent`(见 `spend.reserved_for_generation_plan`)。
     """
     cap = _decimal(budget_cap)
     if cap is None:
@@ -319,7 +340,13 @@ def budget_verdict(
     used = _decimal(spent)
     if used is None:
         return BudgetVerdict.UNKNOWN
-    plan = _decimal(estimated) or Decimal(0)
+    if estimated is None:
+        return BudgetVerdict.UNKNOWN
+    plan = _decimal(estimated)
+    if plan is None:
+        # 传了个既不是 None 也解析不出来的东西(空串、乱字符串)。当成 0
+        # 会把一个坏调用方悄悄变成"本次免费",所以同样按不知道处理
+        return BudgetVerdict.UNKNOWN
     return BudgetVerdict.EXCEEDED if used + plan > cap else BudgetVerdict.ALLOWED
 
 
@@ -343,15 +370,37 @@ PLAN_NO_ANGLES = "PLAN_NO_ANGLES"
 PLAN_TOO_MANY_CANDIDATES = "PLAN_TOO_MANY_CANDIDATES"
 PLAN_UNKNOWN_ANGLE_DROPPED = "PLAN_UNKNOWN_ANGLE_DROPPED"
 PLAN_NO_PROVIDER = "PLAN_NO_PROVIDER"
+#: 方案指定的 Provider 这个部署用不了(没实现,或者没配 Key)。
+#:
+#: 2026-08-11 评审:前端的 Provider 下拉硬编码着 `mock / fashn / comfyui`,
+#: 而后端 `registry.IMPLEMENTED_PROVIDERS` 只有 `{mock, fashn}` 并且会明确拒绝
+#: comfyui。于是运营能一路"选 comfyui -> 存草稿 -> 启用 -> 看起来一切正常",
+#: 直到创建生成任务那一刻拿到 `CONFIG_INVALID` —— 而那时错误指向的是任务,
+#: 不是那份三天前存下来的方案。
+PLAN_PROVIDER_UNAVAILABLE = "PLAN_PROVIDER_UNAVAILABLE"
 
 
-def plan_problems(plan: PlanView, *, raw_angle_count: int | None = None) -> list[PlanProblem]:
+def plan_problems(
+    plan: PlanView,
+    *,
+    raw_angle_count: int | None = None,
+    usable_providers: Iterable[str] | None = None,
+) -> list[PlanProblem]:
     """这份方案能不能拿去创建任务。
 
     `raw_angle_count` 是**归一化之前**有几条角度。传了它才能报出
     `PLAN_UNKNOWN_ANGLE_DROPPED` —— `normalize_angles` 静默丢掉未知角度
     (见那个函数的说明),不在这里补一句的话,"方案里写了 BACK 却拼成 BAKC"
     的表现是"背面图永远不缺",而没有任何地方会说为什么。
+
+    `usable_providers` 是**这个部署当前能用的 Provider 名字**,由调用方从
+    `providers/registry` 取。传进来而不是在这里去查,是因为本模块零依赖 ——
+    "谁能用"是一个环境事实(装了什么、配了什么 Key),不是一个可穷举的判定。
+    与 `channels` 那条"需要数据就让调用方传进来"同一条规矩。
+
+    **`None` 表示"这次不查这一维"**,不是"一个都不能用":空集合是后者。
+    两者分开是必须的 —— 合并之后,任何一个还没接上注册表的调用点都会把
+    每一份方案报成 Provider 不可用。
     """
     problems: list[PlanProblem] = []
     if not plan.angles:
@@ -371,13 +420,31 @@ def plan_problems(plan: PlanView, *, raw_angle_count: int | None = None) -> list
                 f"有 {raw_angle_count - len(plan.angles)} 条角度不是已知取值,已忽略",
             )
         )
-    if not _text(plan.provider):
+    wanted = _text(plan.provider)
+    if not wanted:
         problems.append(PlanProblem(PLAN_NO_PROVIDER, "方案没有指定 Provider"))
+    elif usable_providers is not None:
+        allowed = {_text(name).lower() for name in usable_providers}
+        if wanted.lower() not in allowed:
+            problems.append(
+                PlanProblem(
+                    PLAN_PROVIDER_UNAVAILABLE,
+                    f"这个部署现在用不了 Provider「{wanted}」"
+                    f"(未实现或未配置);可选:{', '.join(sorted(allowed)) or '无'}",
+                )
+            )
     return problems
 
 
-def plan_is_usable(plan: PlanView, *, raw_angle_count: int | None = None) -> bool:
-    return not plan_problems(plan, raw_angle_count=raw_angle_count)
+def plan_is_usable(
+    plan: PlanView,
+    *,
+    raw_angle_count: int | None = None,
+    usable_providers: Iterable[str] | None = None,
+) -> bool:
+    return not plan_problems(
+        plan, raw_angle_count=raw_angle_count, usable_providers=usable_providers
+    )
 
 
 # ---------------------------------------------------------------- 方案决定出图参数
@@ -445,6 +512,125 @@ def governed_candidate_count(plan: PlanView, *, fallback: int) -> int:
     """
     total = total_candidates(plan.angles)
     return total if total > 0 else fallback
+
+
+# ------------------------------------------------- 角度 work-unit(2026-08-11)
+
+
+@dataclass(frozen=True)
+class AngleUnit:
+    """**一次 Provider 调用**要覆盖的角度与张数。
+
+    ## 它补的是「按角度验收,却不按角度生成」
+
+    改之前:方案写 `FRONT×2 / BACK×1`,系统的全部动作是把
+    `candidate_count` 设成 3、往提示词里拼一句「拍摄角度:FRONT×2、BACK×1」,
+    然后**一次**请求让 Provider 出 3 张。请求里没有角度这个概念,
+    候选图上也没有记角度。于是模型完全可以给回 FRONT / FRONT / FRONT ——
+    而 §6.5 的验收严格要求 FRONT 和 BACK 各有覆盖:
+
+        方案按角度验收,生成并没有按角度执行。
+
+    这不是"提示词写得不够好",是执行模型里少了一层:**角度是工作单元的维度**。
+    拆开之后每个角度有自己的一次调用、自己的提示词、自己的目标张数,
+    候选图也能按提交顺序对回它该覆盖的角度。
+
+    `prompt` 是这一次调用真正要发的提示词(基础提示词 + 本次角度),
+    在这里算好而不是留给各家 Provider 拼 —— 拼在 Provider 里意味着
+    mock / fashn / comfyui 各有一份措辞,而提示词进幂等键。
+    """
+
+    #: None = 这份任务没有方案,按 `candidate_count` 一次出完(存量路径)
+    angle: str | None
+    count: int
+    prompt: str | None
+
+
+def unit_prompt(base_prompt: Any, *, angle: Any, count: Any = 1) -> str | None:
+    """某一个角度那一次调用的提示词。
+
+    角度为空时**原样返回**(含 None):没有方案的任务走的就是这条路,
+    它的提示词不该因为经过了这个函数而变形 —— `build_idempotency_key`
+    对 None 与 "" 归一,但 `GenerationTask.prompt` 列上两者不是一回事。
+
+    有角度时在基础提示词后面追加一句"本次只出"。基础提示词里已经有方案
+    的角度总表(`compose_prompt`),两句并存是刻意的:总表说的是"这份方案
+    要哪些角度",这一句说的是"**这一次**只要哪个" —— 后者才是这次调用的
+    约束,而前者给模型上下文。删掉总表会改掉 `task.prompt`,
+    也就改掉已有任务的幂等键。
+    """
+    head = _text(base_prompt)
+    key = _text(angle).upper()
+    if not key:
+        return base_prompt if base_prompt is None else head
+    try:
+        number = max(1, int(count))
+    except (TypeError, ValueError):
+        number = 1
+    directive = f"本次只出这个拍摄角度:{key}×{number}"
+    return f"{head};{directive}" if head else directive
+
+
+def angle_units(
+    angles: Iterable[AngleRequirement],
+    *,
+    base_prompt: Any = None,
+    fallback_count: int = 1,
+) -> tuple[AngleUnit, ...]:
+    """把方案的角度拆成一串工作单元。
+
+    没有角度时返回**一个** `angle=None` 的单元,张数用 `fallback_count` ——
+    也就是原来的行为。返回空元组是不行的:调用方会读成"这一轮不用出图",
+    而正确含义是"这一轮没有角度维度"。
+
+    顺序跟着 `normalize_angles` 排好的 `ImageAngle` 定义序,不跟输入序:
+    候选图靠**提交顺序**对回角度(`angle_assignments`),顺序不稳定
+    就等于对错。
+    """
+    wanted = tuple(angles)
+    if not wanted:
+        return (
+            AngleUnit(
+                angle=None,
+                count=max(1, int(fallback_count)),
+                prompt=base_prompt if base_prompt is None else _text(base_prompt),
+            ),
+        )
+    return tuple(
+        AngleUnit(
+            angle=a.angle,
+            count=max(1, int(a.count)),
+            prompt=unit_prompt(base_prompt, angle=a.angle, count=a.count),
+        )
+        for a in wanted
+    )
+
+
+def angle_assignments(
+    angles: Iterable[AngleRequirement], total: int
+) -> tuple[str | None, ...]:
+    """第 i 张候选图**本来该覆盖**哪个角度。
+
+    按 `angle_units()` 的顺序与张数摊平:`FRONT×2 / BACK×1` 得到
+    `("FRONT", "FRONT", "BACK")`。落在方案张数之外的下标给 `None` ——
+    那些图确实没有目标角度(Provider 多给了,或者续跑时张数变过),
+    硬塞一个角度进去会让"这张图覆盖了背面"变成一句没人说过的话。
+
+    **位置对应是唯一可行的映射,而它的前提是提交顺序被保住**:
+    每个单元一次(或几次)提交,取结果时按同样顺序摊平。FASHN 的
+    `fetch_results` 按 `split_external_id` 的顺序遍历、Mock 按 index 渲染,
+    两者都满足。将来接一家不保序的 Provider 时,要么让它自己在候选图的
+    `metadata` 里回带角度,要么这个函数就不能用 —— 这一条写在这里,
+    免得那一天有人以为"位置"是个安全假设。
+    """
+    flat: list[str | None] = []
+    for unit in angle_units(angles):
+        if unit.angle is None:
+            break
+        flat.extend([unit.angle] * unit.count)
+    if len(flat) >= total:
+        return tuple(flat[:total])
+    return tuple(flat) + (None,) * (total - len(flat))
 
 
 def compose_prompt(

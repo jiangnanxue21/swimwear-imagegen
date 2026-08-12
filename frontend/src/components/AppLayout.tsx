@@ -21,8 +21,8 @@
  * 真实读写一律由后端 `require_admin` 校验 —— 隐藏菜单只是让运营不必看见
  * 一组他点了只会失败的入口,它挡不住任何人。
  */
-import { useState } from 'react'
-import { App as AntApp, Button, Dropdown, Layout, Menu, Space, Tag, Tooltip } from 'antd'
+import { Suspense, useState } from 'react'
+import { App as AntApp, Button, Dropdown, Layout, Menu, Skeleton, Space, Tag, Tooltip } from 'antd'
 // `WarningOutlined` 在这里死过一次(a48 删):a46-phase6 撤掉 `sharedActor`
 // 那条告警横幅时留下了它的 import。离线门禁只解析语法,看不见死 import,
 // 于是它跟着 a47 一起交付了出去 —— 而 `noUnusedLocals` 会让 typecheck 变红。
@@ -100,22 +100,43 @@ export default function AppLayout({ groups }: Props) {
    */
   const visible = groups.filter((g) => !g.adminOnly || isAdmin)
 
+  /**
+   * 退出登录失败之后**留在原地**,不假装已经退出了(2026-08-11 评审)。
+   *
+   * ## 上一版为什么是错的
+   *
+   * 上一版无论成败都清缓存 + 跳 `/login`,理由写着"把人留在一个显示着登录态
+   * 的界面上更糟"。那个理由建立在一个不成立的前提上:**Session 是 HttpOnly
+   * Cookie,只有后端能删它。** `/auth/logout` 超时或失败时 Cookie 原样还在,
+   * 于是:
+   *
+   *     跳到 /login   ->  登录页的 effect 问一次 whoami
+   *                   ->  旧 Cookie 仍然有效,答"你是 operator"
+   *                   ->  把人送回 /today
+   *
+   * 运营看到的是「我明明退出了,怎么又自动登录了」——比"退出按钮报错"糟得多:
+   * 前者让他以为退不掉,后者告诉他这一次没退成。在共用电脑上离席的场景里,
+   * 这个差别是"他以为自己退了"和"他知道自己没退"。
+   *
+   * ## 所以只有确认成功才跳
+   *
+   * 失败时留在当前页并弹一条可读的错误。缓存也不清 —— 清了会让界面显示成
+   * 未登录,而 Cookie 还在,那正是同一个谎的另一半。
+   */
   const logout = async () => {
     setLoggingOut(true)
     try {
       await authApi.logout()
     } catch (err) {
-      // 失败也要往下走。`/auth/logout` 是幂等的匿名接口,它失败通常意味着
-      // 后端已经联系不上 —— 而这时把人**留在**一个显示着登录态的界面上更糟:
-      // 他会以为自己还登着,继续点,每一下都失败
-      message.warning(describeError(err, 'write').text)
+      message.error(`退出登录没有成功,你仍处于登录状态:${describeError(err, 'write').text}`)
+      return
     } finally {
       setLoggingOut(false)
-      // 先清缓存再跳。反过来的话登录页会先读到一份"还登着"的 auth-probe,
-      // 于是它的 effect 立刻把人送回来 —— 表现是点了退出没反应
-      queryClient.removeQueries({ queryKey: ['auth-probe'] })
-      navigate('/login', { replace: true })
     }
+    // 先清缓存再跳。反过来的话登录页会先读到一份"还登着"的 auth-probe,
+    // 于是它的 effect 立刻把人送回来 —— 表现是点了退出没反应
+    queryClient.removeQueries({ queryKey: ['auth-probe'] })
+    navigate('/login', { replace: true })
   }
 
   /*
@@ -204,9 +225,14 @@ export default function AppLayout({ groups }: Props) {
                   </Link>
                 ),
               },
-              // 口令模式下没有"退出"这个动作可做:凭据在 localStorage 里,
-              // 清掉它是设置页的事。给一个点了什么都不会发生的菜单项,
-              // 比不给更糟
+              // 非会话模式下没有"退出"这个动作可做。给一个点了什么都不会
+              // 发生的菜单项,比不给更糟。
+              //
+              // 这里原来写的是"凭据在 localStorage 里,清掉它是设置页的事" ——
+              // **那句话已经不成立**:localStorage 口令链在 PRD §26/§27 里整个
+              // 退役了。今天走到这一支的有两种部署,两种都确实没有可退的东西:
+              // 免登录模式(没登录过)与只配 Header 口令(浏览器根本没进来,
+              // 那一档的解释由 `ColdStartBanner` 与 `/login` 负责说)
               ...(sessionAuth
                 ? [
                     { key: 'logout-divider', type: 'divider' as const },
@@ -291,7 +317,15 @@ export default function AppLayout({ groups }: Props) {
                 不必刷新整站。resetKey 给 pathname —— 否则崩过之后点菜单换页,
                 看到的还是那张兜底页 */}
             <ErrorBoundary resetKey={location.pathname} scope="这一页">
-              <Outlet />
+              {/* 页面 chunk 的加载态(a51 路由级代码分割)。
+                  **在 ErrorBoundary 里面**:chunk 取不下来(发版后旧页面拿着
+                  失效的文件名、或者网络断了)会抛,而那一抛必须落进上面那张
+                  兜底页,不能穿到最外层把整个界面顶掉。
+                  fallback 用 Skeleton 而不是转圈:它占的位置和真实内容接近,
+                  切页时不会先塌一下再撑开 */}
+              <Suspense fallback={<Skeleton active paragraph={{ rows: 8 }} />}>
+                <Outlet />
+              </Suspense>
             </ErrorBoundary>
           </div>
         </Content>

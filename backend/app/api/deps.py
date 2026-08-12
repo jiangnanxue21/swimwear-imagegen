@@ -189,6 +189,39 @@ def _session_identity(request: Request) -> Identity | None:
     return Identity(name=name, role=role)
 
 
+def dev_fallback_active() -> bool:
+    """本机免口令模式生效中吗。**这是那条回落的唯一判据。**
+
+    `resolve_identity` 的第三级(`ROLE_DEV`)与 `/health` 报的 `auth_mode`
+    必须由同一个函数回答。分开写两遍的后果很具体(2026-08-11 评审的第 8 条):
+
+        local + 配了 ADMIN_TOKEN + 没配浏览器密码
+
+    这个组合下 `ROLE_DEV` 回落**不生效**(下面第三级要求三种凭据都没配),
+    而浏览器又不会发 Header 口令 —— 前端那条链路在 PRD §26/§27 里整个退役了。
+    于是:
+
+        /health        -> auth_mode=token
+        /auth/whoami   -> 401
+        /settings      -> 没有口令输入框(随 localStorage 口令链一起删了)
+        /login         -> "到系统设置页填一次口令即可"
+
+    **浏览器没有任何办法登录**,而界面给出的每一句指引都指向一个不存在的
+    输入框。三处各自都"对",合起来是一条死路。
+
+    把判据提成函数之后,`/health` 能如实报出第三种模式(`dev`),
+    界面因此能说真话:这个部署只认 Header 口令,浏览器进不来,
+    要么配浏览器密码、要么清掉 Header 口令。
+    """
+    admin_token, operators = _configured()
+    return (
+        not admin_token
+        and not operators
+        and _is_local_env()
+        and not settings.browser_auth_configured
+    )
+
+
 def resolve_identity(request: Request) -> Identity | None:
     """认出这次请求是谁。认不出来返回 None,**不抛异常** ——
 
@@ -226,12 +259,7 @@ def resolve_identity(request: Request) -> Identity | None:
         if _matches(supplied_operator, token):
             return Identity(name=name, role=ROLE_OPERATOR)
 
-    if (
-        not admin_token
-        and not operators
-        and _is_local_env()
-        and not settings.browser_auth_configured
-    ):
+    if dev_fallback_active():
         # 本机开发:没配任何口令时放行,审计名退回自述的 X-Actor。
         # 这条路径只在 local/dev 存在,所以“自述”的风险仅限于开发机自己的日志。
         #
@@ -277,6 +305,32 @@ def rejection(needs_admin: bool) -> AppError:
         # 浏览器登录已配:未登录就是未登录,让前端按 401 跳登录页。
         return AppError(
             "未登录或登录已失效,请重新登录",
+            code=ErrorCode.AUTH_FAILED,
+            http_status=401,
+        )
+    if admin_token or operators:
+        # 只配了 Header 口令,而浏览器不会发 Header 口令(那条链在 PRD §26/§27
+        # 里整个退役了)。这一支是 2026-08-11 评审第 8 条的落点。
+        #
+        # 走到这里的请求**有两种来源**,而它们要的话完全不同:
+        #
+        #     CLI / 脚本 / pytest   口令没填或填错。它们能改请求头,401 是对的
+        #     浏览器                口令**填不了**。界面上没有输入框,也不该有 ——
+        #                           Session 才是浏览器的凭据
+        #
+        # 分不开的时候按"两边都看得懂"写:说清 Header 口令这条路和浏览器无关,
+        # 并把两条真正可行的出路都点名。原来这里落到下面那句"缺少或错误的
+        # 操作口令",而运营会照着它去找一个不存在的输入框 —— 而且
+        # `/login` 与 `/settings` 当时也各有一句指向同一个不存在的输入框。
+        #
+        # 码仍然是 401(对脚本是准确的),但话必须把浏览器那一半说出来。
+        what = "X-Admin-Token" if needs_admin else "X-Operator-Token"
+        return AppError(
+            f"当前环境({settings.APP_ENV})只配置了 Header 口令,而浏览器不使用"
+            "它 —— 界面上没有、也不应该有填口令的地方。"
+            f"脚本或 curl 请带上 {what} 请求头;要用浏览器,请让管理员配置 "
+            "ADMIN_PASSWORD / OPERATOR_PASSWORD / AUTH_SESSION_SECRET 后重启后端,"
+            "或者在本机开发时清空 ADMIN_TOKEN 与 OPERATOR_TOKENS 以启用免登录模式",
             code=ErrorCode.AUTH_FAILED,
             http_status=401,
         )
@@ -329,6 +383,27 @@ def require_admin(request: Request) -> str:
         )
     request.state.identity = identity
     return identity.name
+
+
+def has_admin_rights(request: Request) -> bool:
+    """这次请求有没有管理员权限。**判据与 `require_admin` 逐字相同。**
+
+    给"同一个端点里只有一部分字段要管理员"的场景用 —— 今天只有一处:
+    模特模板的 §11 合规背书字段组(`schemas/asset.LICENSE_ENDORSEMENT_FIELDS`)。
+    那个端点整体是 operator 的(上传素材是日常动作),但其中十个字段是签字。
+
+    **不许在调用点自己写 `identity.role == ROLE_ADMIN`。** 那会漏掉 `ROLE_DEV`:
+    本机免口令模式下角色是 `dev`,`is_admin` 为 False —— 于是本地开发与
+    人工验收会被自己的守卫挡在门外,而那道门在真部署里根本不是这么判的。
+    `require_admin` 的判据是"**不是** operator",这里必须同向;两处分叉的表现是
+    "同一个身份在 A 端点是管理员、在 B 端点不是"。
+
+    返回 False 也包含"根本认不出身份"。调用点走到这里之前一定过了
+    `require_operator`(路由器级依赖),所以那种情况不会发生;真发生了,
+    按"没有管理员权限"处理是安全方向。
+    """
+    identity = getattr(request.state, "identity", None) or resolve_identity(request)
+    return identity is not None and identity.role != ROLE_OPERATOR
 
 
 def current_actor(request: Request) -> str:

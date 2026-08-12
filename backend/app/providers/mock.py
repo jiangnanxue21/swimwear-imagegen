@@ -28,6 +28,7 @@ from app.providers.base import (
     GenerationRequest,
     ImageGenerationProvider,
     ProviderCapabilities,
+    work_units,
 )
 from app.providers.errors import (
     ProviderContentSafetyError,
@@ -139,8 +140,24 @@ class MockImageGenerationProvider(ImageGenerationProvider):
 
         request = job.request
         base_seed = request.seed if request.seed is not None else random.randint(1, 10**9)
+        # 按角度单元摊平(2026-08-11 评审)。没有方案时 `work_units()` 给一个
+        # `angle=None` 的单元、张数等于 `candidate_count` —— 与改之前逐张相同。
+        #
+        # Mock 只有一次 submit,所以这里不是"多次调用",而是把同一次调用的
+        # 产出按角度分段。**分段顺序必须和 `angle_units()` 一致**:编排层
+        # (`generation_tasks._persist_candidates`)按位置把候选图对回角度,
+        # 顺序错了就是每一张的角度都记错。
+        plan: list[str | None] = []
+        for unit in work_units(request):
+            plan.extend([unit.angle] * max(1, int(unit.count)))
         return [
-            self._render(request, base_seed + index, index, external_task_id)
+            self._render(
+                request,
+                base_seed + index,
+                index,
+                external_task_id,
+                angle=plan[index] if index < len(plan) else None,
+            )
             for index in range(request.candidate_count)
         ]
 
@@ -155,12 +172,23 @@ class MockImageGenerationProvider(ImageGenerationProvider):
     # ---------- 出图 ----------
 
     def _render(
-        self, request: GenerationRequest, seed: int, index: int, external_id: str
+        self,
+        request: GenerationRequest,
+        seed: int,
+        index: int,
+        external_id: str,
+        *,
+        angle: str | None = None,
     ) -> GenerationCandidate:
         """画一张确定性的假"试穿图"。
 
-        不变量:图像字节 = f(seed, index, mode, width, height)。
+        不变量:图像字节 = f(seed, index, mode, width, height, angle)。
         任何随时间变化的东西都不许进入像素,否则幂等与重放没法验证。
+        `angle` 可以进像素 —— 它由方案决定,同一份方案每次都一样。
+
+        **角度画在图上是刻意的。** Mock 出的是本地假图,人眼分不出它们的
+        差别;把目标角度印上去之后,人工测试时"这一批图有没有按角度出"
+        变成一件看一眼就知道的事,而不是要去翻 `candidate_metadata`。
         """
         rnd = random.Random(seed)
         width = request.width or CANVAS[0]
@@ -206,6 +234,8 @@ class MockImageGenerationProvider(ImageGenerationProvider):
         # "同 seed 同图" 这个不变量,而幂等与重放测试正依赖它 —— 它只进 metadata。
         draw.text((16, 14), f"MOCK  seed={seed}  #{index + 1}", fill=(60, 60, 62))
         draw.text((16, 32), f"{request.mode.value}  {width}x{height}", fill=(130, 130, 132))
+        if angle:
+            draw.text((16, 50), f"angle={angle}", fill=(60, 60, 62))
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=88)
@@ -221,6 +251,10 @@ class MockImageGenerationProvider(ImageGenerationProvider):
                 "width": width,
                 "height": height,
                 "provider": self.provider_name,
+                # 这一张**打算**覆盖的角度。编排层落库时优先用它,拿不到才
+                # 退回按位置推(见 `_persist_candidates`)—— 一家保序的
+                # Provider 两种口径一致,一家不保序的只有这一条能用
+                "target_angle": angle,
                 "inline_bytes": payload,  # 编排层优先用它,省掉一次下载
             },
         )

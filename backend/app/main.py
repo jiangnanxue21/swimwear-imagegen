@@ -181,9 +181,46 @@ async def lifespan(app: FastAPI):
             extra={"extra_fields": {"reason": shortfall}},
         )
 
+    # 同步端点的并发上限。**必须在这里设,不能在模块顶层** ——
+    # `current_default_thread_limiter()` 取的是当前事件循环上的那一个,
+    # 模块导入时还没有事件循环。
+    #
+    # 为什么要显式设:这个数字**就是数据库连接的需求量上限**(每个同步端点
+    # 一条连接),而它此前是 anyio 的默认 40、池子是 SQLAlchemy 的默认 15,
+    # 两个默认值互不相识。现在两边都从配置来,而且下面这条日志把它们
+    # 一起打出来 —— 出事时"到底能同时跑几个"不该靠翻两个库的默认值。
+    from anyio import to_thread
+
+    to_thread.current_default_thread_limiter().total_tokens = settings.SERVER_THREADPOOL_SIZE
+
+    pool_capacity = settings.DB_POOL_SIZE + settings.DB_MAX_OVERFLOW
+    if pool_capacity < settings.SERVER_THREADPOOL_SIZE:
+        # 不拦启动:少于线程池是一个**可以是故意的**选择(用池当背压)。
+        # 但它必须说出来 —— 这个组合下超出的请求会在池上等
+        # `DB_POOL_TIMEOUT_SECONDS` 然后 500,而那个 500 的现场没有任何东西
+        # 提到"池比线程池小"。
+        logger.warning(
+            "db pool capacity is smaller than the sync-endpoint concurrency limit; "
+            "excess requests will queue on the pool and fail after pool_timeout",
+            extra={
+                "extra_fields": {
+                    "pool_capacity": pool_capacity,
+                    "threadpool": settings.SERVER_THREADPOOL_SIZE,
+                    "pool_timeout_seconds": settings.DB_POOL_TIMEOUT_SECONDS,
+                }
+            },
+        )
+
     logger.info(
         "application started",
-        extra={"extra_fields": {"env": settings.APP_ENV, "storage": str(settings.storage_dir)}},
+        extra={
+            "extra_fields": {
+                "env": settings.APP_ENV,
+                "storage": str(settings.storage_dir),
+                "threadpool": settings.SERVER_THREADPOOL_SIZE,
+                "db_pool_capacity": pool_capacity,
+            }
+        },
     )
     yield
     logger.info("application stopped")

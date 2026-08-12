@@ -232,15 +232,43 @@ def test_the_budget_is_still_checked_when_the_plan_is_bypassed():
 
     绕过方案不等于绕过预算 —— 否则 `override_plan` 会成为超预算出图的后门,
     而它恰恰只有管理员能用,查起来最没人怀疑。
+
+    ## 判据从"位置"换成"条件"(2026-08-11 评审)
+
+    旧版断言的是 `_assert_budget(...)` 出现在 `plan_applied = ` **之前**,
+    理由是"挪到后面会让 override 顺带绕过预算"。那是一个**代理判据**:
+    它真正要守的不变量是「这道闸按 `plan_row` 判,不按 `plan_applied` 判」。
+
+    这一轮预算闸必须算上"本次预估",而预估要 `provider` 与 `candidate_count`
+    ——两者都在 `plan_applied` 那一段之后才定下来。于是位置必须往后挪,
+    而不变量原样成立(条件仍是 `plan_row is not None`)。
+
+    所以这里直接钉那个条件:找到包着 `_assert_budget` 的那个 `if`,
+    要求它的判据提到 `plan_row` 且**不提** `plan_applied`。
+    代理判据换成真判据之后,这条断言不再随一次正当重排而假红。
     """
     fn = _func(SERVICE, "create_task")
-    source = ast.get_source_segment(SERVICE.read_text(encoding="utf-8"), fn) or ""
-    budget_line = source.index("_assert_budget(session, plan_row)")
-    applied_line = source.index("plan_applied = ")
 
-    assert budget_line < applied_line, (
-        "预算检查被挪到了 `plan_applied` 后面 —— 那一挪会让 override 顺带"
-        "绕过预算"
+    guards = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(call.func, ast.Name) and call.func.id == "_assert_budget"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    ]
+    assert guards, "`create_task` 里找不到被 if 包着的 `_assert_budget` 调用"
+    # 取最内层那个:`ast.walk` 会把外层 if 一起收进来
+    condition = ast.unparse(min(guards, key=lambda n: n.end_lineno - n.lineno).test)
+
+    assert "plan_row" in condition, (
+        f"预算闸的判据不是 `plan_row`(现在是 `{condition}`)"
+    )
+    assert "plan_applied" not in condition, (
+        f"预算闸改成按 `plan_applied` 判了(`{condition}`) —— override_plan "
+        "会因此顺带绕过预算,而它只有管理员能用,查起来最没人怀疑"
     )
 
 

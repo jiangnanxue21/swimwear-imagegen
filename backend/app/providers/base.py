@@ -31,6 +31,23 @@ class ExternalTaskStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+@dataclass(frozen=True)
+class AngleWorkUnit:
+    """**一次** Provider 调用要覆盖的角度、张数与提示词。
+
+    与 `workflows.generation_plan.AngleUnit` 一一对应,由编排层翻译过来 ——
+    `providers/` 不 import `workflows`,同 `channels` 只接 `CanonicalProduct`
+    是一条规矩:Provider 收到的应该是"发什么请求",不是"业务方案长什么样"。
+
+    `angle` 为 None 表示这份任务没有生成方案,按 `candidate_count` 一次出完
+    (存量商品与单色 SPU 走的就是这条路)。
+    """
+
+    angle: str | None
+    count: int
+    prompt: str | None
+
+
 @dataclass
 class GenerationRequest:
     mode: GenerationMode
@@ -44,6 +61,30 @@ class GenerationRequest:
     height: int | None = None
     seed: int | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    #: 按角度拆开的工作单元(2026-08-11 评审)。空 = 没有方案,按
+    #: `candidate_count` 一次出完 —— 也就是这个字段出现之前的行为。
+    #:
+    #: **它不是 `prompt` 的替代品。** `prompt` 仍然是这份任务的基础提示词
+    #: (进幂等键的那个),每个单元的 `prompt` 是它加上"本次只出 X"。
+    #: 各家 Provider 按 `work_units()` 遍历,拿 `unit.prompt` 发请求。
+    angle_units: tuple[AngleWorkUnit, ...] = ()
+
+
+def work_units(request: GenerationRequest) -> tuple[AngleWorkUnit, ...]:
+    """这次请求要拆成几次调用。**所有 Provider 都走这一个入口。**
+
+    没有 `angle_units` 时给出一个 `angle=None` 的单元,张数与提示词就是
+    请求本身的 —— 于是"没有方案"这条路径上,新旧行为逐字相同,
+    而各家 Provider 里不需要写 `if request.angle_units:` 那个分支
+    (写了就会有一家写漏,而写漏的表现是那一家静默退回不按角度出图)。
+    """
+    if request.angle_units:
+        return tuple(request.angle_units)
+    return (
+        AngleWorkUnit(
+            angle=None, count=request.candidate_count, prompt=request.prompt
+        ),
+    )
 
 
 @dataclass
@@ -251,6 +292,20 @@ class ImageGenerationProvider(ABC):
                 f"{self.provider_name} 单次只能生成 1 张候选图",
                 provider=self.provider_name,
             )
+        if request.angle_units:
+            # 角度单元的张数之和必须等于 `candidate_count`。
+            #
+            # 两个数字对不上的后果不是少出几张:候选图靠**位置**对回角度
+            # (`generation_plan.angle_assignments`),对不上就是**每一张的角度
+            # 都记错了** —— 而记错的角度会一路走到 §6.5 的验收,
+            # 表现是"明明有背面图却说缺背面"。所以在发请求之前就停住。
+            planned = sum(max(0, int(u.count)) for u in request.angle_units)
+            if planned != request.candidate_count:
+                raise ProviderInputError(
+                    f"角度单元合计 {planned} 张,而候选数是 {request.candidate_count} 张,"
+                    "两者必须相等",
+                    provider=self.provider_name,
+                )
         if request.seed is not None and not caps.supports_seed:
             raise ProviderInputError(
                 f"{self.provider_name} 不支持指定 seed", provider=self.provider_name

@@ -36,6 +36,7 @@ from app.core.errors import (
 )
 from app.core.logging import get_logger
 from app.core.sorting import normalize_sort
+from app.db import locks
 from app.media import service as media_service
 from app.models.generation import (
     GenerationAttempt,
@@ -261,17 +262,42 @@ def _assert_assets_are_usable(
                     category_id = None
             model_template_service.assert_usable(template, category_id=category_id)
             return
+        # ---- C-10 关闭:自由上传的模特参考图**不再绕过**合规闸 ----
+        #
+        # 2026-08-11 评审。这条分支原来直接 `return`,于是走它的任务跳过
+        # §10.5 受众、§11 授权 / 年龄 / AI 换装 / 禁用品类的**全部**检查,
+        # 只在日志里留一行 warning。而 PRD §6.4 明写自由上传模特图不得绕过
+        # ModelTemplate 校验 —— 也就是说这不是"还没做的功能",是一条与
+        # 明文要求相反的执行路径。
+        #
+        # ## 为什么是拒绝,而不是"解析到授权主体再同等校验"
+        #
+        # 评审给的方向是 `MODEL_REFERENCE -> provenance -> 对应授权主体 ->
+        # 同等校验`,**并注明解析不了就 fail-closed**。今天解析不了,而且
+        # 缺的不是一句代码:
+        #
+        #     ProductAsset          没有任何指向 ModelTemplate 或授权记录的列
+        #     MediaAsset.consent_id 列在(§12.1),但**全仓没有一个写入点** ——
+        #                           `ingest(consent_id=...)` 的实参从来没人传
+        #     MediaConsent          有 subject_type / scope / 有效期,没有受众,
+        #                           所以连 §10.5 那一条都判不了
+        #
+        # 在这三样齐之前写一条"解析成功就放行"的分支,等于把一个永远走不到的
+        # 放行路径摆在闸门上 —— 本仓库硬规则第 4 条反复点名的正是这种形状
+        # (一个看起来完整、实际不是从真实来源推出来的判定)。
+        #
+        # ## 运营的出路是现成的,不是被堵死
+        #
+        # 把那张模特图登记成 ModelTemplate(带受众与 §11 授权字段)再选它。
+        # 那条路径今天就能走,而且是**唯一**能执行四道检查的路径。
+        # 措辞按 §5.1:只说"要走模特库",不吐 C-10 之类的编号。
+        #
+        # 重开这条路的条件写在上面那三行里。谁补齐了它们,就在这里加分支。
         if "MODEL_REFERENCE" in roles:
-            # 已知缺口(docs/STATUS.md,A45 独立审查 C-10):这条路径仍跳过
-            # §10.5 受众、§11 授权/年龄/AI 换装/禁用品类的全部检查。
-            # 溯源列已由迁移 0038 落地,所以"缺列"不再是前置;尚未完成的是
-            # 用溯源把这份自由素材解析到可执行同等检查的授权主体,或拒绝它。
-            # 在闭环落地前,每一次走到这条缝都必须**在日志里留下痕迹**:
-            # 人工测试期间"这批图有没有走过授权闸"要答得上来,
-            # 不能等出事之后靠回忆。界面侧已明示该选项跳过 §11。
             logger.warning(
-                "generation task uses MODEL_REFERENCE without a model template; "
-                "audience/license/age checks are bypassed (known gap, see STATUS.md)",
+                "refused a virtual try-on task that relies on a free-uploaded "
+                "MODEL_REFERENCE asset; there is no license subject to check "
+                "against (PRD 6.4 forbids bypassing ModelTemplate validation)",
                 extra={
                     "extra_fields": {
                         "product_id": str(getattr(product, "id", "")),
@@ -279,9 +305,14 @@ def _assert_assets_are_usable(
                     }
                 },
             )
-            return
+            raise ValidationError(
+                "商品自带的「模特参考图」不能直接用于虚拟试穿:那张图上没有受众、"
+                "年龄确认与授权范围的记录,合规检查无从执行。请先把这张模特图"
+                "登记到模特库(填写受众与授权信息),再在这里选中它。",
+                code=ErrorCode.INPUT_INVALID,
+            )
         raise ValidationError(
-            "虚拟试穿需要模特:请选择一个启用中的模特模板,或上传一张「模特参考图」",
+            "虚拟试穿需要模特:请在模特库里选择一个启用中的模特模板",
             code=ErrorCode.INPUT_INVALID,
         )
 
@@ -417,10 +448,6 @@ def create_task(
         plan_row = generation_plan_service.resolve_for(
             session, spu_id=product.spu_id, color_variant_id=scope_variant_id
         )
-    if plan_row is not None:
-        # 预算照查,`override_plan` 也不例外 —— 见函数文档最后一段
-        _assert_budget(session, plan_row)
-
     # ---- a47:方案决定最终参数(§5.2)----
     #
     # `plan_applied` 是"这一次真的按方案跑了吗"的唯一答案。它同时决定
@@ -466,6 +493,23 @@ def create_task(
             f"{chosen.provider_name} 单次最多生成 {caps.max_candidates_per_call} 张候选图"
             + (f",而方案要求一轮出 {candidate_count} 张" if plan_applied else ""),
             code=ErrorCode.INPUT_INVALID,
+        )
+
+    if plan_row is not None:
+        # ---- 预算闸(§6.4)。**必须排在这里,不能排在方案刚解析出来那一刻** ----
+        #
+        # 2026-08-11 评审:它原来在上面 `plan_row is not None` 那一支里,
+        # 也就是在 provider 与 candidate_count 定下来**之前**。于是它只能
+        # 拿"已花多少"和上限比,算不了"这一次要花多少" —— 而那正是
+        # 缺陷所在(见 `gp.budget_verdict` 的说明)。要算本次预估,
+        # 就必须先知道最终是哪一家、出几张。
+        #
+        # 预算照查,`override_plan` 也不例外 —— 见函数文档最后一段。
+        _assert_budget(
+            session,
+            plan_row,
+            provider=chosen.provider_name,
+            candidate_count=candidate_count,
         )
 
     key = build_idempotency_key(
@@ -623,35 +667,90 @@ def _variant_sample_fingerprint(
     )
 
 
-def _assert_budget(session: Session, plan_row) -> None:
+def _assert_budget(
+    session: Session,
+    plan_row,
+    *,
+    provider: str = "",
+    candidate_count: int = 0,
+) -> None:
     """§6.4 的预算闸:「预算通过(方案 budget_cap + 现有花费台账)」。
 
     判定在 `workflows.generation_plan.budget_verdict`(fail-closed:读不到
-    花费就不放行)。这里只负责去台账取那个数。
+    花费、或者估不出这一次要花多少,都不放行)。这里只负责取那几个数。
 
     **拦在创建这一步,不拦在调用 Provider 那一步**:后者意味着任务已经
     建好、Celery 已经派发,而预算超了的表现会是一个失败的任务 ——
     运营看到的是"生成失败",不是"预算不够"。
+
+    报错措辞按 verdict 分开(2026-08-11 评审):`UNKNOWN` 有三种成因
+    (台账读不到 / 没配单价 / 在途预占估不出),而它们的下一步动作完全不同。
+    合并成一句"上限已用尽或花费台账读不到"会让"去配 PROVIDER_PRICE_BOOK"
+    这条真正的出路完全看不见。
     """
-    verdict = plan_budget_verdict(session, plan_row)
-    if gp.budget_blocks(verdict):
+    verdict = plan_budget_verdict(
+        session, plan_row, provider=provider, candidate_count=candidate_count
+    )
+    if not gp.budget_blocks(verdict):
+        return
+    if verdict is gp.BudgetVerdict.EXCEEDED:
         raise ValidationError(
-            f"生成方案的预算闸未通过({verdict.value}):"
-            "上限已用尽或花费台账读不到,请先确认预算",
+            "生成方案的预算上限不够这一次生成了(已花 + 本次预估 > 上限)。"
+            "请提高方案的预算上限,或减少这一轮的张数",
             code=ErrorCode.INPUT_INVALID,
         )
+    raise ValidationError(
+        "生成方案设了预算上限,但算不出这一次要花多少,因此不放行:"
+        "要么花费台账读不到,要么价目表里没有这家 Provider 的 submit 单价"
+        "(PROVIDER_PRICE_BOOK)。请配上单价,或清空方案的预算上限",
+        code=ErrorCode.INPUT_INVALID,
+    )
 
 
-def plan_budget_verdict(session: Session, plan_row):
+def plan_budget_verdict(
+    session: Session, plan_row, *, provider: str = "", candidate_count: int = 0
+):
     """这份方案的预算还够不够。
 
     没设上限时**不去查台账** —— 没有上限就没有要证明的事,而多一次
     聚合查询会让每次创建任务都扫一遍 usage 表。
+
+    ## 上限存在时做三件事,顺序是安全约束的一部分(2026-08-11 评审)
+
+    1. **先上锁。** 按方案 id 的事务级 advisory lock,持有到调用方提交。
+       没有它的话第 3 步读到的"在途任务"里不包含另一个正在建的任务 ——
+       两个请求各自算出"还够",然后各花一次钱。
+    2. **本次预估。** `spend.estimated_cost(provider, submit, 张数)`。
+       估不出来给 None,而 `budget_verdict` 对 None 是 fail-closed。
+       这一项**原来根本没传**,那就是「预算可以被真实穿透」的直接原因。
+    3. **在途预占。** 已经建好但一分钱还没记账的任务(台账是 worker
+       调用之后才写的),见 `spend.reserved_for_generation_plan`。
+
+    `provider` / `candidate_count` 缺省是空与 0:那样第 2 步的预估是 0 元,
+    也就是退回改之前的行为。**保留这个缺省是为了不让别的调用方静默变红**,
+    不是因为那样是对的 —— `create_task` 一定传真值。
     """
     if plan_row is None or plan_row.budget_cap is None:
         return gp.BudgetVerdict.ALLOWED
+
+    # 见 docstring 第 1 条。锁的粒度是这一份方案,不挡别的方案建任务
+    locks.advisory_xact_lock(session, "generation_plan_budget", plan_row.id)
+
     spent = spend.spent_for_generation_plan(session, plan_row.id)
-    return gp.budget_verdict(budget_cap=plan_row.budget_cap, spent=spent)
+    estimated: Any = 0
+    if candidate_count > 0:
+        this_one = spend.estimated_cost(
+            provider, operation="submit", units=candidate_count
+        )
+        in_flight = spend.reserved_for_generation_plan(session, plan_row.id)
+        # 任一项算不出来就整体"不知道"。两者相加时把 None 当 0 的写法
+        # 会让"估不出来"静默变成"这一次不花钱"
+        estimated = (
+            None if this_one is None or in_flight is None else this_one + in_flight
+        )
+    return gp.budget_verdict(
+        budget_cap=plan_row.budget_cap, spent=spent, estimated=estimated
+    )
 
 
 #: 任务列表允许排序的字段。`updated_at` 对这张表尤其有用 —— 它同时是心跳

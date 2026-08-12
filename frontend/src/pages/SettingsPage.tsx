@@ -161,10 +161,26 @@ export default function SettingsPage() {
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState<Draft>({})
 
+  /**
+   * 已经知道这不是管理员时**根本不发这个请求**。
+   *
+   * 2026-08-11:上面那句注释写着"在发出任何请求之前就把话说清楚",而它不成立 ——
+   * hook 不能条件调用,`useQuery` 在下面那个 403 早退分支之前就已经执行了。
+   * 于是 operator 手输 `/settings` 的动线是:界面正确地显示"没有权限",
+   * 后端同时收到一个注定 403 的 `GET /settings`。
+   *
+   * 不是安全漏洞(边界在 `require_admin`,它照常拒),但那次请求毫无意义:
+   * 它在后端日志里留一条 403、在前端留一次失败查询,而两者都只会让排障的人
+   * 去查一个不存在的权限问题。判据用 `identity.who &&`:身份还没探出来时
+   * **要发**,否则管理员每次刷新都要多等一个 whoami 往返才开始读配置。
+   */
+  const forbiddenByRole = Boolean(identity.who) && !identity.isAdmin
+
   // 口令不对时重试三次没有任何意义,只会让人多等三个来回
   const query = useQuery({
     queryKey: ['settings'],
     queryFn: settingsApi.read,
+    enabled: !forbiddenByRole,
     retry: (count, err) => !isAuthError(err) && count < 2,
   })
   /*
@@ -320,13 +336,16 @@ export default function SettingsPage() {
    * operator 手输 `/settings`(PRD §31)。路由仍然注册,所以这一页会被渲染 ——
    * 这里在**发请求之前**就把话说清楚,而不是让他看着一页空白等一个 403 回来。
    *
+   * 「发请求之前」这半句现在是真的:同一个判据(`forbiddenByRole`)同时关掉了
+   * 上面那次 `useQuery`。原来它只关掉渲染,请求照发 —— 见那里的说明。
+   *
    * 判据取 `identity.who && !identity.isAdmin`,不是 `!identity.isAdmin`:
    * 后者在身份还没探出来时也为真,于是管理员每次刷新都会先闪一下 403。
    *
    * 这**不是**权限边界:边界是后端 `require_admin`,下面那个 `forbidden`
    * 分支接的就是它的回答。两处都要有 —— 少了后端那半是漏洞,少了这半是难用。
    */
-  if (identity.who && !identity.isAdmin) {
+  if (forbiddenByRole) {
     return (
       <>
         <PageHeader title="设置" subtitle="密钥、模型、Provider 与系统参数" />

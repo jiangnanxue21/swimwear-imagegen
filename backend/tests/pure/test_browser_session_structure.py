@@ -198,11 +198,28 @@ def test_the_dev_fallback_cannot_bypass_a_configured_browser_login():
 
     少了这个条件,本地怎么点都是通的 —— 而人工验收要验的恰好是
     admin/operator 的差异、退出登录、401 与 403,一条都验不到。
+
+    2026-08-11:那四个条件从 `resolve_identity` 的行内 if 提成了
+    `dev_fallback_active()`,因为 `/health` 要报同一件事(第三档 `auth_mode`)。
+    **判据必须跟着搬,不能两边各写一遍** —— 抄一份过去的表现是界面说
+    "免登录"而后端在 401。所以这里同时钉两件事:那个函数里有这个条件,
+    而且 `resolve_identity` 真的调它(不是自己又写了一遍)。
     """
-    body = ast.unparse(_fn(_tree(DEPS_PY), "resolve_identity"))
-    assert "browser_auth_configured" in body, (
+    tree = _tree(DEPS_PY)
+    predicate = ast.unparse(_fn(tree, "dev_fallback_active"))
+    assert "browser_auth_configured" in predicate, (
         "ROLE_DEV 回落没有排除「浏览器登录已配置」的情况:填了密码的本机"
         "仍然会被免口令放行,于是登录、logout、403 在本地全都测不到"
+    )
+
+    body = ast.unparse(_fn(tree, "resolve_identity"))
+    assert "dev_fallback_active()" in body, (
+        "resolve_identity 不再走 `dev_fallback_active()` 了 —— 那个函数同时是"
+        "`/health` 报 auth_mode 的判据,两边分叉的表现是界面说免登录而后端在 401"
+    )
+    assert "browser_auth_configured" not in body, (
+        "回落条件在 resolve_identity 里又被写了一遍 —— 一份判据两处实现,"
+        "改一处的人不会知道另一处存在"
     )
 
 

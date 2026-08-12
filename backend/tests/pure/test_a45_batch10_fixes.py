@@ -471,29 +471,38 @@ def test_the_audience_gate_warnings_have_an_outlet():
 # ================================================================ 8. 已知缺口不隐身
 
 
-def test_the_model_reference_bypass_is_recorded_as_a_known_gap():
+def test_the_model_reference_bypass_is_recorded_as_closed():
     """审视第 10 条:生成时"不指定模特"绕过受众与授权检查。
 
-    溯源列已经落地,但这条分支仍直接 return；所以这里守的是 STATUS 与正式
-    验收记录都必须说"仍未关闭",不能再把"冒烟改走授权模板"记成关缝。
+    ## 这条断言在 2026-08-11 换了方向
 
-    界面这一半已经改了:下拉不再把它说成一个等价选项,而是明说它跳过
-    §11 的检查。后端那一半留在 STATUS 里 —— 一条写进文档的缺口是可追的,
-    一条没人记得的不是。
+    旧版叫 `..._is_recorded_as_a_known_gap`,守的是 STATUS 与正式验收记录
+    **都必须说"仍未关闭"** —— 那时它确实没关闭,而一条写进文档的缺口是
+    可追的,一条没人记得的不是。
+
+    这一轮那条分支改成拒绝了(判定在
+    `generation_service._assert_assets_are_usable`,worker 那道兜底也删了),
+    所以三份记录必须跟着翻面。**方向反过来之后守的东西没变**:文档与代码
+    不许分叉。旧断言留着的后果是"代码已经修好而门禁要求文档说它没修好" ——
+    然后有人为了让门禁绿而把文档改回去。
+
+    界面那一半也跟着改:下拉原来把留空说成"使用商品自带模特参考图",
+    而那个选择现在必定失败。一个推荐必败选项的下拉比没有提示更糟。
     """
     status = (PROJECT_ROOT / "docs" / "STATUS.md").read_text(encoding="utf-8")
     live_limits = status.split("## 三、已知限制", 1)[1].split("## 四、", 1)[0]
-    assert "MODEL_REFERENCE" in live_limits and "仍未关闭" in live_limits, (
-        "模特参考图绕过授权检查没有如实留在 STATUS 的当前已知限制里"
+    assert not re.search(r"绕行缝仍未关闭", live_limits), (
+        "STATUS 的已知限制还在说绕行缝没关 —— 代码里那条 return 已经换成拒绝了,"
+        "文档与代码不许分叉"
     )
     ac = (PROJECT_ROOT / "docs" / "AC-VERIFICATION.md").read_text(encoding="utf-8")
-    assert re.search(r"不指定模特.{0,12}绕行缝.{0,24}(仍未关闭|未关闭)", ac), (
-        "正式验收记录没有把 MODEL_REFERENCE 绕行缝记为未关闭"
+    assert re.search(r"不指定模特.{0,12}绕行缝.{0,24}已关闭", ac), (
+        "正式验收记录没有把 MODEL_REFERENCE 绕行缝记为已关闭"
     )
-    assert not re.search(r"不指定模特.{0,12}绕行缝.{0,12}已关闭", ac), (
-        "正式验收记录仍在把未关闭的 MODEL_REFERENCE 分支记成已关闭"
+    assert not re.search(r"不指定模特.{0,12}绕行缝.{0,24}(仍未关闭|未关闭)", ac), (
+        "正式验收记录里还留着「未关闭」的说法 —— 同一件事在同一份文件里两个答案"
     )
-    # 界面不再把它当作等价选项。
+    # 界面不再把留空说成一个等价选项 —— 它现在是一个必定失败的选项。
     #
     # **这一条原来断言的是 `"§11" in modal`,那是错的口径**(A45-batch14-5 修)。
     # 它守的东西写在自己的文档字符串里:「明说它跳过 §11 的检查」——
@@ -502,12 +511,13 @@ def test_the_model_reference_bypass_is_recorded_as_a_known_gap():
     # 那条规则禁止内部编号出现在 title/extra/description 这类用户可见文案里。
     # 两道门禁互相要求对方红,而先跑的那一道决定谁赢。
     #
-    # 现在断言那句话的**实质**:得让运营看懂留空会少掉哪一层检查。
+    # 现在断言那句话的**实质**:得让运营看懂为什么不能留空。
     # 编号本身搬进了组件的注释,可追性没丢(下面第二条钉住它没被顺手删掉)。
     modal = _fe_raw("components/TaskCreateModal.tsx")
     visible = re.sub(r"(?<!:)//[^\n]*", "", re.sub(r"/\*.*?\*/", "", modal, flags=re.S))
-    assert re.search(r"没有授权与年龄记录", visible), (
-        "留空那条路径没有用人话说明它跳过了什么 —— 运营只会以为这是个等价选项"
+    assert re.search(r"不能直接用", visible), (
+        "界面没说清「模特参考图不能直接用」—— 运营会照着旧提示留空,"
+        "然后拿到一个他无法从提示里预料到的报错"
     )
     assert "§11" not in visible, (
         "内部编号又回到了用户可见文案里(前端 ESLint 会红) —— 结论留下,编号搬注释"

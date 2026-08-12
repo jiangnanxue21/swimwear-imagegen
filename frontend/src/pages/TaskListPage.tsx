@@ -327,7 +327,7 @@ export default function TaskListPage() {
         title="创建生成任务"
         confirmLoading={create.isPending}
         onCancel={() => setOpen(false)}
-        onSubmit={(values) => create.mutate(values as never)}
+        onSubmit={(values) => create.mutate(values)}
       />
 
       <ForceRetryModal

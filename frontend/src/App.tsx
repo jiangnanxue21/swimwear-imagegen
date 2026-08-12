@@ -1,3 +1,4 @@
+import { lazy } from 'react'
 import { createBrowserRouter, createRoutesFromElements, Navigate, Route } from 'react-router-dom'
 import {
   ApiOutlined, DashboardOutlined, FileTextOutlined, HeartOutlined,
@@ -8,34 +9,58 @@ import {
 } from '@ant-design/icons'
 import AppLayout, { type NavGroup } from './components/AppLayout'
 import NotFoundPage from './pages/NotFoundPage'
-import SystemStatusPage from './pages/SystemStatusPage'
 import TodayPage from './pages/TodayPage'
-import SpuCreatePage from './pages/SpuCreatePage'
-import SpuDetailPage from './pages/SpuDetailPage'
-import WorkbenchListPage from './pages/WorkbenchListPage'
-import WorkbenchProductPage from './pages/WorkbenchProductPage'
-import WizardPage from './pages/WizardPage'
-import WorkbenchBatchPage from './pages/WorkbenchBatchPage'
-import WorkbenchReviewPage from './pages/WorkbenchReviewPage'
-import WorkbenchExceptionsPage from './pages/WorkbenchExceptionsPage'
-import WorkbenchImportPage from './pages/WorkbenchImportPage'
-import WorkbenchSpuPage from './pages/WorkbenchSpuPage'
-import AuditLogPage from './pages/AuditLogPage'
-import MediaLibraryPage from './pages/MediaLibraryPage'
-import ProductListPage from './pages/ProductListPage'
-import ProductDetailPage from './pages/ProductDetailPage'
-import TaskListPage from './pages/TaskListPage'
-import TaskDetailPage from './pages/TaskDetailPage'
-import ProvidersPage from './pages/ProvidersPage'
-import ModelTemplatesPage from './pages/ModelTemplatesPage'
-import ReviewQueuePage from './pages/ReviewQueuePage'
-import ReviewDetailPage from './pages/ReviewDetailPage'
-import DashboardPage from './pages/DashboardPage'
-import PromptsPage from './pages/PromptsPage'
-import SettingsPage from './pages/SettingsPage'
+
+/**
+ * 路由级代码分割(a51)。
+ *
+ * ## 改之前:28 个页面全部静态 import,首屏一个 1.9MB 的 chunk
+ *
+ * 构建自己一直在警告(`Some chunks are larger than 500 kB`),而这份文件把
+ * 每一个页面都拉进了入口 —— 一个只想看今日待办的人,要先下完发布页、
+ * 审核台、批次页、设置页的全部代码。
+ *
+ * ## 这三个保持同步导入,是刻意的
+ *
+ *     LoginPage     未登录时的第一眼。懒加载它等于在最需要"快"的那一刻
+ *                   多一次网络往返,而它很小
+ *     TodayPage     `/` 的默认落点。首屏必到,拆出去只是多一个请求
+ *     NotFoundPage  兜底路由。它要在"什么都不对"的时候还能渲染出来,
+ *                   而那正是最不该依赖"再取一个 chunk"的时刻
+ *
+ * ## Suspense 边界在 `AppLayout` 里,不在这里
+ *
+ * 包在这里的话,切页时整个界面(含侧栏)会被 fallback 顶掉一帧,
+ * 表现是每次点菜单都闪一下。放在 `<Outlet />` 外面,侧栏和顶栏留在原地,
+ * 只有内容区显示加载态 —— 这也是懒加载唯一会被用户看见的地方。
+ */
+const AuditLogPage = lazy(() => import('./pages/AuditLogPage'))
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const MediaLibraryPage = lazy(() => import('./pages/MediaLibraryPage'))
+const ModelTemplatesPage = lazy(() => import('./pages/ModelTemplatesPage'))
+const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'))
+const ProductListPage = lazy(() => import('./pages/ProductListPage'))
+const PromptsPage = lazy(() => import('./pages/PromptsPage'))
+const ProvidersPage = lazy(() => import('./pages/ProvidersPage'))
+const PublishPage = lazy(() => import('./pages/PublishPage'))
+const ReviewDetailPage = lazy(() => import('./pages/ReviewDetailPage'))
+const ReviewQueuePage = lazy(() => import('./pages/ReviewQueuePage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const SpendPage = lazy(() => import('./pages/SpendPage'))
+const SpuCreatePage = lazy(() => import('./pages/SpuCreatePage'))
+const SpuDetailPage = lazy(() => import('./pages/SpuDetailPage'))
+const SystemStatusPage = lazy(() => import('./pages/SystemStatusPage'))
+const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage'))
+const TaskListPage = lazy(() => import('./pages/TaskListPage'))
+const WizardPage = lazy(() => import('./pages/WizardPage'))
+const WorkbenchBatchPage = lazy(() => import('./pages/WorkbenchBatchPage'))
+const WorkbenchExceptionsPage = lazy(() => import('./pages/WorkbenchExceptionsPage'))
+const WorkbenchImportPage = lazy(() => import('./pages/WorkbenchImportPage'))
+const WorkbenchListPage = lazy(() => import('./pages/WorkbenchListPage'))
+const WorkbenchProductPage = lazy(() => import('./pages/WorkbenchProductPage'))
+const WorkbenchReviewPage = lazy(() => import('./pages/WorkbenchReviewPage'))
+const WorkbenchSpuPage = lazy(() => import('./pages/WorkbenchSpuPage'))
 import LoginPage from './pages/LoginPage'
-import SpendPage from './pages/SpendPage'
-import PublishPage from './pages/PublishPage'
 
 /**
  * 侧栏导航(A8:按工作阶段分组 + 按角色收敛;a47 §4:菜单收敛 13 → 7)。

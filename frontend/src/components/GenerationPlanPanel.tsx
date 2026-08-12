@@ -30,8 +30,13 @@ import {
   type ImageAngle,
   type PlanActivationEffect,
 } from '../api/generationPlans'
-import { modelTemplatesApi } from '../api/generation'
-import { AUDIENCE_LABEL, type Audience } from '../api/types'
+import { modelTemplatesApi, providersApi } from '../api/generation'
+import {
+  AUDIENCE_LABEL,
+  isProviderSelectable,
+  providerOptionLabel,
+  type Audience,
+} from '../api/types'
 import { readError } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 
@@ -90,6 +95,34 @@ export default function GenerationPlanPanel({
         forProductAudience: productAudience ?? undefined,
       }),
   })
+
+  /**
+   * Provider 下拉的数据源(2026-08-11 评审)。
+   *
+   * 这里原来是三个硬编码字面量 `mock / fashn / comfyui`,而后端
+   * `registry.IMPLEMENTED_PROVIDERS` 只有 `{mock, fashn}` 并且会明确拒绝
+   * comfyui。于是这条动线是通的:选 comfyui -> 存草稿 -> 启用 -> 一切正常 ->
+   * 三天后创建生成任务 -> `CONFIG_INVALID`,而报错指向的是任务不是方案。
+   * FASHN 填了 Key 也是同一条(`configured` 为假时同样进不了任务)。
+   *
+   * `/api/providers` 一直就在报 `implemented` / `configured`,只是这张表单
+   * 没读它。判据用共用的 `isProviderSelectable`,和 `TaskCreateModal` 同一份 ——
+   * 两处各写一遍的表现是"任务弹窗里选不到的那家,方案里能选"。
+   *
+   * 后端从这一轮起也拦(`generation_plan_service._assert_plan_usable` 递
+   * `registry.selectable_names()`)。这里是可发现性,那里是边界 —— 两处都要有。
+   */
+  /** 当前勾了哪些角度。每个角度的"几张"输入框跟着它渲染 */
+  const selectedAngles = Form.useWatch('angles', form) as ImageAngle[] | undefined
+
+  const providers = useQuery({ queryKey: ['providers'], queryFn: providersApi.list })
+  const providerOptions = (providers.data ?? []).map((p) => ({
+    value: p.name,
+    label: providerOptionLabel(p),
+    // 不可选的**仍然列出来但禁用**,并把原因写在标签上。整个隐藏的话,
+    // "为什么没有 comfyui" 这个问题在界面上无法回答,而运营会去怀疑自己
+    disabled: !isProviderSelectable(p),
+  }))
 
   /**
    * 重读方案列表。
@@ -316,19 +349,51 @@ export default function GenerationPlanPanel({
             }))}
           />
         </Form.Item>
-        <Form.Item name="provider" label="Provider" rules={[{ required: true }]}>
+        <Form.Item
+          name="provider"
+          label="Provider"
+          rules={[{ required: true }]}
+          extra={
+            providers.isError
+              ? // 拉失败与"一个都不可用"必须分开说 —— 同上面模特那一处
+                `Provider 列表没拉到(${readError(providers.error)}),下面是空的不代表没有可用的`
+              : undefined
+          }
+        >
           <Select
-            style={{ minWidth: 120 }}
-            options={[
-              { value: 'mock', label: 'mock' },
-              { value: 'fashn', label: 'fashn' },
-              { value: 'comfyui', label: 'comfyui' },
-            ]}
+            style={{ minWidth: 160 }}
+            loading={providers.isLoading}
+            status={providers.isError ? 'error' : undefined}
+            notFoundContent={providers.isError ? '没拉到,不是没有' : undefined}
+            options={providerOptions}
           />
         </Form.Item>
         <Form.Item name="angles" label="角度" rules={[{ required: true }]}>
           <Select mode="multiple" style={{ minWidth: 220 }} options={ANGLE_OPTIONS} />
         </Form.Item>
+        {/*
+          每个角度出几张。**这些输入框以前不存在**(2026-08-11 评审):
+          `submitCreate` 里写着 `values[`count_${angle}`] ?? 1`,而表单里
+          没有任何 `name={"count_" + angle}` 的 Form.Item —— 于是每个角度
+          恒为 1 张,「FRONT×2」这件事在界面上**表达不出来**,
+          而方案表格里那一列 `×{a.count}` 永远显示 ×1。
+
+          只给选中的角度渲染:没选的角度不该占一格,也不该带一个会被
+          `submitCreate` 读到的值。
+        */}
+        {(selectedAngles ?? []).map((angle) => (
+          <Form.Item
+            key={angle}
+            name={`count_${angle}`}
+            label={`${IMAGE_ANGLE_LABEL[angle]} 张数`}
+            initialValue={1}
+          >
+            {/* 上限跟着后端 `MAX_PLAN_CANDIDATES`(= `MAX_CANDIDATE_COUNT`)。
+                超了后端会以 `PLAN_TOO_MANY_CANDIDATES` 拒,这里只是先拦一下 ——
+                真判据在后端,不在这个 max */}
+            <InputNumber min={1} max={8} style={{ width: 88 }} />
+          </Form.Item>
+        ))}
         <Form.Item name="budget_cap" label="预算上限">
           <InputNumber min={0} placeholder="不限" />
         </Form.Item>

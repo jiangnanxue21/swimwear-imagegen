@@ -49,6 +49,9 @@ const identity = vi.hoisted(() => ({
     loading: false,
     authFailed: false,
     sessionAuth: true,
+    // 2026-08-11:`auth_mode` 从两档变三档,登录页要按它分岔说话。
+    // 假身份漏一个字段的表现不是报错,是那一支渲染成 `undefined` 的分支
+    tokenOnly: false,
     needsLogin: false,
   },
 }))
@@ -76,6 +79,17 @@ const { default: LoginPage, safeNext } = await import('../../src/pages/LoginPage
 const { default: AppLayout } = await import('../../src/components/AppLayout')
 const { apiClient } = await import('../../src/api/client')
 
+/**
+ * 登录按钮的**可及名字**。antd 会在两个汉字之间插一个空格
+ * (`Button` 的 `autoInsertSpace`),所以 DOM 里是「登 录」而不是「登录」。
+ *
+ * 这三条用例原来写死 `name: '登录'`,于是它们在这台机器上**一直是红的** ——
+ * 而 `make check-offline` 不跑 Vitest,红灯没有人看见。用正则容忍那个空格,
+ * 而不是去关掉 antd 的 `autoInsertSpace`:那是 antd 对中文按钮的默认排版,
+ * 改它是一个视觉决定,不该由一条测试来推动。
+ */
+const LOGIN_BUTTON = /^登\s*录$/
+
 function setIdentity(patch: Partial<typeof identity.value>) {
   identity.value = { ...identity.value, ...patch }
 }
@@ -101,6 +115,7 @@ beforeEach(() => {
     loading: false,
     authFailed: false,
     sessionAuth: true,
+    tokenOnly: false,
     needsLogin: false,
   })
 })
@@ -132,7 +147,7 @@ describe('登录页', () => {
 
     await userEvent.type(screen.getByLabelText('用户名'), '  operator  ')
     await userEvent.type(screen.getByLabelText('密码'), 'pw-123456')
-    await userEvent.click(screen.getByRole('button', { name: '登录' }))
+    await userEvent.click(screen.getByRole('button', { name: LOGIN_BUTTON }))
 
     await waitFor(() => expect(auth.login).toHaveBeenCalledTimes(1))
     // 密码**不 trim**:两端的空格可能是密码的一部分,而用户名不可能
@@ -157,7 +172,7 @@ describe('登录页', () => {
 
     await userEvent.type(screen.getByLabelText('用户名'), 'admin')
     await userEvent.type(screen.getByLabelText('密码'), 'pw')
-    await userEvent.click(screen.getByRole('button', { name: '登录' }))
+    await userEvent.click(screen.getByRole('button', { name: LOGIN_BUTTON }))
 
     // 运营常态是从聊天窗点一条深链进来,会话恰好过期。只把他丢回首页的话,
     // 那条链接就白点了
@@ -185,7 +200,7 @@ describe('登录页', () => {
 
     await userEvent.type(screen.getByLabelText('用户名'), 'admin')
     await userEvent.type(screen.getByLabelText('密码'), 'wrong')
-    await userEvent.click(screen.getByRole('button', { name: '登录' }))
+    await userEvent.click(screen.getByRole('button', { name: LOGIN_BUTTON }))
 
     await waitFor(() =>
       expect(screen.getByText(/用户名或密码错误/)).toBeInTheDocument(),
@@ -195,8 +210,34 @@ describe('登录页', () => {
     expect(screen.queryByText(/用户不存在/)).toBeNull()
   })
 
-  it('口令模式的部署不画登录表单,直说这里没有这条路', () => {
-    setIdentity({ sessionAuth: false })
+  /*
+   * 不走浏览器登录的部署有**两种**,而它们该说的话相反(2026-08-11 评审第 8 条):
+   *
+   *     dev    本机三种凭据全空。根本不需要登录,直接用就行
+   *     token  只配了 Header 口令。浏览器**进不来**,得改服务器配置
+   *
+   * 原来只有一条用例、一句话("这个部署没有开启浏览器登录"+ 去设置页填口令),
+   * 而那句指引指向一个随 localStorage 口令链一起删掉的输入框。
+   */
+  it('免登录模式不画登录表单,并说清这里不需要登录', () => {
+    setIdentity({ sessionAuth: false, tokenOnly: false })
+
+    render(
+      <Harness initial="/login">
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/today" element={<div>今日工作页</div>} />
+        </Routes>
+      </Harness>,
+    )
+
+    // 画一个永远登不进去的表单,人会一直试密码
+    expect(screen.queryByRole('button', { name: LOGIN_BUTTON })).toBeNull()
+    expect(screen.getByText('这台机器处于免登录的开发模式')).toBeInTheDocument()
+  })
+
+  it('只配 Header 口令时说清浏览器进不来,而不是指向一个不存在的输入框', () => {
+    setIdentity({ sessionAuth: false, tokenOnly: true })
 
     render(
       <Harness initial="/login">
@@ -206,9 +247,12 @@ describe('登录页', () => {
       </Harness>,
     )
 
-    // 画一个永远登不进去的表单,人会一直试密码
-    expect(screen.queryByRole('button', { name: '登录' })).toBeNull()
-    expect(screen.getByText('这个部署没有开启浏览器登录')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: LOGIN_BUTTON })).toBeNull()
+    expect(
+      screen.getByText('这个部署的浏览器登录没有开启,现在无法从界面登录'),
+    ).toBeInTheDocument()
+    // 口令时代那句"到系统设置页填一次口令"必须彻底消失:那个输入框已经不存在
+    expect(screen.queryByText(/系统设置/)).toBeNull()
   })
 })
 
@@ -310,8 +354,16 @@ describe('AppLayout 的登录闸', () => {
     )
 
     await userEvent.click(screen.getByRole('button', { name: /operator/ }))
-    // 给一个点了什么都不会发生的菜单项,比不给更糟
-    expect(await screen.findByText('更换口令')).toBeInTheDocument()
+    // 「我的操作记录」证明菜单确实展开了 —— 否则下面那条"没有退出登录"
+    // 会因为菜单根本没打开而假绿
+    expect(await screen.findByText('我的操作记录')).toBeInTheDocument()
+    // 给一个点了什么都不会发生的菜单项,比不给更糟。
+    //
+    // 这里原来断言的是 `findByText('更换口令')`,而那一项**随 localStorage
+    // 口令链一起退役了**(PRD §29:设置页那两把是机器凭据,不是任何人的
+    // 登录密码,叫那个名字会让人去改一把和自己完全无关的东西)。
+    // 于是这条用例一直是红的,而 `make check-offline` 不跑 Vitest,没人看见。
+    expect(screen.queryByText('更换口令')).toBeNull()
     expect(screen.queryByText('退出登录')).toBeNull()
   })
 })

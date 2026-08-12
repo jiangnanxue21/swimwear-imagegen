@@ -293,8 +293,25 @@ export default function MediaLibraryPage() {
                   width="100%"
                   style={{ objectFit: 'contain' }}
                   preview={{ mask: '查看大图' }}
-                  // 签名地址会过期。过期后重新拉列表就能拿到新地址，
-                  // 所以这里只给一个占位，不做自动重试
+                  /*
+                   * 签名地址会过期(`storage.SIGNED_URL_TTL_SECONDS`,30 分钟)。
+                   *
+                   * 2026-08-11 评审:这里原来只挂一个空占位,注释写着"过期后重新
+                   * 拉列表就能拿到新地址,所以不做自动重试" —— 前半句对,后半句
+                   * 是把"有办法恢复"当成了"会自动恢复"。这一页**不轮询**,
+                   * 而审图是最典型的挂机场景:泡杯咖啡回来,整屏缩略图一起变成
+                   * 空白占位,而现象酷似"图全坏了"。运营不会想到按 F5,他会
+                   * 去查素材是不是被隔离了。
+                   *
+                   * 修法与图片集页(A45-#28)完全一致:加载失败时重新取一次列表,
+                   * 那会带回新签的地址。`refetch` 而不是 `invalidate` —— 这一次
+                   * 失败要的是立刻重签,不是把缓存标脏等下一个订阅者。
+                   * `list.isFetching` 那道闸挡住"一屏 20 张图各触发一次 refetch";
+                   * 重签之后仍然失败的话,占位符照常出现,不会陷进重试循环。
+                   */
+                  onError={() => {
+                    if (!list.isFetching) void list.refetch()
+                  }}
                   fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E"
                 />
               </div>

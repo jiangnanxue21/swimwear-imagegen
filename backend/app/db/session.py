@@ -13,6 +13,16 @@ engine = create_engine(
     pool_pre_ping=True,
     future=True,
     echo=False,
+    # 池容量。**这四个参数在 a51 之前一个都没有**,走的是 SQLAlchemy 默认的
+    # 5 + 10 = 15 条,而同步端点的并发上限(anyio 线程池)是 40 ——
+    # 两个默认值互相不知道对方存在,表现是高并发下 25 个请求排队 30 秒然后
+    # `QueuePool limit ... reached`。理由与选值写在 `core/config.py` 那一组上面,
+    # 不在这里重复;这里只强调一件事:**它们和 `SERVER_THREADPOOL_SIZE` 是一组**,
+    # 单独调一个不会报错,只会让另一个变成瓶颈。
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
     # 会话时区钉死 UTC。**这不是一个偏好设置,是一个正确性前提。**
     #
     # 全部时间列都是 `timestamptz`(`db/base.py`),而我们写进去的是 naive

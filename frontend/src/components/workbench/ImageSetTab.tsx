@@ -17,7 +17,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Empty, Image, Select, Skeleton, Space, Tag, Tooltip,
+  Alert, App, Button, Card, Checkbox, Empty, Image, Select, Skeleton, Space, Tag, Tooltip,
 } from 'antd'
 import {
   ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined, PlusOutlined,
@@ -25,6 +25,7 @@ import {
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { mediaApi, type MediaAsset, type MediaRole } from '../../api/media'
+import { IMAGE_ANGLE_LABEL, type ImageAngle } from '../../api/generationPlans'
 import {
   imageSetsApi,
   type ImageSetDetail,
@@ -121,6 +122,11 @@ function toDraft(detail: ImageSetDetail | undefined): Draft[] {
     // 加编辑入口是另一件事(与 A-26 的行级变体选择器同类);
     // 在那之前,至少要**原样带回去**。
     derivative_purpose: i.derivative_purpose,
+    // §6.5 的两列(2026-08-11 评审)。它们和 `derivative_purpose` 不同:
+    // **批准闸真的会读它们**,所以除了带回去,下面每一行还有编辑入口。
+    // 漏掉时的症状见 `api/imageSets.ts` 里 `ImageSetItemInput` 那一段
+    angle: i.angle,
+    shared_opt_in: i.shared_opt_in,
   }))
 }
 
@@ -255,6 +261,8 @@ export default function ImageSetTab({
       // 相等 —— `tests/pure/test_a44_batch3_fixes.py` 按类型定义逐字段核对,
       // 下一次给入参加字段时会红在这里,而不是等到导出用错图
       derivative_purpose: item.derivative_purpose ?? null,
+      angle: item.angle ?? null,
+      shared_opt_in: Boolean(item.shared_opt_in),
     }))
 
   const save = useMutation({
@@ -351,6 +359,11 @@ export default function ImageSetTab({
         // 第一张进来的图默认设为主图:一个集必须有主图,而忘设主图是最常见的校验失败
         is_primary: items.length === 0,
         enabled: true,
+        // 两个默认值都和库里的列默认一致(§6.5)。**刻意不默认勾「通用」**:
+        // 那一列的语义是"有人明确说过这张图可以混入各颜色",默认勾上等于
+        // 让那句话变成一句没人说过的话
+        angle: null,
+        shared_opt_in: false,
       },
     ])
   }
@@ -370,6 +383,31 @@ export default function ImageSetTab({
     )
 
   const setRole = (index: number, role: MediaRole) => patch(index, { role })
+
+  /**
+   * 这一行覆盖的拍摄角度(§6.5,2026-08-11 评审)。
+   *
+   * `MISSING_REQUIRED_ANGLE` 的判据是**这一列**,不是图的内容:后端
+   * `coverage()` 拿 `item.angle` 和方案 `angles_json` 的键比集合。所以没有
+   * 这个入口时,配了「正面 + 背面」的方案永远报"缺角度",而运营唯一能做的
+   * 事(补图)一点用都没有 —— 补进来的图 `angle` 还是空的。
+   *
+   * 候选图由生成链路自动带角度(`GenerationCandidate.candidate_metadata`
+   * 的 `target_angle`,由 `image_set_service` 在缺省时继承),
+   * 所以这个下拉主要用于**人工上传的图与例外**,与 schema 里那句
+   * 「人工只处理例外」一致。
+   */
+  const setAngle = (index: number, angle: ImageAngle | null) => patch(index, { angle })
+
+  /**
+   * 「这张通用图允许混入颜色附图」(§6.5)。
+   *
+   * 只对通用图(`variant_id === null`)有意义:绑了颜色的行本来就属于那个颜色,
+   * 这一列不参与任何判定。**不勾的通用图会在批准时报
+   * `UNMARKED_SHARED_IMAGE`**,而在这个开关出现之前那条阻断无处可解。
+   */
+  const setSharedOptIn = (index: number, shared: boolean) =>
+    patch(index, { shared_opt_in: shared })
 
   /**
    * A-26:给某一行绑颜色变体。**这是 B-01 缺的那个入口。**
@@ -901,6 +939,29 @@ export default function ImageSetTab({
                       ]}
                     />
                   </Tooltip>
+                  {/*
+                    2026-08-11 评审:角度入口。**这一格就是 `MISSING_REQUIRED_ANGLE`
+                    唯一的解法。** 判据是这一列而不是图的内容,所以在它出现之前,
+                    配了「正面 + 背面」的方案会让运营看到一条他补图也解不掉的阻断。
+
+                    选项表来自 `api/generationPlans.IMAGE_ANGLE_LABEL`,那份表与
+                    后端 `core/enums.ImageAngle` 逐值对应 —— 不在这里另写一份。
+                  */}
+                  <Tooltip title="这张图覆盖的拍摄角度。生成出来的候选图会自动带上方案角度,这里用于人工上传的图与例外">
+                    <Select<string>
+                      size="small"
+                      style={{ width: 128 }}
+                      value={item.angle ?? ''}
+                      onChange={(value) => setAngle(index, (value || null) as ImageAngle | null)}
+                      options={[
+                        { value: '', label: '角度未标' },
+                        ...(Object.keys(IMAGE_ANGLE_LABEL) as ImageAngle[]).map((value) => ({
+                          value,
+                          label: IMAGE_ANGLE_LABEL[value],
+                        })),
+                      ]}
+                    />
+                  </Tooltip>
                   <Tooltip title={item.is_primary ? '当前主图' : '设为主图'}>
                     <Button
                       size="small"
@@ -910,6 +971,27 @@ export default function ImageSetTab({
                     >
                       主图
                     </Button>
+                  </Tooltip>
+                  {/*
+                    §6.5 的「通用图默认不混入颜色附图」。只对通用图有意义 ——
+                    绑了颜色的行本来就属于那个颜色,后端 `_section_6_5` 直接
+                    `continue` 掉。所以那些行禁用而不是隐藏:隐藏会让同一列在
+                    不同行上时有时无,而运营会以为是渲染出错了。
+                  */}
+                  <Tooltip
+                    title={
+                      item.variant_id
+                        ? '这一行已绑到某个颜色,不需要标「通用」'
+                        : '勾上之后,这张通用图才会混入各颜色的附图位;不勾会在批准时被拦下(UNMARKED_SHARED_IMAGE)'
+                    }
+                  >
+                    <Checkbox
+                      disabled={Boolean(item.variant_id)}
+                      checked={Boolean(item.shared_opt_in)}
+                      onChange={(e) => setSharedOptIn(index, e.target.checked)}
+                    >
+                      通用
+                    </Checkbox>
                   </Tooltip>
                   {asset?.status === 'QUARANTINED' && (
                     <Tag color="error">素材已隔离</Tag>

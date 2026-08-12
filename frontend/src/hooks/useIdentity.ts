@@ -60,6 +60,15 @@ export interface Identity {
    */
   sessionAuth: boolean
   /**
+   * 这个部署**只**认 Header 口令,浏览器因此进不来(后端 `auth_mode=token`)。
+   *
+   * 2026-08-11 评审第 8 条。它与 `!sessionAuth` **不是**一回事:后者同时
+   * 覆盖本机免登录模式(`auth_mode=dev`),而那一档一切正常、不需要说任何话。
+   * 合成一个布尔的代价是登录页只能说一句同时服务两种情况的话,
+   * 而当时那句话是"到系统设置页填一次口令即可" —— 指向一个已经删掉的输入框。
+   */
+  tokenOnly: boolean
+  /**
    * 会话模式下当前**没有**有效登录态。`AppLayout` 据此跳登录页。
    *
    * 三个条件缺一不可:是会话模式、探测已经有结论、结论是"没有身份"。
@@ -171,6 +180,10 @@ export function useIdentity(): Identity {
     // 而把那些也算成口令问题,横幅会在后端抽风时指着运营的口令说错话
     authFailed: probe.isError && isAuthError(probe.error),
     sessionAuth,
+    // 判据是**明确等于 `token`**,不是"不等于 session":旧后端不返回
+    // `auth_mode`,而那时按"只认 Header 口令"处理会在一个好端端的部署上
+    // 挂一条说服务器配错了的横幅
+    tokenOnly: health.data?.auth_mode === 'token',
     // **不看 `authFailed`。** 探测失败的原因可能是 502 或超时,而那时把人踢去
     // 登录页是错的:他登得进去,然后回到同一个坏掉的后端。判据只有一条 ——
     // 后端活着、探测已经有结论、而结论里没有身份

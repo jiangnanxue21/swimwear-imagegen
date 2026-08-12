@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import worker_process_init
 
 from app.core.config import settings
 
@@ -109,3 +110,25 @@ celery_app.conf.update(
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
     task_default_queue="default",
 )
+
+
+# ---------------------------------------------------------------- prefork 与连接池(a51)
+#
+# prefork 的每个子进程都必须**自己**建连接。父进程如果在 fork 之前建过连接,
+# 子进程会继承同一个 socket 文件描述符,而两个进程往同一条 PostgreSQL 连接上
+# 交替写,表现是随机的 `server closed the connection unexpectedly` /
+# `SSL error` / 拿到别人那条查询的结果 —— 全部难以复现,而且只在有并发时出现。
+#
+# **今天这件事碰巧不会发生**:`app.db.session` 在导入期只构造 engine 对象,
+# `create_engine()` 是惰性的,不建连接。也就是说这个防护现在是空转的。
+#
+# 那为什么还要加:因为"父进程不查库"是一个**没有任何东西在守的隐性前提**。
+# 哪天有人在某个 task 模块的导入期读一次配置表、或者在 beat 里加一句启动自检,
+# 前提就没了,而症状不会指向这里。dispose() 的代价是零(池是空的就什么都不做),
+# 换掉的是一类没有人能靠读代码发现的故障。
+@worker_process_init.connect
+def _reset_db_pool_after_fork(**_kwargs: object) -> None:
+    """子进程起来后丢掉从父进程继承来的连接池。"""
+    from app.db.session import engine
+
+    engine.dispose()

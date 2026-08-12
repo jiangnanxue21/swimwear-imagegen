@@ -81,17 +81,33 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+/**
+ * 「外壳起来了」的判据。
+ *
+ * 2026-08-11 第一次真的跑起来时,这三条用例全部红在
+ * `getByText('商品展示图生产台')` 上 —— 那个字符串是 `useDocumentTitle` 的
+ * `BASE_TITLE`,也就是**浏览器标签页上的标题**,它从来没有出现在页面里。
+ * 页面上的那行字是 `AppLayout` 顶栏的「服装上架平台」。
+ *
+ * 所以现在两样都钉:标题(证明 `useDocumentTitle` 接上了)与顶栏可见文字
+ * (证明外壳真的渲染出来了)。只钉标题是不够的 —— 一个整页
+ * 「Unexpected Application Error」的页面标题一样是对的。
+ */
+const SHELL_TEXT = '服装上架平台'
+const SHELL_TITLE = /商品展示图生产台/
+
 test('应用外壳能从构建产物里起来', async ({ page }) => {
   await page.goto('/')
   // 根路由会重定向到 /today
   await expect(page).toHaveURL(/\/today$/)
-  await expect(page.getByText('商品展示图生产台')).toBeVisible()
+  await expect(page.getByText(SHELL_TEXT)).toBeVisible()
+  await expect(page).toHaveTitle(SHELL_TITLE)
 })
 
 test('路由跳转不会把页面打空', async ({ page }) => {
   await page.goto('/workbench')
   // 断言的是「外壳还在」——具体内容要等后端，那是 P5 的事
-  await expect(page.getByText('商品展示图生产台')).toBeVisible()
+  await expect(page.getByText(SHELL_TEXT)).toBeVisible()
   await expect(page).toHaveURL(/\/workbench$/)
 })
 
@@ -103,5 +119,5 @@ test('断言失败真的会让这条用例红（门禁的门禁）', async ({ pa
   ).toHaveCount(0)
   // 反向确认：上面那句 toHaveCount(0) 通过，不代表定位器在工作。
   // 再钉一个确实存在的东西，两条一起才说明定位器既能找到也能找不到
-  await expect(page.getByText('商品展示图生产台')).toHaveCount(1)
+  await expect(page.getByText(SHELL_TEXT)).toHaveCount(1)
 })

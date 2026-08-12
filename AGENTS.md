@@ -35,8 +35,9 @@ AGENTS.md         与同级 CLAUDE.md **逐字一致**的副本,给读 AGENTS.md
 ## 门禁
 
 ```bash
-make check          # = check-offline + fe-check,需联网(前端要装依赖)
+make check          # = check-offline + test-nodb + fe-check,需联网(前端要装依赖)
 make check-offline  # 后端子集:纯测试 + ruff + 架构契约 + 交付自检 + 样例数据
+make test-nodb      # 不碰真库的全部 pytest 用例(a50 加,见下)
 ```
 
 CI(`.github/workflows/ci.yml`)跑六个 job:`gates` / `backend` / `frontend` /
@@ -45,20 +46,38 @@ CI(`.github/workflows/ci.yml`)跑六个 job:`gates` / `backend` / `frontend` /
 **`make check-offline` 跑绿 ≠ 全都过了。** 它不含前端类型、lint、Vitest 与构建;
 目标自己会在末尾打印这句话。改了前端还只跑 offline,等于没验。
 
-**`make check` 跑绿也 ≠ CI 会绿。** 这里原来写的是「一条命令跑全部」,
-而 `check = check-offline + fe-check`,两者都**不跑 `pytest`**。
-`make check` 覆盖不到的是整整三个 CI job:
+**`make check` 跑绿仍然 ≠ CI 会绿**,但**边界比这里原来写的窄一截**。
+这一段的历史值得记下来,因为它连着两版都不准:
 
 ```
-backend  真库 pytest + Alembic 升降级 + -O 冒烟   ← 要 PostgreSQL + Redis
-e2e      Playwright                              ← 要 npx playwright install
-images   docker build ×2                         ← 要 docker daemon
+第一版  「一条命令跑全部」                   —— 说得比实际宽,被订正掉
+第二版  「两者都不跑 pytest,漏掉三个 job」   —— 说得比实际**窄**,a50 订正
 ```
 
-也就是说本地能跑的那一份**结构上就比 CI 窄**,而窄的方向永远是更松。
+第二版错在把 `pytest` 整块划给了「要 PostgreSQL + Redis」。**不成立**:
+`tests/` 底下有一大批用例走 FastAPI TestClient 而一行库都不碰
+(`test_auth_session.py` 44 条、`test_a45_batch31_action_gate.py` 8 条、
+`test_vision_http.py` 21 条……),它们本机跑得动,却因为归在 pytest 名下
+被连带划进了"跑不到"。代价是实测出来的:a50 那轮在这批用例里找到**两条红的**
+门禁 —— 一条是新增写端点没进闸表(红了两个提交没人看见),一条是
+`auth_mode` 拆三档后一条用例的 setup 描述不了自己那句 docstring。
+`make check-offline` 与 `make check` 当时**全绿**。
+
+**一句把本地说得比实际更窄的话,和说得更宽一样危险** —— 后者让人以为验过了,
+前者让人不去跑那些其实跑得动的东西。a50 起 `make check` 包含 `test-nodb`,
+`-O 冒烟`也有了自己的目标 `make smoke-optimized`(零外部依赖)。
+
+`make check` 之后**仍然**没跑到的:
+
+```
+backend 的真库那一半   requires_db 用例 + Alembic 升降级   ← 要 PostgreSQL + Redis(make test)
+e2e                    Playwright                          ← 要 npx playwright install(make fe-e2e)
+images                 docker build ×2                     ← 要 docker daemon,本地无等价物
+```
+
+本地能跑的那一份**结构上仍然比 CI 窄**,而窄的方向永远是更松。
 `verify_delivery.py` 里那条检查的措辞是「make check **覆盖前端门禁**」——
-它是准确的,被夸大的是这一段。要在本地逼近 CI,得自己起库与 Redis 跑
-`make test`,再加 `make fe-e2e`;docker 那两条本地没有等价物。
+它一直是准确的,被说错的是这一段。
 
 ### 本地真实基础设施验证须由用户明确触发
 

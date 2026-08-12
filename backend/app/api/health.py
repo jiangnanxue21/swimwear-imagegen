@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
+from app.api import deps
 from app.core.config import settings
 from app.db.session import engine
 
@@ -24,9 +25,20 @@ router = APIRouter(tags=["health"])
 #: ``session``  浏览器登录已配(`ADMIN_PASSWORD` / `OPERATOR_PASSWORD` /
 #:              `AUTH_SESSION_SECRET` 三项里有任意一项非空)。401 的意思是
 #:              "登录失效了",前端跳 `/login`
-#: ``token``    只有 Legacy Header Token。401 的意思是"口令没填或填错",
-#:              前端指向 `/settings`
+#: ``dev``      本机免口令模式(`deps.dev_fallback_active()`)。没有登录这个
+#:              动作,任何请求都被当成 `ROLE_DEV` 放行。出现 401 说明后端配置
+#:              刚变过
+#: ``token``    只配了 Legacy Header Token,而且不在免口令模式里。
+#:              **这一档意味着浏览器进不来** —— 前端那条自动带
+#:              `X-Admin-Token` 的链在 PRD §26/§27 里整个退役了,设置页也
+#:              没有口令输入框。界面必须如实说这件事,而不是指向一个
+#:              不存在的输入框
+#:
+#: ``dev`` 是 2026-08-11 评审补的第三档。在它之前 `dev` 与 `token` 合报成
+#: `token`,于是"本机免登录、一切正常"和"浏览器彻底进不来"在前端是同一个值,
+#: 而后者需要的那句话完全说不出来。
 AUTH_MODE_SESSION = "session"
+AUTH_MODE_DEV = "dev"
 AUTH_MODE_TOKEN = "token"
 
 
@@ -54,13 +66,23 @@ def health() -> dict:
         "status": "ok",
         "app": settings.APP_NAME,
         "env": settings.APP_ENV,
-        # 取 `browser_auth_configured` 而不是"三项齐全":后者在 local 下会把
-        # "只填了密码、没填 secret"报成 token 模式,而 `resolve_identity` 那边
-        # 已经按 Session 在拦了 —— 前端于是被引去设置页填一把根本不会被读的口令。
-        # 两处判据必须是同一个属性,`test_a46_phase2_browser_login_seam.py`
-        # 的「同一个属性」那条钉着这一点。
+        # 两处判据必须是**同一个东西**,不是两份长得像的条件:
+        #
+        #   session  取 `browser_auth_configured` 而不是"三项齐全" —— 后者在
+        #            local 下会把"只填了密码、没填 secret"报成 token 模式,
+        #            而 `resolve_identity` 那边已经按 Session 在拦了,
+        #            前端于是被引去设置页填一把根本不会被读的口令。
+        #            `test_a46_phase2_browser_login_seam.py` 的「同一个属性」
+        #            那条钉着这一点
+        #   dev      取 `deps.dev_fallback_active()`,也就是 `resolve_identity`
+        #            第三级用的那个函数本身。抄一份条件过来的话,两边会分叉,
+        #            而分叉的表现是界面说"免登录"而后端在 401
         "auth_mode": (
-            AUTH_MODE_SESSION if settings.browser_auth_configured else AUTH_MODE_TOKEN
+            AUTH_MODE_SESSION
+            if settings.browser_auth_configured
+            else AUTH_MODE_DEV
+            if deps.dev_fallback_active()
+            else AUTH_MODE_TOKEN
         ),
     }
 

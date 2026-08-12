@@ -140,14 +140,25 @@ describe('describeError:失败判定只有这一份', () => {
   })
 
   it('401 / 403:不再指向设置页,且判定为不可重试', () => {
-    // 这条只测得到**免登录那一支**:单测环境里 `/health` 一次都不会返回,
-    // 模块级 authMode 停在默认的 'token'。会话那一支的「请重新登录」钉在
-    // 纯层守卫上(test_a46_phase2_browser_login_seam.py),因为在这里翻转
-    // authMode 只能伸进 axios 拦截器内部 —— 那种写法比不写更糟。
-    // phase6 自审:第一版把这条改成 toContain('重新登录'),在这个环境里必红。
+    /*
+     * 这条只测得到**"还没问到凭据模式"那一支**:单测环境里 `/health` 一次都
+     * 不会返回,模块级 authMode 停在默认的 `'unknown'`。另外三支(session /
+     * dev / token)的措辞钉在纯层守卫上
+     * (`test_a46_phase2_browser_login_seam.py`),因为在这里翻转 authMode
+     * 只能伸进 axios 拦截器内部 —— 那种写法比不写更糟。
+     * phase6 自审:第一版把这条改成 toContain('重新登录'),在这个环境里必红。
+     *
+     * 2026-08-11:默认值从 `'token'` 改成 `'unknown'`,所以这里原来断言的
+     * "开发模式"没了。**那不是回归,是修掉了一句撒谎的默认**:`token` 现在
+     * 有了自己那句很重的话(整个部署的浏览器都进不来),拿它当默认会让
+     * `/health` 还没回来时的任何一个 401 都声称服务器配错了。
+     */
     for (const status of [401, 403]) {
       const view = describeError(axiosError({ status, data: { error: { code: 'UNAUTHORIZED', message: '登录状态已失效' } } }))
-      expect(view.text).toContain('开发模式')
+      // 还没问到模式时**只说事实**,不对部署配置下任何结论
+      expect(view.text).toContain('刷新本页')
+      expect(view.text).not.toContain('开发模式')
+      expect(view.text).not.toContain('Header 口令')
       // 口令时代的指路牌一个都不许剩:设置页上那张录入卡已经不存在了
       expect(view.text).not.toContain('系统设置')
       expect(view.text).not.toContain('核对口令')

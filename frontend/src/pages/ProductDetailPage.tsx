@@ -34,13 +34,25 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
-function AssetTile({ asset }: { asset: Asset }) {
+/**
+ * 一张源素材。
+ *
+ * `onExpired` 在图加载失败时被调用一次,由调用方重新取数拿新签的地址 ——
+ * 源素材落在私有前缀下,它的 URL 是有 TTL 的签名地址
+ * (`storage.SIGNED_URL_TTL_SECONDS`,30 分钟),而这一页不轮询。
+ * 2026-08-11 评审点名的两处裂图之一,修法与素材库、图片集页同一套。
+ *
+ * 成品图那一块**不需要**这个:`outputs` 在 `storage.PUBLIC_PREFIXES` 里,
+ * 它的地址不签名、不过期。两者混在一起处理会让人以为成品图也会裂。
+ */
+function AssetTile({ asset, onExpired }: { asset: Asset; onExpired?: () => void }) {
   return (
     <figure className="asset-tile" style={{ margin: 0 }}>
       <Image
         src={asset.url}
         alt={`${ASSET_TYPE_LABEL[asset.asset_type] ?? asset.asset_type} · ${asset.original_filename}`}
         preview={{ mask: '查看大图' }}
+        onError={() => onExpired?.()}
       />
       <figcaption>
         <Space size={4} wrap style={{ marginBottom: 4 }}>
@@ -334,7 +346,16 @@ export default function ProductDetailPage() {
           />
         ) : assets.data?.length ? (
           <div className="asset-grid">
-            {assets.data.map((a) => <AssetTile key={a.id} asset={a} />)}
+            {assets.data.map((a) => (
+              <AssetTile
+                key={a.id}
+                asset={a}
+                // 一屏十几张图过期时只重取一次:`isFetching` 那道闸挡住其余的
+                onExpired={() => {
+                  if (!assets.isFetching) void assets.refetch()
+                }}
+              />
+            ))}
           </div>
         ) : (
           <Empty description="还没有素材。先选好素材类型,再上传商品图。" />
@@ -382,7 +403,7 @@ export default function ProductDetailPage() {
         productId={id}
         confirmLoading={createTask.isPending}
         onCancel={() => setCreatingTask(false)}
-        onSubmit={(values) => createTask.mutate(values as never)}
+        onSubmit={(values) => createTask.mutate(values)}
       />
 
       <ProductFormModal

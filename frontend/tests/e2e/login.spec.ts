@@ -23,13 +23,28 @@
  *
  * ## 这份文件的执行状态
  *
- * **写这一批时容器里没有 Playwright 浏览器,这几条一次都没有跑过。**
- * 这句话写在这里而不是只写在交接文档里:下一个打开这个文件的人,
- * 需要在读第一条用例之前就知道它的成色。复跑:
+ * **2026-08-11 第一次真的跑过了**(Chromium,`vite preview` 的构建产物)。
+ * 在那之前这句话是"一次都没有跑过",而那一跑当场抓到三条假绿:三个
+ * `getByRole('button', { name: '登录' })` 钉的是一个从来不存在的 DOM ——
+ * antd 会在两个汉字之间插空格。见下面 `LOGIN_BUTTON`。
+ *
+ * 成色仍然要说清:验的是**登录跳转的链路形状**,不是业务主流程(任务 24)。
+ * 复跑:
  *
  *     cd frontend && npx playwright install chromium && npm run e2e
  */
 import { expect, test } from '@playwright/test'
+
+/**
+ * 登录按钮的**可及名字**。antd 会在两个汉字之间插一个空格
+ * (`Button` 的 `autoInsertSpace`),所以真浏览器里它是「登 录」。
+ *
+ * 2026-08-11 第一次真的跑起来时,这三条用例全部红在
+ * `getByRole('button', { name: '登录' })` 上 —— 也就是说它们钉的是一个
+ * 从来没有存在过的 DOM。写这份文件时容器里没有浏览器(见文件头),
+ * 于是"写好了"和"验过了"之间的差距就是这个空格。
+ */
+const LOGIN_BUTTON = /^登\s*录$/
 
 /** 服务端此刻认不认这个浏览器。`/auth/login` 把它翻真,`/auth/logout` 翻假 */
 let authenticated = false
@@ -134,7 +149,7 @@ test('未登录访问一条深链,会带着 next 落到登录页', async ({ page
   await expect(page).toHaveURL(/\/login\?next=/)
   // next 里要保住原来那一页。丢掉它的话,运营从聊天窗点进来的那条链接就白点了
   expect(decodeURIComponent(new URL(page.url()).search)).toContain('/tasks')
-  await expect(page.getByRole('button', { name: '登录' })).toBeVisible()
+  await expect(page.getByRole('button', { name: LOGIN_BUTTON })).toBeVisible()
 })
 
 test('登录成功后回到原来要去的那一页', async ({ page }) => {
@@ -143,7 +158,7 @@ test('登录成功后回到原来要去的那一页', async ({ page }) => {
 
   await page.getByLabel('用户名').fill('operator')
   await page.getByLabel('密码').fill('pw-for-e2e')
-  await page.getByRole('button', { name: '登录' }).click()
+  await page.getByRole('button', { name: LOGIN_BUTTON }).click()
 
   await expect(page).toHaveURL(/\/tasks$/)
   // 外壳起来了 = 侧栏那一套现在点得动
@@ -154,7 +169,7 @@ test('退出登录之后回到登录页,原来那一页也进不去了', async (
   await page.goto('/login')
   await page.getByLabel('用户名').fill('operator')
   await page.getByLabel('密码').fill('pw-for-e2e')
-  await page.getByRole('button', { name: '登录' }).click()
+  await page.getByRole('button', { name: LOGIN_BUTTON }).click()
   await expect(page).toHaveURL(/\/today$/)
 
   await page.getByRole('button', { name: /operator/ }).click()

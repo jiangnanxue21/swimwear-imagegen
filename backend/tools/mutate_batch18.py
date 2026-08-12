@@ -142,10 +142,11 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "D1",
         "宿主页自己挑生效方案(硬规则 4:同一条规则有了第二个答案)",
         HOST,
-        "            <GenerationPlanPanel spuId={spu.id} variantLabels={variantLabels} />",
-        "            {spu.status === 'ACTIVE' && (\n"
-        "              <GenerationPlanPanel spuId={spu.id} variantLabels={variantLabels} />\n"
-        "            )}",
+        # 锚点跟着 2026-08-11 的改动重定位:那一处从单行变成了多行
+        # (补了 `productAudience`,理由见该处注释)。锚点只取**开标签那一行**,
+        # 属性列表还会长 —— 取整段的话每加一个 prop 都要来改这里一次
+        "            <GenerationPlanPanel",
+        "            {spu.status === 'ACTIVE' && <GenerationPlanPanel",
     ),
     (
         "D2",

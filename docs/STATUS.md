@@ -61,10 +61,12 @@
 > **18/19**；本轮未读取或删除它。交付前必须把凭据移出仓库树，若里面是真实凭据
 > 还要先轮换。正式 P0 冻结不能把这项和 Docker 一起写成已关闭。
 >
-> **这份 Mock 人工测试准入不等于 PRD 阶段 2 验收关闭。** `generation_service`
-> 的 `MODEL_REFERENCE` 分支仍在告警后直接返回，"不指定模特"仍会绕过受众与授权
-> 检查；冒烟改走已授权模板只是不再经过缺口，不是关闭缺口。当前状态见下方
-> 「已知限制」与 `AC-VERIFICATION.md` §3。
+> **这份 Mock 人工测试准入不等于 PRD 阶段 2 验收关闭。**
+> `MODEL_REFERENCE` 绕行缝已于 2026-08-11 关闭(见下方「已知限制」那一行与
+> `AC-VERIFICATION.md` §3):`generation_service` 那条分支从"告警后直接返回"
+> 改成拒绝创建任务,worker 里那条"拿不到模板图就退回自由上传模特图"的兜底
+> 也一并删掉 —— 后者更隐蔽,它发生在四道检查都过了之后。
+> 阶段 2 仍未关闭的是**别的**项(见「已知限制」),别把这一条读成整段验收关闭。
 
 > ## 2026-08-09 评审修复:F-12/F-4 颜色维可操作
 >
@@ -2766,7 +2768,7 @@
 | ~~属性识别只有 Mock~~ **A45-batch14 接上了 vision,但一次都没连过真模型** | 任务 7 已落码:`extractors/vision.py`,双 API 形状,复用 `llm/` 的传输层与图片层,`EXTRACTOR_BACKEND=vision` 即启用。**但它从未对着真实端点发过一次请求** —— 守卫全是纯逻辑与 AST,验的是「请求体长什么样、响应怎么解析」,验不到「厂商真的会这么回答」。第一次接真端点时要盯三件事:结构化输出降级(strict json_schema 被拒 → 换 json_object → 换 prompt_only)、`finish_reason=length` 有没有如实报成「输出被截断」而不是「JSON 不合法」、以及**账单上的调用数与 `provider_usage_records` 里 `operation='attribute_extract'` 的行数对不对得上**。`describe_extractors()` 从本批起如实上报(`configured` 问实现自己),所以配错时状态条会说「没配好」而不是「已就绪」 |
 | ~~**识别输入白名单还没收(§5.1 未落地)**~~ **已解决,原文已过期** |判定在 A45-batch14-7 就接上了(AI 图进不来),取数入口在 A45-batch14-19 收口(`media.evidence_assets_for()`)。原文说「今天仍走 `usable_assets()`、AI 图会进识别输入并产生真实付费调用」——**那句话从 14-7 起就不成立**,留着它会让人去查一个不存在的问题。真库验证 `tests/test_a45_batch14_19_evidence_query_db.py` 已写、未跑 |
 | **AI 图伪装成样品:两条路堵了,第三条还开着** | A45-batch14-11 接了 §11 / AC-22 的溯源冲突拦截:同 SPU 同 sha256 命中带溯源的行时,新建那一路落隔离、去重命中那一路不再补角色。**但拦截的判据是「本系统生成过这张图」,不是「这张图是 AI 画的」** —— 从别处拿来的 AI 图(外部工具生成、供应商推来的合成图)没有任何溯源痕迹,照样成为 `PRODUCT_EVIDENCE`。堵那一条要靠图像侧的判别,不在本期范围。另外:冲突**只记 `logger.warning`,没有落审计**(`ingest()` 手里没有 actor,记谁头上是一个业务决定);隔离行经 `release()` 人工放行后会**重新成为证据**(它的 `source` 是 `MANUAL_UPLOAD`,而 `evidence_class` 由 source 派生)—— 那是设计(人工放行的语义就是「我确认这确实是实物样品照」),但**没有人在真界面上走过这一步** |
-| **"不指定模特"绕行缝仍未关闭(C-10)** | `generation_service._assert_assets_are_usable()` 的 `MODEL_REFERENCE` 分支仍在结构化告警后直接返回，跳过 §10.5 受众与 §11 授权/年龄/AI 换装/禁用品类检查。迁移 `0038` 已提供 `generation_task_id` / `generation_candidate_id` 溯源列，**前置已满足但闭环未接**；下一步必须用溯源解析到可执行同等检查的授权主体，解析不了就拒绝。`make smoke` 改走已授权模板只是不再踩缝，不能记成关缝；因此 PRD §13 阶段 2 的对应验收项仍未满足 |
+| ~~**"不指定模特"绕行缝(C-10)**~~ **已于 2026-08-11 关闭,但是以拒绝的方式关的** | `generation_service._assert_assets_are_usable()` 的 `MODEL_REFERENCE` 分支不再 return,改为 `ValidationError`;`tasks/generation_tasks._build_request` 里那条"拿不到模板图就退回自由上传模特图"的兜底也删了(它是同一条缝的第二道门,而且发生在四道检查都过了之后)。**关的方式是 fail-closed,不是接通闭环**:自由素材今天解析不到授权主体 —— `ProductAsset` 上没有指向 ModelTemplate 或授权记录的列,`MediaAsset.consent_id` 列在但**全仓没有写入点**,`MediaConsent` 又没有受众字段(连 §10.5 都判不了)。运营的出路是把那张模特图登记成 ModelTemplate 再选它,那是**唯一**能执行四道检查的路径。要重开自由上传这条路,得先补上上面三样中的任意一条可用链路 |
 | 「有证据但不采信」没有界面 | A45-batch14-11 的判定已经产出 `ATTR_EVIDENCE_ONLY` 阻断与 `FILL_ATTRIBUTES` 动作码,前端补了动作码的三张镜像表 + 首页「其余待办」。**但属性页上没有为这条动线做任何事** —— 没有「这批字段为什么不采信」的分组展示,也没有一键人工填写入口。运营点「人工填写属性」会落在属性页,然后自己逐个找。真实抽取器接上、校准为空时这条动线会是主路径,那时要补 |
 | ~~识别的付费调用与 HTTP 请求事务同生死~~ **已由 0054 关闭** | 两个 HTTP 入口现在只 `queue_extraction()`，先提交 QUEUED run，再投递 Celery；真实模型调用与 `record_usage` 在 worker 的独立会话中执行，后续 HTTP 回滚不再撤销已经发生的调用流水。迁移 `0054` 同时落输入快照、逐图成绩、取消与恢复列，relay/reaper 补漏投与卡死。Windows 真基础设施记录见本文顶部与 `AC-VERIFICATION.md` §11。**这只关闭“HTTP 事务同生死”这笔账**；真实供应商的计费口径仍未连端点验证，见上方 vision 限制，不合并宣称 |
 | 配置变更无值历史 | 审计只记谁改了哪些键,不记改前改后的值(记了等于把明文密钥换个地方存) |

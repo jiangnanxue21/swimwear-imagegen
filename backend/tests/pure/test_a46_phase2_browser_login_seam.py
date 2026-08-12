@@ -49,30 +49,47 @@ def _fe(rel: str) -> str:
 # ================================================================ auth_mode
 
 
-def test_the_two_auth_modes_are_spelled_the_same_on_both_sides():
+def test_the_three_auth_modes_are_spelled_the_same_on_both_sides():
     """后端发的字面量和前端认的字面量必须逐字相同。
 
     失败模式是**静默判错**,不是报错:前端 `mode === 'session'` 对一个不认识的
     字符串只会得到 false,于是会话模式的部署被当成口令模式 —— 每一个被踢下线的
     人都被指向设置页,而那里没有他要的东西。
+
+    2026-08-11:从两档变三档(补了 `dev`)。原来 `dev` 与 `token` 合报成
+    `token`,于是"本机免登录、一切正常"和"浏览器彻底进不来"在前端是同一个值,
+    而后者需要说的话完全说不出来。这条断言跟着从两档改成三档 —— 它守的是
+    "两侧逐字相同",不是"恰好两档"。
     """
     backend = _backend("api/health.py")
     modes = dict(
         re.findall(r'^(AUTH_MODE_\w+) = "([a-z]+)"$', backend, re.M)
     )
-    assert modes == {"AUTH_MODE_SESSION": "session", "AUTH_MODE_TOKEN": "token"}, (
+    assert modes == {
+        "AUTH_MODE_SESSION": "session",
+        "AUTH_MODE_DEV": "dev",
+        "AUTH_MODE_TOKEN": "token",
+    }, (
         f"后端的 auth_mode 取值变了:{modes} —— 前端那个等号比较不会报错,只会永远判成口令模式"
     )
 
     health_ts = _fe("api/health.ts")
-    assert "auth_mode?: 'session' | 'token'" in health_ts, (
+    assert "auth_mode?: 'session' | 'dev' | 'token'" in health_ts, (
         "前端 HealthOut 上的 auth_mode 联合类型和后端对不上了"
     )
 
     # 真正做判断的那一处也要认同一个词。类型对了而比较写错,tsc 一样是绿的
     client_ts = _fe("api/client.ts")
-    assert "mode === 'session' ? 'session' : 'token'" in client_ts, (
-        "client.ts 里那次归一化不认 'session' 了 —— 类型声明对不代表比较写对"
+    assert (
+        "mode === 'session' ? 'session' : mode === 'dev' ? 'dev' : 'token'" in client_ts
+    ), "client.ts 里那次归一化少认了一档 —— 类型声明对不代表比较写对"
+
+    # `dev` 与 `token` 必须在**界面上**分开说,否则补这一档等于没补:
+    # 判定分开了而两条路径显示同一句话,和合报成一个值没有区别
+    identity_ts = _fe("hooks/useIdentity.ts")
+    assert "auth_mode === 'token'" in identity_ts, (
+        "useIdentity 没有单独认出「只配 Header 口令」那一档 —— "
+        "而那一档没人接手:needsLogin 要求 sessionAuth,AppLayout 不会跳登录页"
     )
 
 
@@ -396,3 +413,25 @@ def test_the_session_401_copy_sends_people_to_login_not_the_settings_page():
             f"「{stale}」以活代码的身份回到 client.ts 了 —— 那是口令时代的"
             "指路牌,现在指向一个已删除的输入框"
         )
+
+    # 四支各自说自己的话(2026-08-11 评审第 8 条)。**四句都要在**:
+    # 少一句的表现不是报错,是那一档借用了另一档的话 —— 而它们指向的
+    # 下一步动作互不相同(重新登录 / 刷新 / 改服务器配置 / 等一下再看)。
+    #
+    # `token` 那一句尤其不能借:它说的是"整个部署的浏览器都进不来",
+    # 而 Vitest 那一侧**测不到它**(单测环境里 `/health` 不返回,
+    # authMode 停在 `unknown`)。这里是它唯一的守卫。
+    for mode, phrase in (
+        ("session", "请重新登录"),
+        ("dev", "免登录的开发模式"),
+        ("token", "浏览器无法用它登录"),
+        ("unknown", "请刷新本页重新登录"),
+    ):
+        assert phrase in live, (
+            f"401 文案里 `{mode}` 那一支的话没了(缺「{phrase}」)—— "
+            "那一档会借用另一档的话,而两者指向的动作不同"
+        )
+    assert "let authMode: AuthMode = 'unknown'" in live, (
+        "authMode 的默认值不是 `unknown` 了 —— 拿三种真模式里的任何一种当默认,"
+        "都会让 `/health` 还没回来时的 401 对部署配置下一个没有依据的结论"
+    )

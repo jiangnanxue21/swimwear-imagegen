@@ -126,9 +126,14 @@ body { background: var(--brand-canvas, #F6F7F8); -webkit-font-smoothing: antiali
 /* 工作台:图片集编排行。拖动中的那一行降透明度,落点显示上边界线。
    缩略图从 56px 提到 96px(theme.ts 的 imageTile.compact):56px 下拖拽排序时
    看不清自己在排什么,而排序的依据正是画面内容(哪张当主图、正面在前还是细节在前)。 */
+/* 2026-08-11 评审:多了「角度」下拉与「通用」勾选之后一行放不下六个控件了。
+   `flex-wrap` 而不是把控件缩窄 —— 缩窄的那一版在 1280px 笔记本上把角色名
+   截成了两个字,而"正面图 / 详情图"这类判断恰恰要认得出全名。 */
 .imageset-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+  row-gap: 8px;
   align-items: center;
   padding: 8px;
   border: 1px solid var(--brand-line, #E7EAEC);
