@@ -1,3 +1,141 @@
+# 2026-08-15 a51 交接:建档的四类失败提前到"下一步",SPU 停用补上一个到不了的状态
+
+> 决策记在 `docs/DECISIONS.md` §3.77。下方 a48 交接紧接着,保留为历史记录。
+
+## 这一轮回答的是两个提问,而两个的答案都不是提问者以为的那个
+
+**问一:「新建商品款式的颜色编码应该是下拉的吧,不然会建档没成功」**
+
+失败是真的,归因不是。`variant_code` 不能做成闭集下拉:它是 SPU 内的稳定标识,
+而且已经拼进了每一行 SKU 的编码里(`SW-001-BLK-S`),那个码印在样品袋和供应商单据上
+—— 闭集下拉等于要求运营改掉已经在用的编码。而且注册表里对颜色有明确决定
+(`registry.primary_color`:「颜色不用枚举:平台的颜色词表各不相同」)。
+
+真正的病灶是**校验的时机与位置**,三处:
+
+    一  第二步的 `coloursReady` 只挡了空值,字符集/重复/行数全部等到第三步提交才炸
+    二  后端**早就**点名了是哪一行(`_api_loc()` 把 `variant_codes[1]` 翻成
+        `color_variants[1].variant_code`,那个函数的 docstring 里记着上一版翻错时
+        的表现),而前端把结构丢在了 `describeError` 的字符串拼接里
+    三  那条 Alert 写着「上面的提示里有具体原因」—— 而"上面的提示"是一条会自己
+        消失的 toast。**一句页面自己做不到的话**
+
+**问二:「不管 SKU SPU 都要支持可删除可修改吧」**
+
+方向对,而「删除」这个词在这套系统里要换成两个词,并且**一半已经有了**:
+SKU 层的改(`PATCH /products/{id}`)与"删"(`archive`/`restore`)都在,工作台里也接了线。
+缺的是 SPU 层:`SpuStatus.DISABLED` 从落枚举那天就在、注释写着「停掉了。**不删**」,
+而全仓没有任何一条路径迁得到它;`spusApi` 的四个写方法**全树零调用点**。
+
+## 改了什么
+
+    backend/app/listings/sku_matrix.py     抽出 normalize_variant_codes()(expand 改调它)
+                                           新增 code_rules() —— 每一项都从常量取
+    backend/app/schemas/spu.py             SpuPreviewIn/Out、PlannedSkuOut、CodeRulesOut、
+                                           SpuDisableIn、code_rules_out();SpuOut 补 notes
+    backend/app/services/product_service.py  _live_listings 拆出公开的 live_listings_for()
+    backend/app/services/spu_service.py    preview_spu / disable_spu / restore_spu /
+                                           _assert_open_for_building / _visible
+    backend/app/api/spus.py                +4 端点,GET /spus 加 include_disabled
+    backend/app/api/action_gate.py         三个新写端点进 UNGATED,各带理由
+    frontend/src/api/client.ts             fieldProblems() —— 保住 loc 的结构
+    frontend/src/hooks/useWriteError.ts    可选的 onFields
+    frontend/src/api/spus.ts               codeRules / preview / disable / restore
+    frontend/src/pages/SpuCreatePage.tsx   三步各试算一次、行级高亮、跳回第二步、
+                                           Alert 自己带原因、失焦归一化、真 SKU 列表
+    frontend/src/pages/SpuDetailPage.tsx   基本信息编辑 / 颜色行内编辑 / 加颜色 /
+                                           停用恢复,全部带 expected_version
+    backend/tests/pure/test_a51_...py      32 条
+    frontend/tests/unit/spu-preview.test.ts  9 条
+    backend/tools/mutate_a51.py            11 条变异
+    docs/DECISIONS.md §3.77
+
+## 三个刻意做成这样、下一个人最可能改错的地方
+
+**试算失败走 422,与建档同一条 `_translate()` 路径。** 不做 `{ok:false,problems:[]}`
+—— 同一件事两种说法,运营会以为是两个问题(AC-05 那条注释里的同一句)。
+好处是 `loc` 逐字相同,前端一套高亮两处都能用。
+
+**`sku_count` 可空、`code_taken` 是标志位。** 前者退化成 0 会被读成"这次一行都不产生";
+后者做成 422 的话,`SW-0` 打到一半就红一次,运营会先学会忽略它。
+
+**停用不连带归档底下的 SKU。** 归档一行有它自己的闸、理由和审计记录;一个按钮背后
+迁移十几行的话,那十几条审计记录的理由会全是同一句,而其中某一行可能正卡在平台驳回
+回流上。停用的语义窄而清楚:不再接受新的颜色与 SKU,并从建档列表里消失。
+
+## 变异验红:11 条,第一遍**三条没红**,而其中两条是我自己的守卫在说假话
+
+这一段比上面那一段值钱。
+
+    A  常量抄成字面量(MAX_VARIANT_CODE -> 16)   第一遍**没红** —— 守卫比的是值,
+                                                  而两者的值恰好相等。值证明不了出处。
+                                                  改成 AST:返回里不许有裸 Constant
+    E  停用绕过平台闸(整句换成 live = [])       第一遍**没红** —— 正向断言命中的是
+                                                  同一个函数 docstring 里的那串字。
+                                                  audit_source_guards 只管反向断言
+    F  停用中的 SPU 又能长颜色                    第一遍**锚点 0 命中**,变异根本没做。
+                                                  行尾按整文件猜一种,而 spu_service.py
+                                                  是混合的 —— a48 那次 sed 翻车的变体
+    B  字符集不排序                               变红
+    C  code_taken 回常量 False                    变红
+    D  sku_count 退化成 0                         变红
+    G  新写端点没进闸表                           变红
+    H  useWriteError 去掉 onFields                变红
+    I  前端自己乘出 SKU 总数                      变红
+    J  expected_version 写死                      变红
+    K  按钮改叫「删除」                           变红
+
+修完之后 11/11 全部按预期变红。三条结论:**反向断言要吃去注释的源码,正向断言也要**;
+比值比不出出处;混合行尾的树上锚点必须两种形式都试。
+
+## 门禁(这台机器联网,依赖装得上,所以下面这些是**真跑过**的)
+
+                              基线                    改后
+    纯测试                    2843/2843, 12 跳过      2903/2903, 0 失败
+    pytest -m "not requires_db"  —                    2996 passed, 327 skipped
+    ruff check app tests      通过                    通过
+    lint-imports              3 kept                  3 kept, 0 broken
+    audit-guards              663                     679,窗口封闭
+    audit-doc-refs            全部指得到              全部指得到
+    audit-columns             553 列                  553 列
+    verify-imports            501                     501
+    verify-sample-data        10/10                   10/10
+    audit-anchors             565/565(33 份)         同上 + mutate_a51.py
+    前端 syntax-check         122/122                 123/123
+    前端 typecheck / lint     通过                    通过
+    前端 Vitest               141                     150(+9)
+    mutate_a51                —                       11/11 变红
+
+## 没做的,和为什么 —— 这一节比上面那一节重要
+
+**真库那一半一次都没跑。** 本机无 PostgreSQL,而按仓库约定真库验证要用户明确触发。
+以下四条只有读源码的守卫,没有行为覆盖,**要在有库的机器上补**:
+
+    停用的平台闸真的拦得住      要 channel_listings 里有一行非终态
+    row_version 进位与 409      两个并发 PATCH,后到的那个要拿到 ConcurrentTransition
+    include_disabled 的分页     停用几个之后翻到最后一页,不能是空的
+    _assert_open_for_building   停用后 add_color_variant 要 409
+
+建议命令:`make test`(容器内)或本机起 PG 后 `pytest -m requires_db`。
+
+**Playwright 一条没跑**,与既有交接同一条(容器里下不了浏览器)。建档三步的
+试算交互、详情页的编辑与停用,浏览器里**一次都没点过**。
+
+**颜色编码的 AutoComplete 建议没做。** 方案里排在 P3:建议项来自"历史用过的
+`variant_code`",要一个新端点 + 一次聚合查询。今天填 BLK 仍然要手打三个字母。
+不做它是取舍不是遗漏 —— 前面四条把"填错了不知道"变成了"当场知道",而"少打两个字母"
+是另一个量级的收益。
+
+**颜色变体仍然不能删。** 停用一个颜色走 `sellable_status`(PAUSED / DISABLED,
+两者语义不同,枚举注释里写了为什么不合并)。真要删的话正确形状是
+"有任何下游引用就 409 并点名",而那个判断本身要一次聚合查询 —— 单独一轮。
+
+**`GET /spus` 的 `include_disabled` 前端没有对应的勾选框。** 那一页(SPU 列表)
+今天没有筛选区,加一个勾要先给它一套 `useUrlFilters`,而 GAP-033 的最后两页
+本来就欠着同一件事。参数在接口上是活的,界面上还没有。
+
+---
+
 # 2026-08-11 a48 交接:a47 自审复核 —— 交付的树跑不过前端第一道门禁
 
 > 决策记在 `docs/DECISIONS.md` §3.73。下方 a46-phase6 交接紧接着,保留为历史记录。

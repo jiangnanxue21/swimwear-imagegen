@@ -70,6 +70,8 @@ export interface Spu {
   base_category: string
   supplier_ref: string | null
   status: string
+  /** 建档备注。出参里有它,编辑表单才不是在覆盖 */
+  notes: string | null
   created_by: string
   created_at: string
   updated_at: string
@@ -111,12 +113,80 @@ export interface SpuPatch {
   notes?: string | null
 }
 
+/**
+ * 编码规则。**全部由后端下发,前端一个数字都不内置**(硬规则 4)。
+ *
+ * 与尺码模板同一条道理:内置一份的话,改一次上限要改两个仓库,而漏改的
+ * 那一侧不报错 —— 它只会安静地按旧数字提示,然后运营照着提示填,被后端拒。
+ *
+ * 它**不是校验器**。前端拿它写提示文案、拿 `normalizes_to_uppercase`
+ * 在失焦时做与后端同一个归一化;判定走 `preview()`,那条打的是
+ * `listings/sku_matrix` 本身。
+ */
+export interface CodeRules {
+  separator: string
+  allowed_charset: string
+  spu_code_allows_separator: boolean
+  /** 后端 `normalize_code()` 会去首尾空白并转大写。**不含**"删掉非法字符" */
+  normalizes_to_uppercase: boolean
+  max_spu_code: number
+  max_variant_code: number
+  max_size_code: number
+  max_variants_per_spu: number
+  max_skus_per_expansion: number
+}
+
+/** 试算出来的一行。**还不存在于库里** */
+export interface PlannedSku {
+  sku: string
+  variant_code: string
+  size: string
+  size_group: string
+}
+
+export interface SpuPreview {
+  spu_code: string
+  variant_codes: string[]
+  size_template: string | null
+  sizes: string[]
+  skus: PlannedSku[]
+  /** 没给尺码模板时是 `null`,**不是 0** —— 0 会被读成"这次建档一行都不产生" */
+  sku_count: number | null
+  /** 这个编码已经被占了。是标志位不是错误(边打字边试算,不该红) */
+  code_taken: boolean
+}
+
 export const spusApi = {
   sizeTemplates: async () =>
     (await apiClient.get<SizeTemplate[]>('/spus/size-templates')).data,
 
-  list: async (params: { page?: number; page_size?: number } = {}) =>
-    (await apiClient.get<Page<Spu>>('/spus', { params })).data,
+  /**
+   * 编码规则。`staleTime` 由调用方决定 —— 它是常量级数据,一次会话拉一次够了。
+   */
+  codeRules: async () => (await apiClient.get<CodeRules>('/spus/code-rules')).data,
+
+  /**
+   * 建档试算。**不写库,不要 `Idempotency-Key`。**
+   *
+   * 它补的是这一段:编码字符集、重复颜色、行数上限、编码已存在这四类失败,
+   * 在此之前**全部**只在三步走完点「建档」时才报得出来 —— 而错在第二步的
+   * 输入框上。
+   *
+   * 非法入参回 **422,与建档同一条错误路径**,所以 `loc` 逐字相同,
+   * 一套高亮代码两处都能用(见 `client.fieldProblems`)。
+   *
+   * `size_template` 可以不给:第二步还没选模板,那时只校验颜色那一段,
+   * `sku_count` 回 `null`。
+   */
+  preview: async (payload: {
+    spu_code: string
+    color_variants: ColorVariantDraft[]
+    size_template?: string | null
+  }) => (await apiClient.post<SpuPreview>('/spus/preview', payload)).data,
+
+  list: async (
+    params: { page?: number; page_size?: number; include_disabled?: boolean } = {},
+  ) => (await apiClient.get<Page<Spu>>('/spus', { params })).data,
 
   get: async (id: string) => (await apiClient.get<SpuDetail>(`/spus/${id}`)).data,
 
@@ -144,6 +214,18 @@ export const spusApi = {
 
   update: async (id: string, payload: SpuPatch) =>
     (await apiClient.patch<SpuDetail>(`/spus/${id}`, payload)).data,
+
+  /**
+   * 停用一个款。**这是本系统里「删除 SPU」的全部含义** ——
+   * 没有 `DELETE /spus/{id}`,理由在后端 `spu_service.disable_spu` 里。
+   *
+   * 理由必填(进审计)。恢复不要理由:那是撤销,这是决定。
+   */
+  disable: async (id: string, reason: string) =>
+    (await apiClient.post<SpuDetail>(`/spus/${id}/disable`, { reason })).data,
+
+  restore: async (id: string) =>
+    (await apiClient.post<SpuDetail>(`/spus/${id}/restore`)).data,
 
   addColorVariant: async (
     id: string,

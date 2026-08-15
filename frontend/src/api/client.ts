@@ -656,3 +656,37 @@ export function readWriteError(err: unknown): string {
 export function isResultUnknown(err: unknown): boolean {
   return describeError(err, 'write').outcome === 'UNKNOWN'
 }
+
+/** 一条字段级校验明细。`loc` 与后端 `FieldProblem.loc` 逐字相同 */
+export interface FieldProblem {
+  loc: string
+  msg: string
+}
+
+/**
+ * 字段级校验明细,**保留结构**。
+ *
+ * ## 为什么要有这个函数
+ *
+ * `describeError` 早就把 `fields` 读出来了,但它当场拍成了
+ * `` `${loc}: ${msg}` `` 字符串数组 —— 那份是给 `ErrorNotice` 的技术详情
+ * 折叠面板看的,一行一句就够。
+ *
+ * 而后端为 `loc` 付过一次真金白银的代价:`spu_service._api_loc()` 专门把
+ * 纯层的 `variant_codes[1]` 翻成 `color_variants[1].variant_code`,
+ * 那个函数的 docstring 里还记着上一版翻错时的表现(「前端高亮不到任何一行」)。
+ * 翻它的**唯一**理由就是让表单能定位到具体那一行,而前端把结构丢在了
+ * 字符串拼接里 —— 后端付了钱,前端没接。
+ *
+ * 拼过的字符串再解析回来是不行的:`msg` 里本来就可能含冒号。
+ *
+ * 拿不到时回空数组,不是 null:调用方一律 `.filter()` / `.find()`,
+ * 少一次判空就少一次漏判。
+ */
+export function fieldProblems(err: unknown): FieldProblem[] {
+  if (!axios.isAxiosError<ApiErrorBody>(err)) return []
+  return (err.response?.data?.error?.fields ?? []).map((f) => ({
+    loc: String(f.loc ?? ''),
+    msg: String(f.msg ?? ''),
+  }))
+}

@@ -439,6 +439,12 @@ _READ_ONLY_WRITE_METHOD_ENDPOINTS = {
     # string)—— 与 `preview_import` 完全同一个理由。同样地,它一处会话写
     # 都不许有,由下面那条反向用例钉着。
     ("generation_plans", "preview_activation"),
+    # 建档试算(a51)。它拿着 session —— 要查"这个 SPU 编码是不是已经被占了" ——
+    # 所以"不写"这件事在这里**尤其**需要被钉住:一个 `session.add()` 在这个
+    # 函数里是完全能编译过的。同样一处会话写都不许有,由下面那条反向用例钉着。
+    #
+    # POST 的理由与上面两条逐字相同:入参是一整张颜色表,塞不进 query string
+    ("spus", "preview_spu"),
 }
 
 #: 允许在 GET 里提交的端点。**目前只有一个,而且它写的不是业务状态。**

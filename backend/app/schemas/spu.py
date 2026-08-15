@@ -27,6 +27,7 @@ from app.listings.sku_matrix import (
     MAX_VARIANT_CODE,
     MAX_VARIANTS_PER_SPU,
     SIZE_TEMPLATES,
+    code_rules,
 )
 
 
@@ -60,6 +61,91 @@ class SpuCreate(BaseModel):
     #: 尺码模板名。取值必须是 `sku_matrix.SIZE_TEMPLATES` 的键 ——
     #: 校验在服务层(`sizes_of()` 会点名可选项),这里只保证长度
     size_template: str = Field(..., min_length=1, max_length=32)
+
+
+class SpuPreviewIn(BaseModel):
+    """建档试算的入参。**是 `SpuCreate` 的一个子集,不是它的兄弟。**
+
+    只留下会影响展开结果的三项。受众、内部名称、供应商号一个都不要 ——
+    它们不参与 `expand()`,收进来只会让前端以为"试算过了就能建成"。
+
+    `size_template` 在这里**可空**,而在 `SpuCreate` 里必填。理由是表单第二步:
+    那一步颜色已经填完、模板还没选,而颜色码合不合法此刻就该有答案。
+    空着时试算只跑 `normalize_variant_codes()`(与 `expand()` 内部同一个函数),
+    答得出编码字符集、重复、数量,答不出行数上限 —— 后者要两个数才算得出,
+    所以出参里的 `sku_count` 那时是 `null`,不是 0。
+
+    上限与 `SpuCreate` 用同一组常量:试算比建档宽松一点点的话,那点差额里
+    的输入会在试算时说"没问题"、提交时被拒,而这正是试算要消灭的东西。
+    """
+
+    spu_code: str = Field(..., min_length=1, max_length=MAX_SPU_CODE)
+    color_variants: list[ColorVariantCreate] = Field(
+        default_factory=list, max_length=MAX_VARIANTS_PER_SPU
+    )
+    size_template: str | None = Field(None, min_length=1, max_length=32)
+
+
+class PlannedSkuOut(BaseModel):
+    """试算出来的一行。**不是数据库行** —— 它还没存在。"""
+
+    sku: str
+    variant_code: str
+    size: str
+    size_group: str
+
+
+class SpuPreviewOut(BaseModel):
+    """试算结果。
+
+    `sku_count` 可空:没给尺码模板时算不出行数,那时它是 `null`。
+    **不要退化成 0** —— 界面上 0 和"算不出"长得一样,而 0 会被读成
+    "这次建档一行 SKU 都不会产生"。
+    """
+
+    spu_code: str
+    variant_codes: list[str] = Field(default_factory=list)
+    size_template: str | None = None
+    sizes: list[str] = Field(default_factory=list)
+    skus: list[PlannedSkuOut] = Field(default_factory=list)
+    sku_count: int | None = None
+    #: 这个编码已经被占了。**是标志位不是错误** —— 试算是运营边打字边跑的,
+    #: 把它做成 422 的话,`SW-0` 打到一半就会红一次,而那时他还没打完
+    code_taken: bool = False
+
+
+class CodeRulesOut(BaseModel):
+    """编码规则。给建档表单显示提示与做输入归一化用。
+
+    存在的理由与 `SizeTemplateOut` 逐字相同(硬规则 4):前端内置一份的话,
+    改一次上限要改两个仓库,而漏改的那一侧不报错 —— 它只会安静地按旧数字
+    提示,然后运营照着提示填,被后端拒。
+
+    **它不是校验器。** 前端拿它写提示文案、拿 `normalizes_to_uppercase`
+    在失焦时做同一个归一化;判定仍然只有 `listings/sku_matrix` 一处,
+    走试算端点问。
+    """
+
+    separator: str
+    allowed_charset: str
+    spu_code_allows_separator: bool
+    normalizes_to_uppercase: bool
+    max_spu_code: int
+    max_variant_code: int
+    max_size_code: int
+    max_variants_per_spu: int
+    max_skus_per_expansion: int
+
+
+class SpuDisableIn(BaseModel):
+    """停用请求体。
+
+    理由**必填**,判据与 `ProductArchiveIn` 逐字相同:停用是这套系统里
+    最接近「删除一个款」的动作,而它的痕迹只留在审计表里 —— 一条没有理由的
+    停用记录,在三个月后复盘「这个款当初为什么不做了」时等于没有。
+    """
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class SpuPatch(BaseModel):
@@ -133,6 +219,10 @@ class SpuOut(BaseModel):
     base_category: str
     supplier_ref: str | None = None
     status: SpuStatus
+    #: 建档备注。**出参里必须有它,`SpuPatch` 才编辑得了它** ——
+    #: 读不到就改,那不是编辑是覆盖:表单打开时是空的,保存一次就把
+    #: 别人写的备注抹掉了,而没有任何地方会报错
+    notes: str | None = None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -161,3 +251,14 @@ def size_template_options(labels: dict[str, str]) -> list[SizeTemplateOut]:
         SizeTemplateOut(name=name, label=labels.get(name, name), sizes=list(sizes))
         for name, sizes in SIZE_TEMPLATES.items()
     ]
+
+
+def code_rules_out() -> CodeRulesOut:
+    """`sku_matrix.code_rules()` -> 出参。**这里不许出现字面量。**
+
+    `model_validate` 而不是逐个字段抄:抄的话新增一条规则要改两个地方,
+    而漏改的那一侧不报错 —— 它只会少报一条规则,然后前端少提示一句。
+    多出来的键(`size_templates`)由 pydantic 默认忽略,那一份走
+    `/spus/size-templates`,不在这个出参里重复一遍。
+    """
+    return CodeRulesOut.model_validate(code_rules())

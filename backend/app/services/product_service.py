@@ -1,6 +1,7 @@
 """商品业务逻辑。所有写操作都伴随审计记录。"""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
@@ -477,16 +478,35 @@ def update_product(
 _PUBLISH_SETTLED: frozenset[str] = PUBLISH_TERMINAL_STATES | {PublishStatus.DELISTED.value}
 
 
-def _live_listings(session: Session, product_id: UUID) -> list[ChannelListing]:
-    """这件商品在平台上还挂着的发布记录。"""
+def live_listings_for(
+    session: Session, product_ids: Sequence[UUID]
+) -> list[ChannelListing]:
+    """这批商品在平台上还挂着的发布记录。**「还挂着」只有这一个定义。**
+
+    公开出去是因为 SPU 停用要问同一个问题(`spu_service.disable_spu`):
+    这个款底下有没有 SKU 还在平台上。在那边自己写一遍 `notin_(...)` 的话,
+    `_PUBLISH_SETTLED` 就有了两个读者而只有一个会跟着改 —— 而它已经被
+    改过一次(DELISTED 是后补进去的,见上面那段注释)。
+
+    一次 `IN` 查询,不按行循环。空列表直接回空:`IN ()` 在部分方言下
+    是语法错误,而这个函数的调用方拿到的常常是"这个 SPU 底下一行都没有"。
+    """
+    ids = list(product_ids)
+    if not ids:
+        return []
     return list(
         session.scalars(
             select(ChannelListing).where(
-                ChannelListing.product_id == product_id,
+                ChannelListing.product_id.in_(ids),
                 ChannelListing.status.notin_(sorted(_PUBLISH_SETTLED)),
             )
         )
     )
+
+
+def _live_listings(session: Session, product_id: UUID) -> list[ChannelListing]:
+    """这件商品在平台上还挂着的发布记录。"""
+    return live_listings_for(session, [product_id])
 
 
 def archive_product(

@@ -226,6 +226,83 @@ def sizes_of(template: str) -> tuple[str, ...]:
     return sizes
 
 
+def normalize_variant_codes(
+    variant_codes: list[str] | tuple[str, ...],
+) -> tuple[str, ...]:
+    """一组颜色码归一化 + 查重 + 数量上限。**这一段从 `expand()` 里抽出来的。**
+
+    抽它的理由是建档表单第二步:那一步还没选尺码模板,而运营已经把颜色填完了。
+    在此之前唯一能校验颜色码的入口是 `expand()`,而它**必须**有模板才跑得动 ——
+    于是"编码里有横线"这类错只能等到第三步提交时才报,人却停在第三步,
+    错在第二步的输入框上。
+
+    **抽出来而不是在试算端点里抄一份**:抄一份的下场是两个版本,而先过期的
+    那一个会让一个合法输入在界面上被拒(`schemas/spu.py` 顶部记着同类事故)。
+    `expand()` 现在调它,所以两条路径共用同一段判定,共用同一句错误文案,
+    连 `field` 的下标口径都是同一份。
+
+    `field` 仍然按**本模块自己的形参**命名(`variant_codes[1]`)——
+    翻成接口字段名是 `spu_service._api_loc()` 的事,那张表是全仓唯一
+    知道两边对应关系的地方。
+    """
+    if not variant_codes:
+        raise SkuPlanError("variant_codes", "至少要有一个颜色变体")
+    if len(variant_codes) > MAX_VARIANTS_PER_SPU:
+        raise SkuPlanError(
+            "variant_codes",
+            f"一个 SPU 最多 {MAX_VARIANTS_PER_SPU} 个颜色变体,当前 {len(variant_codes)}",
+        )
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(variant_codes):
+        code = normalize_code(raw, field=f"variant_codes[{index}]", max_length=MAX_VARIANT_CODE)
+        if code in seen:
+            raise SkuPlanError(
+                f"variant_codes[{index}]",
+                f"颜色编码 {code} 在同一个 SPU 里重复了 —— 它是 SPU 内的稳定标识,必须唯一",
+            )
+        seen.add(code)
+        normalized.append(code)
+    return tuple(normalized)
+
+
+def code_rules() -> dict[str, object]:
+    """把本模块的规则原样报出去,给建档表单显示提示与做输入归一化用。
+
+    ## 为什么是接口而不是让前端内置一份
+
+    与 `SIZE_TEMPLATES` 走 `GET /spus/size-templates` 是同一条(硬规则 4):
+    前端内置一份的话,改一次上限要改两个仓库,而漏改的那一侧**不报错** ——
+    它只会安静地按旧数字提示,然后运营照着提示填,被后端拒。
+
+    ## 这里不许出现字面量
+
+    每一项都从上面的常量取。写死一个 `16` 在这里,它就成了第二个版本 ——
+    而这个模块存在的全部理由就是"全仓唯一一份定义"。
+    `test_a51_...::test_the_reported_rules_are_the_constants_themselves` 逐项
+    比对报出去的值与常量本身,改了常量却忘了这里(或反过来)会当场红。
+
+    `normalizes_to_uppercase` 报的是 `normalize_code()` 的既有行为(去首尾空白 +
+    转大写),前端据此在失焦时做**同一个归一化**。它**不含**"删掉非法字符"——
+    那一条 `normalize_code` 刻意没做(悄悄把 `BLK-1` 变成 `BLK1` 之后,
+    运营看到的 SKU 和他填的不一样,而他不会收到任何提示)。
+    """
+    return {
+        "separator": SEPARATOR,
+        # 排序后拼成一串:集合的迭代顺序不稳定,而这个值会被显示在界面上,
+        # 每次刷新换一个顺序会让人以为规则变了
+        "allowed_charset": "".join(sorted(_ALLOWED)),
+        "spu_code_allows_separator": SEPARATOR in _ALLOWED_IN_SPU_CODE,
+        "normalizes_to_uppercase": True,
+        "max_spu_code": MAX_SPU_CODE,
+        "max_variant_code": MAX_VARIANT_CODE,
+        "max_size_code": MAX_SIZE_CODE,
+        "max_variants_per_spu": MAX_VARIANTS_PER_SPU,
+        "max_skus_per_expansion": MAX_SKUS_PER_EXPANSION,
+        "size_templates": {name: list(sizes) for name, sizes in SIZE_TEMPLATES.items()},
+    }
+
+
 def expand(
     *,
     spu_code: str,
@@ -241,33 +318,21 @@ def expand(
 
     `UNIQUE(spu_id, variant_code)` 是最终裁判,但等到 flush 才报错的话,
     错误信息是一句数据库约束名,而运营填的是第 2 个还是第 5 个颜色重复了
-    没人知道。这里报,能点名。
+    没人知道。这里报,能点名。判定本身住在 `normalize_variant_codes()`,
+    建档试算端点调的是同一个函数(见那边的文档)。
     """
     spu = normalize_spu_code(spu_code)
     sizes = sizes_of(size_template)
     template_name = (size_template or "").strip().upper()
 
-    if not variant_codes:
-        raise SkuPlanError("variant_codes", "至少要有一个颜色变体")
-    if len(variant_codes) > MAX_VARIANTS_PER_SPU:
-        raise SkuPlanError(
-            "variant_codes",
-            f"一个 SPU 最多 {MAX_VARIANTS_PER_SPU} 个颜色变体,当前 {len(variant_codes)}",
-        )
+    normalized = list(normalize_variant_codes(variant_codes))
+    # 这一条**从颜色那三条的上面挪到了下面**。可观察的差别只有「模板超长
+    # 且颜色也非法」时先报哪一条,而模板是本模块的常量、这个分支
+    # 今天一次都到不了(所以它带着 pragma)。挪它是为了让颜色那三条能整段
+    # 抽出去给试算用 —— 拆开保留原顺序的话,抽出来的会是两截,而两截就是
+    # 两个调用点,下一个人只接其中一截的概率不低
     if len(sizes) > MAX_SIZES_PER_TEMPLATE:  # pragma: no cover - 模板是常量,守的是将来加模板
         raise SkuPlanError("size_template", f"尺码模板最多 {MAX_SIZES_PER_TEMPLATE} 个尺码")
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(variant_codes):
-        code = normalize_code(raw, field=f"variant_codes[{index}]", max_length=MAX_VARIANT_CODE)
-        if code in seen:
-            raise SkuPlanError(
-                f"variant_codes[{index}]",
-                f"颜色编码 {code} 在同一个 SPU 里重复了 —— 它是 SPU 内的稳定标识,必须唯一",
-            )
-        seen.add(code)
-        normalized.append(code)
 
     total = len(normalized) * len(sizes)
     if total > MAX_SKUS_PER_EXPANSION:

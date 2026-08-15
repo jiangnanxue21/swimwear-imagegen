@@ -136,6 +136,10 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     # 写进 GATED 的表现是「越是想放弃的商品越放弃不掉」。
     "products:archive_product": "归档把商品移出流程,不是往前走一步",
     "products:restore_product": "恢复是撤销归档,往回走",
+    # 停用一个款和归档一件商品是同一类动作,只是作用域大一层。同样**不能**
+    # 过闸:一个卡在第一步、什么前置都没满足的款,恰恰是最需要能被停用的那一个
+    "spus:disable_spu": "停用把整个款移出建档动线,不是往前走一步",
+    "spus:restore_spu": "恢复是撤销停用,往回走",
     # ---- 素材步是自阻断步(`wizard.SELF_BLOCKING_STEPS`),闸恒放行 ----
     #
     # 这几条**不是**"不该过闸",是"过了也永远放行"。写进 GATED 的话,
@@ -155,6 +159,7 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "workbench_batch:commit_import": "建档动作本身(批量导入落库)",
     "products:update_product": "改的是商品自身字段(受众、品类),不是流程前进",
     # ---- 只读预览。它们是 POST 只因为入参放不进 query string ----
+    "spus:preview_spu": "建档试算:只读,不写库。POST 只因为颜色表放不进 query string",
     "generation_plans:preview_activation": "只读预览(§7.5),算代价但不改任何状态",
     "prompts:preview_prompt": "只读预览,渲染一次提示词但不落库",
     "providers:test_provider": "连通性自检,不碰商品",

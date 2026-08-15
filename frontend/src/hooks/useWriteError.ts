@@ -34,7 +34,8 @@
  */
 import { useCallback } from 'react'
 import { App } from 'antd'
-import { isResultUnknown, readWriteError } from '../api/client'
+import { fieldProblems, isResultUnknown, readWriteError } from '../api/client'
+import type { FieldProblem } from '../api/client'
 
 /**
  * 显式声明"这一处没有可刷新的状态"。
@@ -43,7 +44,29 @@ import { isResultUnknown, readWriteError } from '../api/client'
  */
 export const noRefresh = (): void => {}
 
-export function useWriteError(onUnknown: () => void): (err: unknown) => void {
+export function useWriteError(
+  onUnknown: () => void,
+  /**
+   * 字段级校验明细的落点。**这一个是可选的,和 `onUnknown` 不同。**
+   *
+   * 两者可选性相反是有理由的,不是不一致:
+   *
+   *     onUnknown   每个写请求都可能"结果未知",而那时唯一正确的下一步
+   *                 ("看一眼现在是什么状态")每一页都不同 —— 给不出默认值,
+   *                 所以强制传,漏传要变成一次显式的 `noRefresh`
+   *     onFields    只有**带表单**的写请求才有字段可高亮。多数调用点
+   *                 (批准一版图、建一个任务、归档一件商品)根本没有输入框,
+   *                 强制它们传一个空函数只会得到 20 处噪音
+   *
+   * 传了它的页面负责把 `loc` 映射到自己的输入控件。`loc` 的取值由后端
+   * 决定(`spu_service._api_loc()` 那张表),前端不许自己拼一份对应关系 ——
+   * 拼了就是第二个版本,而先过期的那一份会安静地高亮不到任何一行。
+   *
+   * **它不替代那条 message。** 明细高亮之外仍然要有一句话,否则
+   * 折叠在第二步的那一行红框在第三步是看不见的。
+   */
+  onFields?: (fields: FieldProblem[]) => void,
+): (err: unknown) => void {
   const { message } = App.useApp()
   return useCallback(
     (err: unknown) => {
@@ -51,7 +74,11 @@ export function useWriteError(onUnknown: () => void): (err: unknown) => void {
       // 结果未知时顺手刷新:多数情况下刷新本身就给出了答案
       // (任务已经在跑、批次已经建了、这一版已经批过了)
       if (isResultUnknown(err)) onUnknown()
+      // 无条件调,哪怕是空数组 —— 页面据此**清掉**上一次的高亮。
+      // 只在有明细时才调的话,一次成功之后的第二次失败(这次没有字段错)
+      // 会留着上一轮的红框,而那些行现在是对的
+      if (onFields) onFields(fieldProblems(err))
     },
-    [message, onUnknown],
+    [message, onUnknown, onFields],
   )
 }

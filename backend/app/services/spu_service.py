@@ -53,7 +53,7 @@ from app.core.logging import get_logger
 from app.listings import sku_matrix
 from app.models.product import Product
 from app.models.spu import ColorVariant, Spu
-from app.services import audit
+from app.services import audit, product_service
 
 logger = get_logger(__name__)
 
@@ -158,6 +158,81 @@ def _reuse_or_conflict(spu: Spu, fingerprint: str) -> Spu:
         code=ErrorCode.DUPLICATE_RESOURCE,
         http_status=409,
     )
+
+
+def preview_spu(session: Session, data: dict[str, Any]) -> dict[str, Any]:
+    """建档试算。**一个字都不写库。**
+
+    ## 它补的是哪一段
+
+    建档表单三步走完才提交,而编码字符集、重复颜色、行数上限、编码已存在
+    这四类失败**全部**只在提交那一刻才报得出来 —— 错在第二步的输入框上,
+    人停在第三步,而第三步那句「建档没成功」底下只写着"规则由后端校验"。
+
+    试算把同一份规则搬到"下一步"上跑一次。它不是第二份校验:
+
+        编码规则   `sku_matrix.normalize_variant_codes` / `normalize_spu_code`
+                   —— 与 `expand()` 内部**同一个函数**
+        行数上限   `sku_matrix.expand()` —— 直接调它,不重算
+        编码占用   `_code_taken()` —— 与 `create_spu` 同一个函数
+
+    也就是说这里没有一条判定是新写的。新写的只有"什么时候问"。
+
+    ## 失败走 422,与建档**同一条错误路径**
+
+    不做成 `{ok: false, problems: [...]}`。理由是 AC-05 那条注释里的同一句:
+    同一件事两种说法,运营会以为是两个问题。走 `_translate()` 之后,
+    试算报的 `loc` 与提交报的 `loc` 逐字相同,前端一套高亮代码两处都能用。
+
+    ## 编码占用是标志位,不是错误
+
+    `code_taken` 回一个布尔。运营是边打字边触发试算的,`SW-0` 打到一半
+    就红一次的话,他会先学会忽略这个提示,然后连真的那次也一起忽略。
+
+    ## 尺码模板可空
+
+    第二步还没选模板。空着时只跑颜色那一段,`sku_count` 回 `null`
+    (**不是 0** —— 0 会被读成"这次建档一行都不产生")。第三步选完模板
+    再试算一次,那一次才答得出行数上限。
+    """
+    spu_code = ""
+    try:
+        spu_code = sku_matrix.normalize_spu_code(data.get("spu_code"))
+        variants_in: list[dict[str, Any]] = list(data.get("color_variants") or [])
+        codes = list(
+            sku_matrix.normalize_variant_codes(
+                [v.get("variant_code", "") for v in variants_in]
+            )
+        )
+        template = (data.get("size_template") or "").strip() or None
+        planned: tuple[sku_matrix.PlannedSku, ...] = ()
+        sizes: list[str] = []
+        if template is not None:
+            planned = sku_matrix.expand(
+                spu_code=spu_code, variant_codes=codes, size_template=template
+            )
+            sizes = list(sku_matrix.sizes_of(template))
+    except sku_matrix.SkuPlanError as exc:
+        raise _translate(exc) from None
+
+    return {
+        "spu_code": spu_code,
+        "variant_codes": codes,
+        "size_template": planned[0].size_group if planned else None,
+        "sizes": sizes,
+        "skus": [
+            {
+                "sku": row.sku,
+                "variant_code": row.variant_code,
+                "size": row.size,
+                "size_group": row.size_group,
+            }
+            for row in planned
+        ],
+        # `None` 而不是 `len(planned)`:没模板时那个 0 是"算不出",不是"零行"
+        "sku_count": len(planned) if template is not None else None,
+        "code_taken": _code_taken(session, spu_code),
+    }
 
 
 def create_spu(
@@ -375,7 +450,23 @@ def create_spu(
     return spu
 
 
-def list_spus(session: Session, *, limit: int = 50, offset: int = 0) -> list[Spu]:
+def _visible(stmt, include_disabled: bool):
+    """列表默认不显示停用的款。**只有这一处定义"默认看得见什么"。**
+
+    列表与计数各写一遍 `where` 的下场是分页错位:总数把停用的算进去、
+    这一页没有,于是最后一页是空的,而空态写着"还没有商品"。
+    `api/workbench.py` 的归档过滤踩过同一个形状。
+    """
+    return stmt if include_disabled else stmt.where(Spu.status != SpuStatus.DISABLED.value)
+
+
+def list_spus(
+    session: Session,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    include_disabled: bool = False,
+) -> list[Spu]:
     """列表页的一页 SPU。**颜色一起预取。**
 
     `SpuOut` 带 `color_variants`,而那是个默认惰性的 relationship ——
@@ -383,10 +474,14 @@ def list_spus(session: Session, *, limit: int = 50, offset: int = 0) -> list[Spu
     这个端点不在 `tests/pure/test_workbench_query_budget.py` 那条棘轮的
     覆盖范围里(它盯的是 `api.workbench_batch`),所以这里只能靠预取本身
     和 `test_a45_batch13_2_fixes.py` 里那条守卫。
+
+    `include_disabled` 默认 False。**这不改变任何存量行的可见性** ——
+    在停用端点存在之前,`spus.status` 一行都不可能是 DISABLED
+    (全仓没有写入路径),所以默认过滤掉它对既有数据是恒等的。
     """
     return list(
         session.scalars(
-            select(Spu)
+            _visible(select(Spu), include_disabled)
             .options(selectinload(Spu.color_variants))
             .order_by(Spu.created_at.desc())
             .limit(limit)
@@ -395,8 +490,11 @@ def list_spus(session: Session, *, limit: int = 50, offset: int = 0) -> list[Spu
     )
 
 
-def count_spus(session: Session) -> int:
-    return int(session.scalar(select(func.count(Spu.id))) or 0)
+def count_spus(session: Session, *, include_disabled: bool = False) -> int:
+    """总数。**过滤条件必须和 `list_spus` 是同一份**,否则分页会错位。"""
+    return int(
+        session.scalar(_visible(select(func.count(Spu.id)), include_disabled)) or 0
+    )
 
 
 def sku_counts_for(session: Session, spu_ids: list[UUID]) -> dict[UUID, int]:
@@ -466,11 +564,140 @@ def update_spu(
     return spu
 
 
+def disable_spu(session: Session, spu_id: UUID, *, reason: str, actor: str) -> Spu:
+    """停用一个款。**这是本系统里「删除 SPU」的全部含义。**
+
+    ## 为什么不是 DELETE
+
+    与 `product_service.archive_product` 同一笔账,只是更大:一个 SPU 底下
+    挂着颜色变体、若干行 SKU,而每一行 SKU 又被九张表引着。硬删的两个方向
+    都不能接受(RESTRICT 撞 500 / CASCADE 清空整条证据链),而 SPU 这一层
+    还多一条:`SpuStatus.DISABLED` 这个取值**从落枚举那天就在**,注释写着
+    「停掉了。**不删** —— 素材、事实、图片集都挂在它下面」,而在此之前
+    全仓没有任何一条路径迁得到它。一个定义了却到不了的状态,和没有这个
+    状态是一样的。
+
+    ## 它**不**连带归档底下的 SKU
+
+    刻意的。归档一行 SKU 有它自己的闸(平台还挂着就拒)、自己的理由、
+    自己的审计记录;一个按钮背后连带迁移九行的话,那九条审计记录的理由
+    全是同一句,而其中某一行可能正卡在平台侧驳回回流上。
+
+    所以这一层的语义窄而清楚:**这个款不再接受新的颜色与 SKU,并从
+    建档侧的列表里消失**。已经在生产动线上的那些行按它们自己的节奏走完。
+    `add_color_variant` / `create_skus` 会拒绝停用中的 SPU —— 不拒的话
+    "停用"就只是一个标签。
+
+    ## 平台闸
+
+    底下任何一行还挂在平台上就拒绝,并点名是哪几个 SKU 与哪个渠道站点。
+    判据取 `product_service.live_listings_for()` —— **「还挂着」全仓只有
+    那一个定义**,在这里自己写一遍 `notin_(...)` 的话,`_PUBLISH_SETTLED`
+    就有了两个读者而只有一个会跟着改。
+
+    幂等:已经停用的再停一次直接返回,不重复写审计。运营连点两下、
+    或者请求超时后重试,不该拿到一个 409。
+
+    ## 为什么不要 `expected_version`
+
+    与 `archive_product` 同一条:它是**带闸的状态迁移**,不是字段编辑。
+    要版本号的话,一次双击的第二下会撞 409「已被其他人更新」——
+    而那句话在双击这个语境下是假的。字段编辑那一侧(`update_spu`)仍然要。
+    """
+    spu = get_spu(session, spu_id)
+    if spu.status == SpuStatus.DISABLED.value:
+        return spu
+
+    skus = skus_of(session, spu_id)
+    live = product_service.live_listings_for(session, [row.id for row in skus])
+    if live:
+        by_id = {row.id: row for row in skus}
+        where = ", ".join(sorted({f"{r.channel}/{r.site}" for r in live})[:5])
+        which = ", ".join(
+            sorted({by_id[r.product_id].sku for r in live if r.product_id in by_id})[:5]
+        )
+        raise ValidationError(
+            f"这个款底下还有 SKU 挂在平台上({which} @ {where}),先在平台下架再停用",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+            detail={"live_listing_ids": [str(r.id) for r in live]},
+        )
+
+    previous = spu.status
+    spu.status = SpuStatus.DISABLED.value
+    # 版本号照样进一格:详情页上开着的那张编辑表单必须在下一次保存时
+    # 撞 `ConcurrentTransition`,而不是把 status 之外的字段静静写回一个
+    # 已经停用的款上
+    spu.row_version += 1
+    session.flush()
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.UPDATE,
+        entity_type="Spu",
+        entity_id=spu.id,
+        payload={
+            "action": "disable",
+            # 理由进审计而不是新开一列,与归档同一条:低频动作,而「谁、
+            # 什么时候、为什么」这三样审计表本来就答得出来
+            "reason": (reason or "")[:500],
+            "from_status": previous,
+            "spu_code": spu.spu_code,
+            "sku_count": len(skus),
+        },
+    )
+    return spu
+
+
+def restore_spu(session: Session, spu_id: UUID, *, actor: str) -> Spu:
+    """把停用的款放回建档动线。
+
+    回到 `DRAFT` 而不是停用前那一档,判据与 `restore_product` 逐字相同:
+    停用期间上游可能变过,`ACTIVE` 是一句"这个款在做"的断言,而做出这句
+    断言的依据在停用那一刻就停止更新了。回 DRAFT 让它重新走一遍。
+
+    **不要理由。** 恢复是撤销,停用是决定 —— 前者不需要三个月后有人来问。
+    """
+    spu = get_spu(session, spu_id)
+    if spu.status != SpuStatus.DISABLED.value:
+        return spu
+    spu.status = SpuStatus.DRAFT.value
+    spu.row_version += 1
+    session.flush()
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.UPDATE,
+        entity_type="Spu",
+        entity_id=spu.id,
+        payload={"action": "restore", "to_status": spu.status, "spu_code": spu.spu_code},
+    )
+    return spu
+
+
+def _assert_open_for_building(spu: Spu) -> None:
+    """停用中的款不接受新的颜色与 SKU。
+
+    不拒的话「停用」就只是一个标签:界面上写着"这个款不做了",而它照旧
+    长出新的颜色和新的 SKU 行,没有任何地方会报错。
+
+    放在服务层而不是接口层:批量导入(`workbench_batch`)也会落 SKU,
+    而那条路径不经过 `api/spus.py`。
+    """
+    if spu.status == SpuStatus.DISABLED.value:
+        raise ValidationError(
+            f"SPU {spu.spu_code} 已停用,不能再加颜色或 SKU。要继续做这个款,先恢复它",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+
+
 def add_color_variant(
     session: Session, spu_id: UUID, data: dict[str, Any], *, actor: str
 ) -> ColorVariant:
     """给既有 SPU 加颜色，并按明确或既有尺码模板原子铺开 SKU。"""
     spu = get_spu(session, spu_id)
+    _assert_open_for_building(spu)
     existing = skus_of(session, spu_id)
     template = data.get("size_template")
     if template is None:
@@ -575,6 +802,7 @@ def create_skus(
 ) -> list[Product]:
     """在既有颜色下批量补 SKU；整批原子提交，不留下半批残骸。"""
     spu = get_spu(session, spu_id)
+    _assert_open_for_building(spu)
     variants_by_id = {row.id: row for row in spu.color_variants}
     created: list[Product] = []
     seen: set[tuple[UUID, str]] = set()
