@@ -150,6 +150,8 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "generation_plans:preview_activation": "只读预览(§7.5),算代价但不改任何状态",
     "prompts:preview_prompt": "只读预览,渲染一次提示词但不落库",
     "providers:test_provider": "连通性自检,不碰商品",
+    "reviews:test_candidate_evaluation": "评分诊断调用,不覆盖正式分数或候选图状态",
+    "workbench:test_copy_generation": "文案诊断调用,不保存正式文案或推进流程",
     # ---- 生成任务:它的前置在方案与素材上,由 generation 域自己判 ----
     "generation_tasks:create_task": "出图任务的前置由 generation 域判(方案 + 素材)",
     # ---- 平台侧回流:事实录入,不是流程前进 ----

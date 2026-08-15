@@ -96,8 +96,16 @@ def check_images_pass_upload_validation() -> str:
     if not SAMPLE_IMAGES.exists():
         return f"{YELLOW}样例图目录不存在，跳过{RESET}"
 
-    from app.core.enums import AssetType
-    from app.services.upload_validation import validate_upload
+    try:
+        from app.core.enums import AssetType
+        from app.services.upload_validation import validate_upload
+    except ModuleNotFoundError as exc:
+        # gates job 刻意不安装任何 pip 依赖。上传校验以 Pillow 识别
+        # 真实图片格式，所以这一项在零依赖环境里只能如实报告
+        # “没跑”。只豁免 PIL：业务模块自身缺失仍然应该让脚本失败。
+        if exc.name != "PIL":
+            raise
+        return f"{YELLOW}缺 PIL，上传校验没跑{RESET}"
 
     checked = 0
     for path in sorted(SAMPLE_IMAGES.glob("*.jpg")):
@@ -338,7 +346,10 @@ CHECKS = [
     ("样例图内容互不相同", check_images_have_distinct_hashes),
     ("新结构样例过得了建档服务", check_the_new_structure_sample_is_accepted_by_the_real_service),
     ("存在三颜色九 SKU 的 SPU", check_a_three_colour_nine_sku_spu_exists),
-    ("覆盖两个受众且有单色对照", check_the_sample_covers_both_audiences_and_a_single_colour_control),
+    (
+        "覆盖两个受众且有单色对照",
+        check_the_sample_covers_both_audiences_and_a_single_colour_control,
+    ),
     ("每个颜色的样例图齐全", check_every_colour_has_its_sample_images),
     ("各颜色的图内容互不相同", check_colour_images_are_distinct_across_colours),
 ]

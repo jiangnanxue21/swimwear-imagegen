@@ -101,11 +101,28 @@ def _product_with_asset(client, sku: str) -> str:
     return pid
 
 
+def _usable_model_template(client) -> str:
+    rows = client.get(
+        "/api/model-templates", params={"enabled_only": True, "audience": "WOMEN"}
+    )
+    assert rows.status_code == 200, rows.text
+    if rows.json():
+        return rows.json()[0]["id"]
+    response = client.post(
+        "/api/model-templates",
+        files={"file": ("billing-model.jpg", _image(801, 1200), "image/jpeg")},
+        data={"name": "计费回归模特", "audience": "WOMEN"},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
 def _create_task(client, pid, **overrides):
     payload = {
         "product_id": pid,
         "mode": "virtual_try_on",
         "provider": "mock",
+        "model_template_id": _usable_model_template(client),
         "candidate_count": 3,
         **{"provider_params": {"mock_evaluator": {"outcome": "a"}}, **overrides},
     }

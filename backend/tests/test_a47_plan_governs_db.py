@@ -45,6 +45,7 @@ from app.core.enums import (
 from app.core.errors import ValidationError
 from app.models.audit_log import AuditLog
 from app.models.generation_plan import GenerationPlan
+from app.models.model_template import ModelTemplate
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
 from app.models.spu import ColorVariant, Spu
@@ -144,11 +145,30 @@ def _active_plan(session, spu: Spu, **kw) -> GenerationPlan:
     return row
 
 
+def _model_template(session) -> ModelTemplate:
+    file_hash = uuid.uuid4().hex
+    row = ModelTemplate(
+        name="a47 方案回归模特",
+        storage_path=f"uploads/models/{file_hash}.jpg",
+        file_hash=file_hash,
+        mime_type="image/jpeg",
+        width=800,
+        height=1200,
+        audience="WOMEN",
+        enabled=True,
+        license_status="UNVERIFIED",
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
 def _scene(session):
     spu = _spu(session)
     variant = _variant(session, spu, "RED")
     product = _product(session, spu, variant)
-    plan = _active_plan(session, spu)
+    template = _model_template(session)
+    plan = _active_plan(session, spu, model_template_id=template.id)
     return spu, variant, product, plan
 
 
@@ -171,19 +191,15 @@ def test_the_provider_on_the_task_is_the_one_the_plan_names(session):
 
 
 def test_the_model_template_on_the_task_is_the_plan_s(session):
-    """第二条等式。
-
-    方案不指定模板时,调用方那一个仍然生效 —— `plan_overrides` 只对
-    "方案说了话"的字段生效,没说话的不算冲突。
-    """
+    """第二条等式：虚拟试穿的模特由生效方案决定。"""
     _, _, product, plan = _scene(session)
-    assert plan.model_template_id is None
+    assert plan.model_template_id is not None
 
     task, _ = gs.create_task(
         session, product_id=product.id, mode="virtual_try_on", provider="mock"
     )
 
-    assert task.model_template_id is None
+    assert task.model_template_id == plan.model_template_id
 
 
 def test_the_round_covers_exactly_the_angles_the_plan_requires(session):
@@ -307,7 +323,7 @@ def test_override_runs_the_caller_s_parameters_and_records_no_plan(session):
     记着方案而按别的参数跑,正是本轮要修的那个错位的镜像版本 ——
     而且更隐蔽:那一行任务看起来完全正常。
     """
-    _, _, product, _ = _scene(session)
+    _, _, product, plan = _scene(session)
 
     task, _ = gs.create_task(
         session,
@@ -316,6 +332,7 @@ def test_override_runs_the_caller_s_parameters_and_records_no_plan(session):
         provider="mock",
         candidate_count=2,
         prompt="只按我说的来",
+        model_template_id=plan.model_template_id,
         override_plan=True,
     )
 
@@ -331,7 +348,7 @@ def test_override_and_plan_governed_are_two_different_tasks(session):
     合成一个键的话,管理员一次排障会把运营那条正常动线的任务顶掉 ——
     而运营看到的是"提交成功",拿到的是排障参数出的图。
     """
-    _, _, product, _ = _scene(session)
+    _, _, product, plan = _scene(session)
 
     governed, _ = gs.create_task(
         session, product_id=product.id, mode="virtual_try_on", provider="mock"
@@ -342,6 +359,7 @@ def test_override_and_plan_governed_are_two_different_tasks(session):
         mode="virtual_try_on",
         provider="mock",
         candidate_count=3,
+        model_template_id=plan.model_template_id,
         override_plan=True,
     )
 
@@ -358,8 +376,9 @@ def test_override_still_pays_attention_to_the_budget(session):
     spu = _spu(session)
     variant = _variant(session, spu, "BLU")
     product = _product(session, spu, variant)
+    template = _model_template(session)
     # 上限为 0:任何一次预估都会把它顶破(`gp.budget_verdict` 的 EXCEEDED)
-    _active_plan(session, spu, budget_cap=0)
+    _active_plan(session, spu, model_template_id=template.id, budget_cap=0)
 
     with pytest.raises(ValidationError):
         gs.create_task(
@@ -367,6 +386,7 @@ def test_override_still_pays_attention_to_the_budget(session):
             product_id=product.id,
             mode="virtual_try_on",
             provider="mock",
+            model_template_id=template.id,
             override_plan=True,
         )
 
@@ -400,7 +420,7 @@ def test_an_operator_asking_to_override_gets_403_not_a_silent_ignore(
 
 
 def test_an_admin_may_override(session_admin_client, session):
-    _, _, product, _ = _scene(session)
+    _, _, product, plan = _scene(session)
     session.commit()
 
     response = session_admin_client.post(
@@ -409,6 +429,7 @@ def test_an_admin_may_override(session_admin_client, session):
             "product_id": str(product.id),
             "mode": "virtual_try_on",
             "provider": "mock",
+            "model_template_id": str(plan.model_template_id),
             "override_plan": True,
         },
     )
