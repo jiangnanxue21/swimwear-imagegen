@@ -40,7 +40,13 @@ COPY --from=build /app/dist /usr/share/nginx/html
 #
 # 放在两条 COPY 之后:它检查的正是这两份文件合起来的结果 ——
 # snippet 里写错了,只有主配置 `include` 到它时才会暴露。
-RUN nginx -t
+# 构建阶段尚未加入 Compose 网络,`backend` 这个运行时 DNS 名称不存在。
+# nginx 会在语法检查时解析 proxy_pass,所以只在检查期间换成回环地址;
+# 检查后恢复正式配置,最终镜像仍通过 `backend:8000` 访问 API。
+RUN cp /etc/nginx/conf.d/default.conf /tmp/default.conf \
+    && sed -i 's/backend:8000/127.0.0.1:8000/g' /etc/nginx/conf.d/default.conf \
+    && nginx -t \
+    && mv /tmp/default.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 

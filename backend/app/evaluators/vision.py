@@ -1033,7 +1033,10 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
                 "automatic_retry": False,
             }
             if recommended > current_tokens:
-                advice = f"建议把 VISION_MODEL_MAX_OUTPUT_TOKENS 从 {current_tokens} 调到 {recommended}"
+                advice = (
+                    "建议把 VISION_MODEL_MAX_OUTPUT_TOKENS "
+                    f"从 {current_tokens} 调到 {recommended}"
+                )
             else:
                 # 已经顶到设置页允许的上限。这时候再说"调大"就是一条执行不了的
                 # 建议 —— 表单会直接打回。剩下能动的只有推理档位和评分深度。

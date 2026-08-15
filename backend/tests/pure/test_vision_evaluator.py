@@ -425,6 +425,9 @@ def test_oversized_image_is_rejected_before_encoding():
 
 def test_non_image_file_is_rejected():
     """扩展名说了不算。一个改名成 .png 的 PDF 必须在这里被拦下。"""
+    from PIL import Image
+
+    assert Image is not None  # 让零依赖运行器把缺 Pillow 识别为环境跳过。
     storage = FakeStorage({"fake.png": b"%PDF-1.4 not really an image"})
     resolver = ImageResolver(storage, max_bytes=8 * 1024 * 1024)
     err = expect_raises(ProviderInputError, lambda: _run(resolver.resolve("fake.png", role="C")))
