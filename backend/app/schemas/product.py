@@ -116,3 +116,14 @@ class ImportResultOut(BaseModel):
     failed: int
     errors: list[ImportRowError] = Field(default_factory=list)
     created_ids: list[UUID] = Field(default_factory=list)
+
+
+class ProductArchiveIn(BaseModel):
+    """归档请求体。
+
+    理由**必填**。归档是这套系统里最接近「删除」的动作,而它的痕迹只留在
+    审计表里 —— 一条没有理由的归档记录,在三个月后复盘「这件商品当初为什么
+    不做了」时等于没有。`MediaQuarantineIn` 用同一档长度,同理。
+    """
+
+    reason: str = Field(min_length=1, max_length=500)

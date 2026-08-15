@@ -68,6 +68,8 @@ export interface MediaQuery {
   source?: MediaSource
   role?: MediaRole
   status?: MediaStatus
+  /** 带上已删除的素材。默认不带 —— 「删除」的意思就是从眼前拿走 */
+  include_deleted?: boolean
   /** 白名单在后端 `media/service.SORTABLE` */
   sort?: string
   order?: 'asc' | 'desc'
@@ -86,6 +88,19 @@ export const mediaApi = {
     (await apiClient.post<MediaAsset>(`/media/${id}/quarantine`, { reason })).data,
   release: async (id: string): Promise<MediaAsset> =>
     (await apiClient.post<MediaAsset>(`/media/${id}/release`)).data,
+
+  /**
+   * 删除一条素材(生成出来的废图、传错的图)。**软删除,且不可撤销。**
+   *
+   * 与隔离的分工:隔离是「疑似不合规,待复核,可放行」,删除是「确认不要」。
+   * 后端把 `status` 迁到 `DELETED`,行与字节都留着 —— 候选图是计费产物,
+   * 删掉行之后「这一轮出了几张图、花了多少钱」在台账上会对不上。
+   *
+   * 是 POST 不是 DELETE,正因为它不删行。界面上必须先确认再调:
+   * 没有 restore 接口,点错了只能重新上传或重新出图。
+   */
+  remove: async (id: string, reason: string): Promise<MediaAsset> =>
+    (await apiClient.post<MediaAsset>(`/media/${id}/delete`, { reason })).data,
   migrationStatus: async (): Promise<MigrationStatus> =>
     (await apiClient.get<MigrationStatus>('/media/migration/status')).data,
 }

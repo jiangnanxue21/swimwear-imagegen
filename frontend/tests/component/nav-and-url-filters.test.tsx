@@ -30,6 +30,7 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import { MemoryRouter, useNavigate, useSearchParams } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { NAV, OPERATOR_NAV_ITEM_COUNT, router } from '../../src/App'
+import { PAGE_TITLE as WORKBENCH_PAGE_TITLE } from '../../src/pages/WorkbenchListPage'
 import {
   enumParam, flagParam, intParam, oneOfParam, useUrlFilters,
 } from '../../src/hooks/useUrlFilters'
@@ -109,6 +110,25 @@ describe('侧栏导航', () => {
     // 加一项菜单而不来改这里,它会红
     expect(operatorKeys).toHaveLength(7)
     expect(OPERATOR_NAV_ITEM_COUNT).toBe(operatorKeys.length)
+  })
+
+  it('侧栏标签与页头标题是同一个词 —— 一页不许有两个名字', () => {
+    // ## 要防的回归
+    //
+    // 改之前侧栏写「商品工作台」、页头(以及浏览器标签页)写「运营工作台」。
+    // 后者是**后端的域名**(`app/workbench/`、`api/workbench.py`、README 接口表),
+    // 顺着接口注释渗进了界面。运营点进来看到的名字和他刚点的那一项对不上。
+    //
+    // ## 为什么是运行期断言而不是扫源码
+    //
+    // frontend/CLAUDE.md 第 3 条:能用运行期断言就别扫文本。扫源码只能看见
+    // 两个中文字面量长得一样,看不见页头**用的是不是**那一个 —— 而这条读的
+    // 正是 `WorkbenchListPage` 真正传给 `PageHeader` 与 `useDocumentTitle`
+    // 的那个导出常量。任何一侧被改掉,它当场红。
+    const item = NAV.flatMap((g) => g.items).find((i) => i.key === '/workbench')
+
+    expect(item).toBeDefined()
+    expect(item?.label).toBe(WORKBENCH_PAGE_TITLE)
   })
 
   it('撤出菜单的六条路由全部还在 —— 手输地址、书签、深链一条都没断', () => {

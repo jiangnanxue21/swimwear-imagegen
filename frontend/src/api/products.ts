@@ -25,6 +25,24 @@ export const productsApi = {
   update: async (id: string, payload: Partial<Product>) =>
     (await apiClient.patch<Product>(`/products/${id}`, payload)).data,
 
+  /**
+   * 归档一件商品。**这是这套系统里「删除商品」的全部含义,没有 DELETE。**
+   *
+   * `products.id` 被九张表引着:`channel_listings` 是 RESTRICT(平台上还挂着的
+   * 商品硬删会 500),其余是 CASCADE(删得掉,但会连带清空素材、任务、属性、
+   * 评估 —— 整条证据链没了,而运营点的那个按钮只写着「删除」)。所以做的是
+   * 状态迁移:行还在,只是不再出现在工作台列表里。
+   *
+   * 理由必填。归档的痕迹只留在审计表里,一条没有理由的记录在三个月后
+   * 复盘「这件当初为什么不做了」时等于没有。
+   */
+  archive: async (id: string, reason: string) =>
+    (await apiClient.post<Product>(`/products/${id}/archive`, { reason })).data,
+
+  /** 放回生产动线。恢复到 DRAFT 而不是归档前那一档,理由在后端服务层 */
+  restore: async (id: string) =>
+    (await apiClient.post<Product>(`/products/${id}/restore`)).data,
+
   importCsv: async (file: File) => {
     const form = new FormData()
     form.append('file', file)

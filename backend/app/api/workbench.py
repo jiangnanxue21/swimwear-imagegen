@@ -30,7 +30,7 @@ from app.api.deps import current_actor, db_session, require_operator
 from app.core import audience as audience_rules
 from app.core.clock import iso_utc
 from app.core.config import settings
-from app.core.enums import AUDIENCE_LABELS, MediaStatus
+from app.core.enums import AUDIENCE_LABELS, MediaStatus, ProductStatus
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.http_headers import download_headers
 from app.core.search import ESCAPE_CHAR, like_pattern
@@ -171,6 +171,13 @@ def list_products(
     step: str | None = Query(default=None, description="按流程步骤筛选(FE-106)"),
     state: str | None = Query(default=None, description="配合 step:该步骤处于某状态"),
     only_blocked: bool = Query(default=False, description="只看有阻断的"),
+    include_archived: bool = Query(
+        default=False,
+        description=(
+            "带上已归档的商品。**默认不带** —— 归档就是这套系统里的「删除商品」,"
+            "归档完还留在列表里等于这个动作没发生"
+        ),
+    ),
     next_action: str | None = Query(default=None, description="按唯一下一步筛选"),
     audience: str | None = Query(
         default=None,
@@ -198,6 +205,20 @@ def list_products(
     与界面显示状态永远一致(理由见 flow.py)。
     """
     stmt = select(Product).order_by(Product.updated_at.desc())
+    # 归档的商品默认不出现。
+    #
+    # **这一条是「归档」有没有意义的分界线。** 改之前这条查询不带任何状态
+    # 过滤,而 `ProductStatus.ARCHIVED` 与 `PATCH /products/{id}` 早就在了 ——
+    # 也就是说当时归档一件商品之后,它照样出现在工作台、照样计进顶部那五个
+    # 计数格。那个动作在这一页上的净效果是零,所以界面上也从来没给过入口。
+    #
+    # 过滤放在 SQL 上而不是 `matches_filters` 里:归档不是流程判定的一档
+    # (`flow_rules` 回答的是「这件商品走到哪了」),它是「这件商品还做不做」。
+    # 两个维度正交,理由与 `SpuStatus` 那段 docstring 同源。而且放在 SQL 上
+    # 才能让 `summarize()` 的计数、排序、分页三者同时正确 —— 它们全都建立在
+    # `contexts` 之上。
+    if not include_archived:
+        stmt = stmt.where(Product.status != ProductStatus.ARCHIVED.value)
     if search:
         # 通配符转义走 core/search.py 那一份,四个列表接口共用
         like = like_pattern(search)

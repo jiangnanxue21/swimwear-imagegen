@@ -34,12 +34,14 @@ function AssetCard({
   asset,
   onQuarantine,
   onRelease,
+  onDelete,
   onRole,
   busy,
 }: {
   asset: MediaAsset
   onQuarantine: (asset: MediaAsset) => void
   onRelease: (asset: MediaAsset) => void
+  onDelete: (asset: MediaAsset) => void
   onRole: (asset: MediaAsset, role: MediaRole) => void
   busy: boolean
 }) {
@@ -75,17 +77,36 @@ function AssetCard({
         <div>
           {asset.width}×{asset.height}
         </div>
-        {quarantined ? (
-          <>
-            <div style={{ color: brandVars.danger }}>{asset.quarantine_reason ?? '未写原因'}</div>
+        {/*
+          隔离与删除是**两件事**,所以是两颗按钮而不是一颗。
+
+              隔离   疑似不合规,待复核。可以放行,原因留在素材上
+              删除   确认不要(出废了、传错了)。**不可撤销**,没有恢复接口
+
+          在这之前只有隔离,于是运营面对一张生成废图只能拿隔离顶上 ——
+          而那条路径的语义是"等人复核",废图会一直挂在那儿等一个不会来的复核。
+          `MediaStatus.DELETED` 从 M1 起就在枚举里、下游五处读它,
+          缺的一直是这颗按钮和它背后的写入点。
+
+          已隔离的素材两颗都给:「预检报了 -> 人看过 -> 确认确实不能要」
+          是最常见的那条动线,它的终点是删除,不是一直隔离着。
+        */}
+        <Space size={8}>
+          {quarantined ? (
             <Button size="small" type="link" style={{ padding: 0 }} disabled={busy} onClick={() => onRelease(asset)}>
               放行
             </Button>
-          </>
-        ) : (
-          <Button size="small" type="link" danger style={{ padding: 0 }} disabled={busy} onClick={() => onQuarantine(asset)}>
-            隔离
+          ) : (
+            <Button size="small" type="link" danger style={{ padding: 0 }} disabled={busy} onClick={() => onQuarantine(asset)}>
+              隔离
+            </Button>
+          )}
+          <Button size="small" type="link" danger style={{ padding: 0 }} disabled={busy} onClick={() => onDelete(asset)}>
+            删除
           </Button>
+        </Space>
+        {quarantined && (
+          <div style={{ color: brandVars.danger }}>{asset.quarantine_reason ?? '未写原因'}</div>
         )}
       </figcaption>
     </figure>
@@ -109,6 +130,8 @@ export default function MaterialTab({
   const queryClient = useQueryClient()
   const [assetType, setAssetType] = useState<AssetType>('GARMENT_FRONT')
   const [quarantining, setQuarantining] = useState<MediaAsset | null>(null)
+  /** 正在确认删除的那一条。与 `quarantining` 分开:两个弹窗说的不是一件事 */
+  const [deleting, setDeleting] = useState<MediaAsset | null>(null)
   const [reason, setReason] = useState('')
   /**
    * 这次上传归属到哪个颜色。`null` = 通用图。
@@ -187,6 +210,17 @@ export default function MaterialTab({
     onError: onWriteError,
   })
 
+  const remove = useMutation({
+    mutationFn: ({ id, why }: { id: string; why: string }) => mediaApi.remove(id, why),
+    onSuccess: () => {
+      message.success('已删除。它不再参与上架,引用它的已批准图片集已降级为待复核')
+      setDeleting(null)
+      setReason('')
+      refresh()
+    },
+    onError: onWriteError,
+  })
+
   const upload = useMutation({
     /**
      * 颜色跟着这次上传一起发(§4.8)。
@@ -208,7 +242,7 @@ export default function MaterialTab({
 
   const groups = groupByColour(assets.data?.items ?? [], variants)
 
-  const busy = setRole.isPending || quarantine.isPending || release.isPending
+  const busy = setRole.isPending || quarantine.isPending || release.isPending || remove.isPending
 
   return (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
@@ -351,6 +385,7 @@ export default function MaterialTab({
                           onRole={(asset, role) => setRole.mutate({ id: asset.id, role })}
                           onQuarantine={(asset) => setQuarantining(asset)}
                           onRelease={(asset) => release.mutate(asset.id)}
+                          onDelete={(asset) => setDeleting(asset)}
                         />
                       ))}
                     </div>
@@ -372,6 +407,7 @@ export default function MaterialTab({
                     onRole={(asset, role) => setRole.mutate({ id: asset.id, role })}
                     onQuarantine={(asset) => setQuarantining(asset)}
                     onRelease={(asset) => release.mutate(asset.id)}
+                    onDelete={(asset) => setDeleting(asset)}
                   />
                 ))}
               </div>
@@ -381,6 +417,42 @@ export default function MaterialTab({
           <Empty description="还没有素材。选好类型后上传商品图,至少要有一张正面图才能往下走。" />
         )}
       </Card>
+
+      <Modal
+        open={Boolean(deleting)}
+        title="删除这条素材"
+        okText="删除"
+        okButtonProps={{ danger: true, disabled: !reason.trim() }}
+        confirmLoading={remove.isPending}
+        onCancel={() => {
+          setDeleting(null)
+          setReason('')
+        }}
+        onOk={() => deleting && remove.mutate({ id: deleting.id, why: reason.trim() })}
+      >
+        {/*
+          这句警告不是客套。删除**没有恢复接口** —— 判据写在后端
+          `image_set_service` 那段拒绝已删除素材进图片集的注释里:
+          隔离可以放行,删除不能撤销。给它加一个 restore 会让两颗按钮
+          语义重合,而运营没有办法分辨该用哪个。
+
+          「行还在」也要说出来:运营听到"不可撤销"容易以为图连同它的
+          生成记录一起没了,而那一轮的费用台账其实照常对得上。
+        */}
+        <p style={{ color: brandVars.danger }}>
+          删除不可撤销,界面上没有恢复入口。误删只能重新上传或重新出图。
+        </p>
+        <p style={{ color: brandVars.slate }}>
+          这一条不再参与识别与上架,引用它的「已批准」图片集会被降级为待复核。
+          记录本身不删:生成记录与费用台账照常对得上。
+        </p>
+        <Input.TextArea
+          rows={3}
+          value={reason}
+          placeholder="例如:手指变形,四轮都没出对 / 传错了商品"
+          onChange={(e) => setReason(e.target.value)}
+        />
+      </Modal>
 
       <Modal
         open={Boolean(quarantining)}

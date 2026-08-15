@@ -23,13 +23,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Alert, App, Button, Card, Dropdown, Empty, Input, Progress, Segmented, Select,
+  Alert, App, Button, Card, Dropdown, Empty, Input, Modal, Progress, Segmented, Select,
   Space, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  ArrowRightOutlined, ImportOutlined, PlusOutlined, PlusSquareOutlined,
-  ReloadOutlined, WarningOutlined,
+  ArrowRightOutlined, EllipsisOutlined, ImportOutlined, InboxOutlined, PlusOutlined,
+  PlusSquareOutlined, ReloadOutlined, UndoOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ErrorNotice from '../components/ErrorNotice'
@@ -66,6 +66,29 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import PageHeader from '../components/PageHeader'
 
 /** 列密度偏好。跟显示器走,不跟业务走 */
+/**
+ * 这一页的名字。**必须与 `App.tsx` 里 `/workbench` 那一项的侧栏标签逐字相同。**
+ *
+ * ## 改之前是两个名字
+ *
+ *     侧栏      商品工作台      App.tsx 的 NAV
+ *     页头      运营工作台      这里(以及浏览器标签页)
+ *
+ * 「运营工作台」是**后端的域名**(`app/workbench/__init__.py`、`api/workbench.py`、
+ * README 的接口表都这么叫),它顺着接口注释渗进了前端页头。而界面这一侧
+ * 三处写的都是「商品工作台」(侧栏、README 的界面表、`SpuCreatePage` 的返回按钮),
+ * 所以离群的是页头那一个,改它。
+ *
+ * 反过来改侧栏是错的,而且有一处具体代价:`backend/tools/mutate_batch14_4.py`
+ * 的 Q2 变异逐字锚在 `{ key: '/workbench', label: '商品工作台'` 上。
+ * 改掉那一行会让那条变异失锚 —— 而失锚的变异不报错、不变红,只是安静地
+ * 什么都不验,正是 `audit_anchors.py` 存在的理由。
+ *
+ * 抽成常量而不是在两处各写一遍中文:两处字面量之间没有任何东西盯着,
+ * 而 `nav-and-url-filters.test.tsx` 现在拿 NAV 的标签和它对断言。
+ */
+export const PAGE_TITLE = '商品工作台'
+
 const DENSE_KEY = 'imagegen.workbench-dense'
 
 /** 顶部四个计数。点一下就是一次筛选 —— 这是运营最常用的入口。 */
@@ -202,6 +225,8 @@ export default function WorkbenchListPage() {
      */
     view: enumParam<'sku' | 'spu'>(['sku', 'spu']),
     only_blocked: flagParam(),
+    /* 显示已归档。写进 URL,和这一页其余七个筛选项同一规矩 */
+    include_archived: flagParam(),
     page: intParam(1, { min: 1 }),
     page_size: pageSizeParam,
     sort: enumParam<string>(LIST_SORT_KEYS),
@@ -209,7 +234,7 @@ export default function WorkbenchListPage() {
   })
   const {
     search, step, state, next_action: nextAction, audience, only_blocked: onlyBlocked,
-    page, page_size: pageSize,
+    include_archived: includeArchived, page, page_size: pageSize,
   } = filters.values
   /** 默认按 SKU。codec 认不出来的取值也退回它 */
   const view = filters.values.view ?? 'sku'
@@ -360,7 +385,10 @@ export default function WorkbenchListPage() {
   const query = useQuery({
     queryKey: [
       'workbench',
-      { search, step, state, nextAction, audience, onlyBlocked, page, pageSize, ...sort.params },
+      {
+        search, step, state, nextAction, audience, onlyBlocked, includeArchived,
+        page, pageSize, ...sort.params,
+      },
     ],
     queryFn: () =>
       workbenchApi.list({
@@ -370,6 +398,7 @@ export default function WorkbenchListPage() {
         next_action: nextAction,
         audience,
         only_blocked: onlyBlocked || undefined,
+        include_archived: includeArchived || undefined,
         ...sort.params,
         page,
         page_size: pageSize,
@@ -400,7 +429,7 @@ export default function WorkbenchListPage() {
   const reset = () => filters.reset()
 
   useDocumentTitle(
-    query.data ? `运营工作台 (${query.data.total})` : '运营工作台',
+    query.data ? `${PAGE_TITLE} (${query.data.total})` : PAGE_TITLE,
   )
 
   const open = (item: WorkbenchListItem, tab?: string) => {
@@ -426,6 +455,76 @@ export default function WorkbenchListPage() {
     },
     onError: (err) => message.error(describeError(err, 'write').text),
   })
+
+  /**
+   * 归档 / 恢复(P2)。
+   *
+   * **没有「删除商品」这个动作,而且不该有。** 后端一条 `DELETE /products/{id}`
+   * 都没有:`products.id` 被九张表引着,`channel_listings` 是 RESTRICT
+   * (平台上还挂着的商品硬删会 500),其余是 CASCADE(删得掉,但会连带清空
+   * 素材、任务、属性、评估)。所以按钮就叫「归档」,不叫「删除」——
+   * 名字要和它真正做的事一致,否则运营会按「删除」的预期去用它。
+   *
+   * 归档要理由(进审计),恢复不要:后者是撤销,前者是决定。
+   */
+  const archive = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      productsApi.archive(id, reason),
+    onSuccess: (_data, { id }) => {
+      const row = query.data?.items.find((i) => i.product.id === id)
+      message.success(`已归档 ${row?.product.sku ?? "该商品"}。勾选「显示已归档」可以找回它`)
+      queryClient.invalidateQueries({ queryKey: ["workbench"] })
+    },
+    onError: (err) => message.error(describeError(err, "write").text),
+  })
+
+  const restore = useMutation({
+    mutationFn: (id: string) => productsApi.restore(id),
+    onSuccess: () => {
+      // 恢复到 DRAFT 而不是归档前那一档 —— 归档期间上游可能变过,
+      // 直接还原成「已完成」会让它带着一个没人复核过的结论回到列表
+      message.success("已恢复。它回到「建档中」,由流程判定重新算一遍走到哪了")
+      queryClient.invalidateQueries({ queryKey: ["workbench"] })
+    },
+    onError: (err) => message.error(describeError(err, "write").text),
+  })
+
+  /**
+   * 归档前问一次理由。
+   *
+   * 用 `Modal.confirm` + 受控输入而不是直接弹 `prompt`:理由是必填的
+   * (后端 `min_length=1`),而空理由要在**点确定之前**就拦住 ——
+   * 让它走到后端再 422 回来,运营看到的是一句技术错误,而他刚刚已经
+   * 以为归档成功了。
+   */
+  const confirmArchive = (row: WorkbenchListItem) => {
+    let reason = ""
+    const modal = Modal.confirm({
+      title: `归档 ${row.product.sku}?`,
+      icon: <InboxOutlined style={{ color: brandVars.warning }} />,
+      content: (
+        <div>
+          <p style={{ marginTop: 0 }}>
+            归档后它从这张表里消失,但素材、生成任务、属性、审计一样不少 ——
+            勾选「显示已归档」随时找得回来。
+          </p>
+          <Input.TextArea
+            rows={2}
+            maxLength={500}
+            placeholder="归档理由(必填),例如:款式下架 / 重复建档 / 供应商撤款"
+            onChange={(e) => {
+              reason = e.target.value
+              modal.update({ okButtonProps: { disabled: !reason.trim() } })
+            }}
+          />
+        </div>
+      ),
+      okText: "归档",
+      okButtonProps: { danger: true, disabled: true },
+      cancelText: "取消",
+      onOk: () => archive.mutateAsync({ id: row.product.id, reason: reason.trim() }),
+    })
+  }
 
   const columns: ColumnsType<WorkbenchListItem> = [
     {
@@ -548,38 +647,86 @@ export default function WorkbenchListPage() {
     {
       title: '唯一下一步',
       key: 'next',
-      width: 220,
+      // 220 -> 260:右端多了一颗「更多」。不加宽的话主 CTA 的文字会被挤成两行
+      width: 260,
       // 走查 P0-1:这一列是整页的核心 CTA,不能跟着横向滚动跑掉。
       // `dense` 之后表格通常已经装得下,但 100% 缩放的 1280 屏、
       // 或者用户把浏览器开成半屏时仍然会滚 —— 钉住的成本是零
       fixed: 'right',
       render: (_, row) => {
-        // §3.2.3:状态组合非法时不展示任何动作,只报异常
+        const archived = row.product.status === 'ARCHIVED'
+        /*
+         * 「更多」里只有归档/恢复一项。做成下拉而不是直接摆一颗按钮:
+         * 这一列的主角是那颗 CTA(运营一天点它几十次),而归档一天可能一次。
+         * 两颗同级按钮并排会让低频的那颗分走高频那颗的注意力。
+         *
+         * §3.2.3 的状态异常分支下**仍然给这个菜单** —— 一件状态组合非法的
+         * 商品恰恰是最可能需要被归档的那一件,而它现在连下一步都没有。
+         * 上一版把动作整个藏掉的做法在这里会变成"坏掉的商品清不走"。
+         */
+        const more = (
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                archived
+                  ? {
+                      key: 'restore',
+                      icon: <UndoOutlined />,
+                      label: '恢复到生产动线',
+                      onClick: () => void restore.mutateAsync(row.product.id),
+                    }
+                  : {
+                      key: 'archive',
+                      icon: <InboxOutlined />,
+                      danger: true,
+                      // 不叫「删除」:它真正做的事是状态迁移,行与证据链都还在。
+                      // 叫错名字会让运营按「删除」的预期去用它
+                      label: '归档(移出生产动线)',
+                      onClick: () => confirmArchive(row),
+                    },
+              ],
+            }}
+          >
+            <Button size="small" type="text" icon={<EllipsisOutlined />} aria-label="更多操作" />
+          </Dropdown>
+        )
+
+        // §3.2.3:状态组合非法时不展示任何**前进**动作,只报异常
         const anomaly = detectFlowAnomaly(row.flow)
         if (anomaly) {
           return (
-            <Tooltip title={`${anomaly.reason} · ${anomaly.detail}`}>
-              <Tag color="error" icon={<WarningOutlined />}>
-                状态异常
-              </Tag>
-            </Tooltip>
+            <Space size={4}>
+              <Tooltip title={`${anomaly.reason} · ${anomaly.detail}`}>
+                <Tag color="error" icon={<WarningOutlined />}>
+                  状态异常
+                </Tag>
+              </Tooltip>
+              {more}
+            </Space>
           )
         }
         const action = row.flow.next_action
-        if (action.code === 'DONE') {
-          return <Tag color="success">已完成</Tag>
-        }
         return (
-          <Tooltip title={action.reason}>
-            <Button
-              size="small"
-              type="primary"
-              icon={<ArrowRightOutlined />}
-              onClick={() => open(row, ACTION_TAB[action.code])}
-            >
-              {action.label || NEXT_ACTION_LABEL[action.code]}
-            </Button>
-          </Tooltip>
+          <Space size={4}>
+            {archived ? (
+              <Tag>已归档</Tag>
+            ) : action.code === 'DONE' ? (
+              <Tag color="success">已完成</Tag>
+            ) : (
+              <Tooltip title={action.reason}>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<ArrowRightOutlined />}
+                  onClick={() => open(row, ACTION_TAB[action.code])}
+                >
+                  {action.label || NEXT_ACTION_LABEL[action.code]}
+                </Button>
+              </Tooltip>
+            )}
+            {more}
+          </Space>
         )
       },
     },
@@ -588,7 +735,7 @@ export default function WorkbenchListPage() {
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <PageHeader
-        title="运营工作台"
+        title={PAGE_TITLE}
         subtitle="这一页回答一个问题:今天从哪件商品下手"
         extra={
           <>
@@ -763,6 +910,19 @@ export default function WorkbenchListPage() {
           >
             只看有阻断
           </Button>
+          {/* 归档的商品默认不在这张表里(后端 `include_archived`)。
+              入口留在筛选条而不是藏进「更多」:找回一件归档过的商品是
+              一个真实动线的起点(「上个月那件是不是被谁归档了」),
+              而它现在是这张表上唯一一处能回答那个问题的地方 */}
+          <Tooltip title="归档的商品默认不出现在这里。勾上之后它们带「已归档」标签一起显示,可以就地恢复">
+            <Button
+              type={includeArchived ? 'primary' : 'default'}
+              icon={<InboxOutlined />}
+              onClick={() => filters.patch({ include_archived: !includeArchived, page: 1 })}
+            >
+              显示已归档
+            </Button>
+          </Tooltip>
           <Button onClick={reset}>清除筛选</Button>
         </Space>
       </Card>

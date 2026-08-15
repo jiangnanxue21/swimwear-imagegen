@@ -61,6 +61,20 @@ export const lightTokens = {
   surfaceAlt: '#FAFBFC',
   /** 图片位的底色(contain 之后的留白)。合并了 #F0F2F3 / #F5F6F7 */
   imageBg: '#F0F2F3',
+  /**
+   * 分段控件(Segmented)的轨道底。**必须比 canvas 深一档,不能等于它。**
+   *
+   * antd 的 Segmented 默认拿 `colorBgLayout` 当轨道色,而这套主题把
+   * `colorBgLayout` 设成了 canvas —— 内容区的背景也是 canvas,于是轨道
+   * 和页面底色**逐字节相同**,控件没有任何边界。表现见 `buildTheme` 里
+   * Segmented 那一段。
+   *
+   * 不复用 `imageBg`:那个值在暗色下是刻意的中性灰(为了不干扰运营判断
+   * 泳装颜色),拿来当控件底会在一片偏蓝的界面里泛灰。
+   * 也不复用 `surfaceAlt`:它比 canvas **更浅**(#FAFBFC vs #F6F7F8),
+   * 用它做轨道等于让控件比页面更亮,方向反了。
+   */
+  track: '#EBEEF1',
   /** 阻断行、错误块的浅红底。合并了 #FDF3F2 / #FBF2F2 */
   dangerBg: '#FDF3F2',
 
@@ -134,6 +148,8 @@ export const darkTokens: Record<BrandToken, string> = {
    * 依赖的正是轮廓。取在中间偏暗,和亮色模式的 #F0F2F3 大致对称。
    */
   imageBg: '#2C2E30',
+  /** 暗色下「深一档」的方向反过来:轨道要比 canvas **亮**才看得见 */
+  track: '#232A31',
   dangerBg: '#3A2321',
 
   // ---- 线 ----
@@ -332,8 +348,27 @@ export function buildTheme(mode: ThemeMode, algorithms: {
       // 密度损失用行高换回来。
       fontSize: 13,
       lineHeight: 1.6,
+      /*
+       * 字体栈。**这一行原来的首位是 `'Inter'`,而 Inter 从来没有被加载过。**
+       *
+       * `index.html` 里没有任何 `<link>`,全仓没有 `@font-face`,
+       * `package.json` 里没有任何字体依赖。所以 Inter 这一档在**大多数机器上
+       * 直接落空**,而在少数装了它的机器上(设计同事、部分 Linux 发行版)会命中。
+       * 后果是拉丁字形由操作系统随机决定:同一颗「按 SKU」按钮,
+       * 有人看到的 SKU 是 Inter、有人是 Segoe UI、有人是 SF —— 而中文永远落到
+       * PingFang / 雅黑。中西文搭配本来就要调,现在连搭配的是谁都不确定。
+       *
+       * 改法是**声明我们真的有的东西**:系统字体优先,中文各平台各给一档,
+       * 末尾补 `Noto Sans SC` 兜住 Linux 与容器(无头浏览器截图、Docker 里跑的
+       * e2e 都在那条路径上,原来的栈在那里会掉到 DejaVu Sans,中文变方框)。
+       *
+       * 要真用 Inter 的话得先把它装进来(`@fontsource-variable/inter` + 一行
+       * import),那是一个独立决定 —— 但**不能维持现状**:栈里写着一个不存在的
+       * 名字,等于把排版结果交给了运营那台机器上恰好装过什么。
+       */
       fontFamily:
-        "'Inter', -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+        "system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', "
+        + "'Microsoft YaHei', 'Noto Sans SC', sans-serif",
       wireframe: false,
     },
     components: {
@@ -342,6 +377,27 @@ export function buildTheme(mode: ThemeMode, algorithms: {
       Menu: { itemSelectedBg: t.marineSoft, itemSelectedColor: t.marine },
       Table: { headerBg: t.surfaceAlt, cellPaddingBlockSM: 8 },
       Card: { paddingLG: 16 },
+      /*
+       * 分段控件的轨道必须看得见。
+       *
+       * antd 的 `Segmented.trackBg` 默认取 `colorBgLayout`,而上面把
+       * `colorBgLayout` 设成了 `t.canvas` —— 内容区背景也是 canvas。
+       * 两者相同的后果在工作台页头那一排上最明显(截图取样确认过:
+       * 轨道区域的像素值与页面底色完全一致):
+       *
+       *     控件没有边界   「按 SKU / 按款」看起来是一块白片加两个灰字,
+       *                    不像一个可以切的开关;未选中的那一项读起来像
+       *                    说明文字或禁用态
+       *     高度掉一档     按钮是 controlHeightSM(24),而 Segmented 只剩
+       *                    选中片可见,那是 24 - trackPadding×2 = 20。
+       *                    一行里因此出现 24 / 20 / 24 三个视觉高度
+       *     两组糊成一组   「按 SKU|按款」和「紧凑|展开」是两个独立开关,
+       *                    轨道都不可见时它们连成「四个并列选项」
+       *
+       * 三条都不是字号问题 —— 那一排的字号实测全是 13px,和 token 一致。
+       * 补上轨道之后高度自动对齐到 24,不需要再动尺寸。
+       */
+      Segmented: { trackBg: t.track, itemSelectedBg: t.surface },
     },
   }
 }

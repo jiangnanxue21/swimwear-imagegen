@@ -885,6 +885,13 @@ export interface WorkbenchQuery {
   step?: FlowStep
   state?: StepState
   only_blocked?: boolean
+  /**
+   * 带上已归档的商品。**默认不带,而且这是归档有没有意义的分界线。**
+   *
+   * 后端这条列表原来不带任何状态过滤,所以归档一件商品之后它照样出现在
+   * 工作台、照样计进顶部那五个计数格 —— 那个动作在这一页上净效果是零。
+   */
+  include_archived?: boolean
   next_action?: NextActionCode
   /**
    * 按商品受众筛选。`UNCONFIRMED` 是"待确认"那一档 —— 它不是 `Audience`

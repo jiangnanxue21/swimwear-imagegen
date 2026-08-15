@@ -644,8 +644,22 @@ def list_assets(
     order: str | None = None,
     offset: int = 0,
     limit: int = 50,
+    include_deleted: bool = False,
 ) -> tuple[list[MediaAsset], int]:
-    """素材库列表。四个筛选维度对应素材库页面的四个下拉。"""
+    """素材库列表。四个筛选维度对应素材库页面的四个下拉。
+
+    ## 已删除默认不出现
+
+    「删除」这个词在运营那里的意思就是「从我眼前拿走」。留在列表里
+    (哪怕带个灰标签)会让他以为没删成功,然后再点一次。
+
+    显式 `status=DELETED` 仍然查得到 —— 那是排查用的路径(「昨天那张图是谁
+    删的」),它走的是下面 `status` 那一支,不受这个开关影响。
+
+    默认值改成排除是安全的:这个函数上线以来库里**一条 DELETED 都没有**
+    (写入点是同文件的 `delete_asset`,和这个参数同一批加的),所以对既有
+    数据它是逐行等价的 no-op。
+    """
     sort_field, direction = normalize_sort(
         sort, order, allowed=SORTABLE, default_sort="created_at", default_order="desc"
     )
@@ -660,6 +674,10 @@ def list_assets(
         stmt = stmt.where(MediaAsset.role == role)
     if status:
         stmt = stmt.where(MediaAsset.status == status)
+    elif not include_deleted:
+        # `elif`:点名要 DELETED 的时候不能再被这一条挡回去 ——
+        # 那会让「按状态筛已删除」永远返回空,而界面上那个下拉看起来是好的
+        stmt = stmt.where(MediaAsset.status != MediaStatus.DELETED.value)
     total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     ordered = apply_order(
         stmt, columns=SORTABLE, sort=sort_field, order=direction, tiebreak=MediaAsset.id
@@ -1030,6 +1048,78 @@ def release(session: Session, media_id: UUID, *, actor: str) -> MediaAsset:
         asset,
         "release",
         _scope_change_payload(before, _evidence_views(session, asset.product_id)),
+    )
+    return asset
+
+
+def delete_asset(
+    session: Session, media_id: UUID, *, reason: str, actor: str
+) -> MediaAsset:
+    """删除一条素材(生成出来的废图、传错的图)。**软删除,行不消失。**
+
+    ## 这个函数补的是一个一直缺着的写入点
+
+    `MediaStatus.DELETED` 从 M1 起就在枚举里,而且全仓有五处**读**它:
+
+        workbench/service.py            列表汇总排除它
+        workbench/color_rollup.py       颜色完整度排除它
+        media/service.py(改角色/隔离)  两处守卫挡住它
+        listings/image_set_service.py   进图片集时挡住它,并专门区分了
+                                        「已删除」和「暂时不可用」
+
+    但在这个函数之前,**没有任何一处写它** —— 整条下游链路在为一个永远
+    到不了的状态服务。运营面对一张废图只能用「隔离」,而隔离的语义是
+    「疑似不合规、待复核、可放行」,不是「这张是垃圾,拿走」。
+
+    ## 为什么不真删文件和行
+
+    与商品归档同一个判断(见 `product_service.archive_product`),外加一条
+    这里独有的:`generation_candidates.media_asset_id` 与
+    `listing_image_items.media_asset_id` 指着它,而候选图是**计费产物** ——
+    删掉行之后,「这一轮出了几张图、花了多少钱」在台账上会对不上。
+    字节留在存储里由清理任务按状态收,不在这条人点的路径上做。
+
+    ## 不提供恢复
+
+    `image_set_service` 那段注释已经把语义定死了:隔离可以放行,删除不能
+    撤销。给它加一个 restore 等于把删除退化成第二个隔离 —— 那样运营就有
+    两个看起来一样、语义却不同的按钮,而他没有办法分辨该用哪个。
+    误删的补救是重新上传或重新出图,两者都会留下新的来源记录。
+
+    删除已隔离的素材是允许的:那正是「预检报了、人看过、确认确实不能要」
+    这条最常见的动线的终点。
+    """
+    asset = get_asset(session, media_id)
+    if asset.status == MediaStatus.DELETED.value:
+        # 幂等。连点两下、或者超时后重试,不该拿到 409
+        return asset
+
+    before = _evidence_views(session, asset.product_id)
+    previous = asset.status
+    asset.status = MediaStatus.DELETED.value
+    session.flush()
+
+    # 与隔离**同一个配套动作**(§7.3):引用这张图的已批准图片集降级为待复核。
+    #
+    # 隔离要做这件事的理由是「一张判定为不合规的图会继续被发布」;删除比
+    # 隔离更强,所以它更要做。漏掉的话表现是:图在界面上消失了,而平台上
+    # 那一版图片集仍然批准着、仍然引着它。
+    from app.listings import image_set_service
+
+    downgraded = image_set_service.downgrade_sets_using(session, asset.id, actor=actor)
+
+    _audit(
+        session,
+        actor,
+        asset,
+        "delete",
+        {
+            "reason": (reason or "")[:500],
+            "from_status": previous,
+            "source": asset.source,
+            "downgraded_image_sets": len(downgraded),
+            **_scope_change_payload(before, _evidence_views(session, asset.product_id)),
+        },
     )
     return asset
 

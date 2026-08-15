@@ -18,7 +18,13 @@ from app.core.enums import AssetType, GarmentType, ProductStatus
 from app.core.errors import ErrorCode, ValidationError
 from app.schemas.asset import AssetOut, AssetUploadResult
 from app.schemas.common import Page
-from app.schemas.product import ImportResultOut, ProductCreate, ProductOut, ProductUpdate
+from app.schemas.product import (
+    ImportResultOut,
+    ProductArchiveIn,
+    ProductCreate,
+    ProductOut,
+    ProductUpdate,
+)
 from app.schemas.spu import ColorVariantOut
 from app.services import asset_service, product_service
 from app.services.product_import import parse_csv, parse_json_rows
@@ -187,6 +193,53 @@ def update_product(
     )
     session.commit()
     return _to_out(product)
+
+
+@router.post(
+    "/{product_id}/archive",
+    response_model=ProductOut,
+    dependencies=[Depends(require_operator)],
+)
+def archive_product(
+    product_id: UUID,
+    payload: ProductArchiveIn,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ProductOut:
+    """归档一件商品。**这是本系统里「删除商品」的全部含义。**
+
+    没有 `DELETE /products/{id}`,而且不该有 —— 理由(九张外键表、
+    RESTRICT 与 CASCADE 两个方向各自的后果)写在
+    `product_service.archive_product` 的 docstring 里。
+
+    归档之后这件商品**从工作台列表里消失**(`api/workbench.py` 的默认过滤),
+    行、素材、任务、属性、审计一样不少。
+    """
+    product = product_service.archive_product(
+        session, product_id, reason=payload.reason, actor=current_actor(request)
+    )
+    session.commit()
+    counts = product_service.asset_counts(session, [product.id])
+    return _to_out(product, counts.get(product.id, 0))
+
+
+@router.post(
+    "/{product_id}/restore",
+    response_model=ProductOut,
+    dependencies=[Depends(require_operator)],
+)
+def restore_product(
+    product_id: UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> ProductOut:
+    """把归档的商品放回生产动线(恢复到 DRAFT,理由见服务层)。"""
+    product = product_service.restore_product(
+        session, product_id, actor=current_actor(request)
+    )
+    session.commit()
+    counts = product_service.asset_counts(session, [product.id])
+    return _to_out(product, counts.get(product.id, 0))
 
 
 @router.post(

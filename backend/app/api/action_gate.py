@@ -128,6 +128,14 @@ UNGATED_ENDPOINTS: Mapping[str, str] = {
     "generation_tasks:delete_task": "删掉一条任务记录是清理,往前一步都不走",
     "media_library:quarantine": "隔离一张素材是纠错,不是往前走一步",
     "media_library:release": "放行被隔离的素材是纠错,不是往前走一步",
+    "media_library:delete_media": "删掉一张废图是清理,往前一步都不走",
+    # ---- 归档:它把商品移出流程,是往回走的最远那一步 ----
+    #
+    # 尤其**不能**过闸:这道闸拦的是「前置没满足就往前走」,而一件卡在
+    # 第一步、什么前置都没满足的商品,恰恰是最需要能被归档的那一件。
+    # 写进 GATED 的表现是「越是想放弃的商品越放弃不掉」。
+    "products:archive_product": "归档把商品移出流程,不是往前走一步",
+    "products:restore_product": "恢复是撤销归档,往回走",
     # ---- 素材步是自阻断步(`wizard.SELF_BLOCKING_STEPS`),闸恒放行 ----
     #
     # 这几条**不是**"不该过闸",是"过了也永远放行"。写进 GATED 的话,

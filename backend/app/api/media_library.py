@@ -1,10 +1,12 @@
 """素材库接口(M1,§13)。
 
     GET   /api/media                     列表,按来源/角色/状态/商品筛选
+                                         (默认不含已删除,`include_deleted=true` 才带上)
     GET   /api/media/{id}                单条详情
     POST  /api/media/{id}/role           人工指定角色
     POST  /api/media/{id}/quarantine     隔离
     POST  /api/media/{id}/release        放行
+    POST  /api/media/{id}/delete         删除(软删除,不可撤销)
     GET   /api/media/migration/status    回填覆盖率 + 对账统计(迁移期用)
 
 注意路径:代发私有素材字节的那个接口在 `api/media_files.py`,挂在
@@ -25,6 +27,7 @@ from app.media import service as media_service
 from app.schemas.common import Page
 from app.schemas.media import (
     MediaAssetOut,
+    MediaDeleteIn,
     MediaQuarantineIn,
     MediaRoleIn,
 )
@@ -65,6 +68,13 @@ def list_media(
     source: MediaSource | None = Query(None),
     role: MediaRole | None = Query(None),
     status_filter: MediaStatus | None = Query(None, alias="status"),
+    include_deleted: bool = Query(
+        False,
+        description=(
+            "带上已删除的素材。默认不带 —— 「删除」在运营那里的意思就是"
+            "「从我眼前拿走」。显式 `status=DELETED` 不受它影响(排查用)"
+        ),
+    ),
     sort: str | None = Query(
         None, description=f"排序字段,可用:{', '.join(media_service.SORTABLE)}"
     ),
@@ -79,6 +89,7 @@ def list_media(
         source=source.value if source else None,
         role=role.value if role else None,
         status=status_filter.value if status_filter else None,
+        include_deleted=include_deleted,
         sort=sort,
         order=order,
         offset=(page - 1) * page_size,
@@ -144,6 +155,34 @@ def quarantine(
     storage=Depends(get_storage),
 ) -> MediaAssetOut:
     asset = media_service.quarantine(
+        session, media_id, reason=payload.reason, actor=current_actor(request)
+    )
+    session.commit()
+    return _out(asset, storage)
+
+
+@router.post("/{media_id}/delete", response_model=MediaAssetOut)
+def delete_media(
+    media_id: UUID,
+    payload: MediaDeleteIn,
+    request: Request,
+    session: Session = Depends(db_session),
+    storage=Depends(get_storage),
+) -> MediaAssetOut:
+    """删除一条素材(生成出来的废图、传错的图)。**软删除,不可撤销。**
+
+    ## 为什么是 POST 而不是 DELETE
+
+    它不删行:`status` 迁到 `DELETED`,字节留在存储里,
+    `generation_candidates` / `listing_image_items` 上指着它的外键照常成立。
+    用 `DELETE` 会让调用方(以及读路由表的人)以为这条记录没了 ——
+    而计费台账正靠它答「这一轮出了几张图」。理由全文在
+    `media/service.delete_asset`。
+
+    与隔离的分工:隔离是「疑似不合规,待复核,可放行」,删除是「确认不要」。
+    删除已隔离的素材是允许的,那正是预检报了、人看过之后最常见的终点。
+    """
+    asset = media_service.delete_asset(
         session, media_id, reason=payload.reason, actor=current_actor(request)
     )
     session.commit()

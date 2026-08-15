@@ -52,3 +52,14 @@ class MediaRoleIn(BaseModel):
 
 class MediaQuarantineIn(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
+
+
+class MediaDeleteIn(BaseModel):
+    """删除请求体。
+
+    和隔离共用同一档理由长度,但两者**不是一回事**,别把这个 schema
+    当成隔离的别名:隔离可以放行,删除不能撤销(判据写在
+    `listings/image_set_service.py` 那段拒绝已删除素材进图片集的注释里)。
+    """
+
+    reason: str = Field(min_length=1, max_length=500)

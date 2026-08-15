@@ -223,8 +223,17 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "S2",
         "隔离不记作用域变化(最常被追的那次动作没有答案)",
         MEDIA,
+        # 锚点带上它上面那一行 `"reason": reason[:200]`。
+        #
+        # **不带的话它不唯一了**:`delete_asset()` 的审计 payload 和这里逐字
+        # 相同的两行(降级计数 + 作用域变化)。`audit_anchors.py` 当场报了
+        # 「锚点不唯一 ×1」—— 而不唯一的锚点会让变异打在两处里随便哪一处上,
+        # 于是这条变异测的是什么就说不准了。删除那一支的 `reason` 切的是 500,
+        # 隔离这一支切 200,拿它把两者分开。
+        '            "reason": reason[:200],\n'
         '            "downgraded_image_sets": len(downgraded),\n'
         "            **_scope_change_payload(before, _evidence_views(session, asset.product_id)),",
+        '            "reason": reason[:200],\n'
         '            "downgraded_image_sets": len(downgraded),',
     ),
     (

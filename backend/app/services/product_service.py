@@ -9,7 +9,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import garments
-from app.core.enums import Audience, AuditAction, DraftStatus, GarmentType, ProductStatus
+from app.core.enums import (
+    PUBLISH_TERMINAL_STATES,
+    Audience,
+    AuditAction,
+    DraftStatus,
+    GarmentType,
+    ProductStatus,
+    PublishStatus,
+)
 from app.core.errors import DuplicateError, ErrorCode, NotFoundError, ValidationError
 from app.core.search import ESCAPE_CHAR, like_pattern
 from app.core.sorting import normalize_sort
@@ -17,6 +25,7 @@ from app.listings import image_set_service, variants
 from app.models.listing_copy import ListingDraft
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
+from app.models.publishing import ChannelListing
 from app.models.spu import ColorVariant, Spu
 from app.services import audit
 from app.services.product_import import ImportResult, RowError
@@ -457,6 +466,121 @@ def update_product(
             entity_id=product.id,
             payload={"changes": list(applied), **({"cascade": cascade} if cascade else {})},
         )
+    return product
+
+
+#: 商品可以归档所要求的「平台侧已经了结」。
+#:
+#: 比 `PUBLISH_TERMINAL_STATES` 多一个 `DELISTED`:那两个终态说的是
+#: **这次发布任务**结束了(取消 / 归档),而下架说的是**商品不在平台上了** ——
+#: 后者才是这道闸真正要问的事。一件已经下架的商品当然可以在本地归档。
+_PUBLISH_SETTLED: frozenset[str] = PUBLISH_TERMINAL_STATES | {PublishStatus.DELISTED.value}
+
+
+def _live_listings(session: Session, product_id: UUID) -> list[ChannelListing]:
+    """这件商品在平台上还挂着的发布记录。"""
+    return list(
+        session.scalars(
+            select(ChannelListing).where(
+                ChannelListing.product_id == product_id,
+                ChannelListing.status.notin_(sorted(_PUBLISH_SETTLED)),
+            )
+        )
+    )
+
+
+def archive_product(
+    session: Session, product_id: UUID, *, reason: str, actor: str
+) -> Product:
+    """归档一件商品。**这是本系统里「删除商品」的全部含义。**
+
+    ## 为什么不是 DELETE
+
+    `products.id` 被九张表引着,而两个方向都不能接受:
+
+        channel_listings          ondelete=RESTRICT   平台上还挂着的商品删不掉,
+                                                      硬删会撞 IntegrityError -> 500
+        media_assets / attributes / ondelete=CASCADE   删得掉,但会连带清空
+        generation_tasks /                            这件商品的素材、任务、属性、
+        output_assets / evaluations                   评估 —— 整条证据链没了,
+                                                      而运营点的那个按钮只写着「删除」
+
+    `publishing.py` 那条 RESTRICT 的注释把话说在前面了:平台上还挂着的商品,
+    不能因为本地删了就悄悄失去它的来源记录。所以这里做的是**状态迁移**:
+    行还在,证据链还在,只是不再出现在生产动线里(见 `api/workbench.py`
+    的列表默认过滤)。
+
+    ## 平台闸
+
+    还挂在平台上的商品拒绝归档,并把渠道和站点说出来 —— 只说
+    「不能归档」的话,运营下一步不知道该去哪个后台下架。
+
+    幂等:已经归档的再归档一次直接返回,不重复写审计。运营连点两下、
+    或者请求超时后重试,不该拿到一个 409。
+    """
+    product = get_product(session, product_id)
+    if product.status == ProductStatus.ARCHIVED.value:
+        return product
+
+    live = _live_listings(session, product.id)
+    if live:
+        where = ", ".join(sorted({f"{r.channel}/{r.site}" for r in live})[:5])
+        raise ValidationError(
+            f"这件商品在平台上还挂着({where}),先在平台下架再归档",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+            detail={"live_listing_ids": [str(r.id) for r in live]},
+        )
+
+    previous = product.status
+    product.status = ProductStatus.ARCHIVED.value
+    session.flush()
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.UPDATE,
+        entity_type="Product",
+        entity_id=product.id,
+        payload={
+            "action": "archive",
+            # 理由进审计而不是新开一列:归档是低频动作,而「谁、什么时候、
+            # 为什么」这三样审计表本来就答得出来。为它加一列要一次迁移,
+            # 换来的只是把同一句话再存一遍
+            "reason": (reason or "")[:500],
+            "from_status": previous,
+            "sku": product.sku,
+        },
+    )
+    return product
+
+
+def restore_product(session: Session, product_id: UUID, *, actor: str) -> Product:
+    """把归档的商品放回生产动线。
+
+    **恢复到 DRAFT,不恢复到归档前那一档。** 归档前是 `COMPLETED` 的商品
+    在归档期间上游可能变过(素材被隔离、方案换代),直接还原成
+    「已完成」会让它带着一个没人复核过的结论回到列表里。DRAFT 是
+    `refresh_status_after_asset_change()` 的起点,回到那里之后由既有规则
+    重新算一遍它现在到底走到哪 —— 那比记住一个可能已经过期的旧答案诚实。
+    """
+    product = get_product(session, product_id)
+    if product.status != ProductStatus.ARCHIVED.value:
+        raise ValidationError(
+            f"只有已归档的商品可以恢复,当前状态 {product.status}",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    product.status = ProductStatus.DRAFT.value
+    session.flush()
+    audit.record(
+        session,
+        actor=actor,
+        action=AuditAction.UPDATE,
+        entity_type="Product",
+        entity_id=product.id,
+        payload={"action": "restore", "to_status": product.status, "sku": product.sku},
+    )
+    refresh_status_after_asset_change(session, product)
     return product
 
 
