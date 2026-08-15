@@ -6,6 +6,7 @@
 这里用假的一次往返把 HTTP 那一层整个替掉,断言的是同一个行为,
 所以没有 httpx 的机器上也能跑。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +18,7 @@ from app.evaluators.vision import (
     VisionEvaluatorConfig,
     VisionModelImageQualityEvaluator,
 )
+from app.providers.errors import ProviderInputError
 from tests.pure._helpers import BACKEND_ROOT  # noqa: F401  (装 sys.path)
 
 
@@ -43,6 +45,7 @@ class _FakeImage:
 
 class _FakeRequest:
     images = (_FakeImage(),)
+    body = {}
 
     def safe_body_summary(self) -> dict:
         return {}
@@ -99,6 +102,44 @@ def test_parse_failure_still_carries_the_audit_metadata():
     assert caught.duration_ms is not None
 
 
+def test_truncation_still_carries_usage_and_is_not_automatically_retried():
+    truncated = {
+        "id": "resp_truncated",
+        "model": "qwen3.8-max",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "usage": {"input_tokens": 900, "output_tokens": 1800},
+        "output": [],
+    }
+    evaluator = VisionModelImageQualityEvaluator(_config(max_output_tokens=1800))
+    calls = 0
+
+    async def fake_send(request):
+        nonlocal calls
+        calls += 1
+        return truncated, 200
+
+    evaluator._send_with_retries = fake_send  # type: ignore[assignment]
+
+    async def fake_prepare(product_assets, candidate_image):
+        return [], None
+
+    evaluator._prepare_images = fake_prepare  # type: ignore[assignment]
+    evaluator._adapter.build = lambda **kwargs: _FakeRequest()  # type: ignore[assignment]
+
+    caught = None
+    try:
+        _run(evaluator.evaluate(["ref.png"], "cand.png", {}, {}))
+    except ProviderInputError as exc:
+        caught = exc
+
+    assert caught is not None
+    assert calls == 1, "截断后自动发了第二次付费请求"
+    assert caught.detail["automatic_retry"] is False
+    assert caught.vision_meta["response_id"] == "resp_truncated"
+    assert caught.vision_meta["usage"]["output_tokens"] == 1800
+
+
 def test_connection_probe_reports_reachable():
     """探针必须走传输层的客户端生命周期,而不是评分器上并不存在的 _client()。
 
@@ -114,7 +155,8 @@ def test_connection_probe_reports_reachable():
     }
 
     evaluator = VisionModelImageQualityEvaluator(
-        _config(), http_client=object()  # 注入的客户端不会被真的用到
+        _config(),
+        http_client=object(),  # 注入的客户端不会被真的用到
     )
     seen: dict = {}
 

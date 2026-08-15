@@ -30,14 +30,18 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, Protocol
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from app.core.logging import get_logger
 from app.llm.images import PreparedImage
-from app.llm.redaction import safe_request_summary
+from app.llm.redaction import safe_payload_for_log, safe_request_summary
 from app.providers.errors import (
     ProviderAuthError,
     ProviderContentSafetyError,
@@ -55,6 +59,59 @@ RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
 #: 尊重 Retry-After,但不无条件尊重:见过返回 3600 的实现,那会把整轮生成挂死。
 MAX_RETRY_AFTER_SECONDS = 30.0
+
+_llm_call_id: ContextVar[str] = ContextVar("llm_call_id", default="-")
+_llm_attempt: ContextVar[int] = ContextVar("llm_attempt", default=0)
+
+
+def _payload_logging_enabled() -> bool:
+    """开关放在系统配置，不要求把整个应用切到 DEBUG。"""
+    try:
+        from app.core.config import settings
+
+        return bool(settings.LLM_LOG_PAYLOADS)
+    except Exception:  # noqa: BLE001 - 裁剪环境仍要能导入传输层
+        return False
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """请求体的**唯一**权威字节形式。
+
+    这个函数存在的理由是一致性,不是复用。以前的分工是:预算检查用
+    `json.dumps(..., ensure_ascii=False, separators=(",", ":"))` 自己算一遍长度,
+    真正发送时交给 httpx 的 `json=` 参数 —— 而 httpx 用的是自己的序列化参数
+    (分隔符带空格、ensure_ascii 默认行为也不同)。两串字节不一样长。
+
+    后果是预算检查形同虚设:pre-flight 说 4.9MB 通过,上线发出去的是另一个
+    尺寸,厂商回 413。而 413 会被归类成上游错误,排查方向从一开始就是错的 ——
+    没人会怀疑那个"已经检查过"的预算。
+
+    现在只有这一个序列化点:预算按它算,`_send_once` 也把它的返回值原样
+    `content=` 发出去。两者字面上是同一串字节,不是"应该一样"。
+
+    序列化失败时退回 repr:这条路径只服务于日志与长度估算,不能因为一个
+    不可序列化的值把调用炸掉;真正发送前 httpx 那一侧会自己再抛。
+    """
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return repr(value).encode("utf-8", errors="replace")
+
+
+#: 旧名,保留给传输层内部的日志调用点。
+_json_bytes = canonical_json_bytes
+
+
+def _response_summary(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        return {}
+    usage = body.get("usage")
+    return {
+        "response_id": body.get("id"),
+        "response_model": body.get("model"),
+        "finish_reason": find_finish_reason(body),
+        "usage": usage if isinstance(usage, dict) else None,
+    }
 
 
 class TransportConfig(Protocol):
@@ -300,17 +357,77 @@ class MultimodalClient:
 
         attempt = 0
         last_error: ProviderError | None = None
+        call_id = uuid4().hex[:12]
+        request_bytes = _json_bytes(request.body)
+        request_fields: dict[str, Any] = {
+            "llm_call_id": call_id,
+            "request_body_bytes": len(request_bytes),
+            "request_sha256_16": sha256(request_bytes).hexdigest()[:16],
+            "timeout_seconds": self.config.timeout_seconds,
+            "max_attempts": self.config.max_retries + 1,
+            **request.safe_body_summary(),
+        }
+        if _payload_logging_enabled():
+            request_fields["request_body"] = safe_payload_for_log(request.body)
+        logger.info(
+            "llm request prepared",
+            extra={"extra_fields": request_fields},
+        )
 
         # 客户端在循环**外**建一次。以前每次尝试新建再关掉,三次重试就是三次
         # TCP + TLS 握手 —— 限流退避本来就在等,再叠上握手纯属白等
         async with self._client() as client:
             while attempt <= self.config.max_retries:
+                attempt_number = attempt + 1
+                attempt_started = time.monotonic()
+                call_token = _llm_call_id.set(call_id)
+                attempt_token = _llm_attempt.set(attempt_number)
                 try:
                     if on_attempt is not None:
                         on_attempt(attempt + 1)
-                    return await round_trip(request, client)
+                    logger.info(
+                        "llm request attempt started",
+                        extra={
+                            "extra_fields": {
+                                "llm_call_id": call_id,
+                                "attempt": attempt_number,
+                                "max_attempts": self.config.max_retries + 1,
+                                "request_body_bytes": len(request_bytes),
+                                **request.safe_body_summary(),
+                            }
+                        },
+                    )
+                    body, status = await round_trip(request, client)
+                    logger.info(
+                        "llm request completed",
+                        extra={
+                            "extra_fields": {
+                                "llm_call_id": call_id,
+                                "attempt": attempt_number,
+                                "http_status": status,
+                                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                                **_response_summary(body),
+                            }
+                        },
+                    )
+                    return body, status
                 except ProviderError as exc:
                     last_error = exc
+                    logger.warning(
+                        "llm request attempt failed",
+                        extra={
+                            "extra_fields": {
+                                "llm_call_id": call_id,
+                                "attempt": attempt_number,
+                                "max_attempts": self.config.max_retries + 1,
+                                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                                "error_type": type(exc).__name__,
+                                "error_code": str(exc.code),
+                                "retriable": exc.policy.retriable,
+                                "http_status": (exc.detail or {}).get("http_status"),
+                            }
+                        },
+                    )
                     if not exc.policy.retriable or attempt >= self.config.max_retries:
                         raise
                     delay = self._retry_delay(attempt, exc)
@@ -328,6 +445,9 @@ class MultimodalClient:
                     )
                     await asyncio.sleep(delay)
                     attempt += 1
+                finally:
+                    _llm_attempt.reset(attempt_token)
+                    _llm_call_id.reset(call_token)
 
         raise last_error or ProviderError("模型请求失败", provider=self.name)
 
@@ -372,9 +492,16 @@ class MultimodalClient:
         import httpx
 
         # 客户端由 _client() 管生命周期,这里只负责一次往返
+        #
+        # 用 `content=` 而不是 `json=`:预算检查算的必须**就是**发出去的这串
+        # 字节。交给 httpx 的 `json=` 序列化,它会按自己的参数再编一次,
+        # 于是 pre-flight 通过的请求在线上是另一个尺寸(见 canonical_json_bytes)。
+        # Content-Type 由适配器在 headers 里显式写好,不依赖 `json=` 代设。
         try:
             response = await client.post(
-                request.url, headers=request.headers, json=request.body
+                request.url,
+                headers=request.headers,
+                content=canonical_json_bytes(request.body),
             )
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError(
@@ -390,10 +517,31 @@ class MultimodalClient:
             ) from exc
 
         status = response.status_code
+        response_bytes = bytes(response.content)
         try:
             body: Any = response.json()
         except ValueError:
             body = response.text
+
+        response_fields: dict[str, Any] = {
+            "llm_call_id": _llm_call_id.get(),
+            "attempt": _llm_attempt.get(),
+            "http_status": status,
+            "response_body_bytes": len(response_bytes),
+            "content_type": response.headers.get("content-type"),
+            "upstream_request_id": (
+                response.headers.get("x-request-id")
+                or response.headers.get("request-id")
+                or response.headers.get("x-trace-id")
+            ),
+            **_response_summary(body),
+        }
+        if _payload_logging_enabled():
+            response_fields["response_body"] = safe_payload_for_log(body)
+        logger.info(
+            "llm http response received",
+            extra={"extra_fields": response_fields},
+        )
 
         if status >= 400:
             raise self._error_from_status(status, body, response.headers)

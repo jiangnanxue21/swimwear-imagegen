@@ -154,8 +154,17 @@ def _run_capture(generator, fake_send):
         def __init__(self, *a, **kw):
             pass
 
-        async def send(self, request):
-            return fake_send(request), None
+        async def send(self, request, *, on_attempt=None):
+            if on_attempt is not None:
+                on_attempt(1)
+            payload = fake_send(request)
+            payload.setdefault("id", "copy-test-response")
+            payload.setdefault("model", "m-1")
+            payload.setdefault(
+                "usage",
+                {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+            return payload, 200
 
     original = transport.MultimodalClient
     transport.MultimodalClient = _FakeClient
@@ -237,6 +246,45 @@ def test_a_well_formed_response_still_parses():
     assert draft.claims[0]["field_name"] == "primary_color"
     # value 刻意不限类型:facts 里本来就有数字和布尔
     assert draft.claims[0]["value"] == "NAVY_BLUE"
+
+
+def test_generate_keeps_only_safe_call_trace_not_prompt_or_response_text():
+    generator = _gen()
+
+    def fake_send(request):
+        return {
+            "id": "resp-safe",
+            "model": "m-safe",
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+            "choices": [{"message": {"content": '{"title":"Navy Swimwear","description":"d"}'}}],
+        }
+
+    draft = _run_capture_generate(generator, fake_send)
+    assert draft.trace["response_id"] == "resp-safe"
+    assert draft.trace["total_tokens"] == 20
+    assert draft.trace["provider_attempts"] == 1
+    assert "prompt" not in draft.trace
+    assert "response" not in draft.trace
+
+
+def _run_capture_generate(generator, fake_send):
+    import app.llm.transport as transport
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def send(self, request, *, on_attempt=None):
+            if on_attempt is not None:
+                on_attempt(1)
+            return fake_send(request), 200
+
+    original = transport.MultimodalClient
+    transport.MultimodalClient = _FakeClient
+    try:
+        return generator.generate(facts={}, selling_points=(), forbidden_claims=(), locale="en")
+    finally:
+        transport.MultimodalClient = original
 
 
 def test_missing_optional_fields_are_still_allowed():

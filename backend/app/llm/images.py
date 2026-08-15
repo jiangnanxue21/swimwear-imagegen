@@ -19,6 +19,7 @@
 
 依赖方向:本模块**不得** import `app/evaluators`、`app/extractors`、`app/channels`。
 """
+
 from __future__ import annotations
 
 import base64
@@ -53,6 +54,61 @@ MAX_IMAGE_EDGE_PX = 12000
 #: Pillow 自己的 DecompressionBomb 阈值是 ~1.79 亿像素,对我们来说太宽松了。
 MAX_IMAGE_PIXELS = 64_000_000
 
+#: 模型端的请求体上限通常约束的是整份 JSON,不是单张原图。图片变成 data URL
+#: 后还会膨胀约 4/3,所以评分器会为每张内联图传入一个请求预算。本层只负责把
+#: 已通过格式/像素安全校验的图片压到预算内;输入文件本身的安全上限仍由
+#: ``max_bytes`` 控制,两者不能合并。
+MIN_COMPACT_EDGE_PX = 512
+
+#: 不是笛卡尔积:顺序本身就是保真策略。先适度缩小像素,再小幅降质量,
+#: 避免在原始大分辨率上一路把 JPEG quality 压到 40,制造本来不存在的块状伪影。
+#: 候选图要判断纹理、走线与人体细节,比参考图多保留一档分辨率和质量。
+#: 首档用 `MAX_IMAGE_EDGE_PX` 当哨兵,不是当上限:任何通过了尺寸校验的图
+#: 单边都 < 12000,于是 `scale = min(1.0, 12000/边长)` 恒为 1.0,这两档就是
+#: **原分辨率**。
+#:
+#: 补这两档是因为阶梯以前吃不下发给它的预算:最宽的一档是 4096,一张
+#: 6000×4000 的原图哪怕预算有 5MB 富余,也会先被缩到 4096 再谈质量 ——
+#: 缩放是不可逆的,而判断纹理、走线和人体细节靠的正是那些像素。
+#: 预算给得起就先按原图试,试不下再进缩放阶梯,顺序不变。
+CANDIDATE_COMPACT_PROFILES = (
+    (MAX_IMAGE_EDGE_PX, 95),
+    (MAX_IMAGE_EDGE_PX, 92),
+    (4096, 92),
+    (3584, 92),
+    (3072, 92),
+    (2560, 92),
+    (2048, 92),
+    (1792, 90),
+    (1536, 90),
+    (1280, 88),
+    (1024, 88),
+    (1024, 84),
+    (896, 84),
+    (768, 82),
+    (640, 80),
+    (512, 78),
+)
+#: 参考侧刻意只加**一**档原分辨率,而且质量停在 90。
+#:
+#: 要守的不变量是「同预算下候选图恒不小于参考图」—— 候选是被判分的那一张。
+#: 候选侧有 95/92 两档原分辨率,参考侧给到 90 就停:再往上加一档,
+#: 两条阶梯在原分辨率上的档位差会被抹平,而那正是不变量的来源。
+REFERENCE_COMPACT_PROFILES = (
+    (MAX_IMAGE_EDGE_PX, 90),
+    (3072, 90),
+    (2560, 90),
+    (2048, 90),
+    (1792, 90),
+    (1600, 90),
+    (1280, 88),
+    (1024, 86),
+    (896, 84),
+    (768, 82),
+    (640, 80),
+    (512, 78),
+)
+
 
 @dataclass(frozen=True)
 class PreparedImage:
@@ -68,6 +124,7 @@ class PreparedImage:
     byte_size: int
     url: str | None = None
     data_url: str | None = None
+    source_byte_size: int | None = None
 
     @property
     def inline(self) -> bool:
@@ -87,6 +144,10 @@ class PreparedImage:
             "mime_type": self.mime_type,
             "byte_size": self.byte_size,
             "inline": self.inline,
+            "source_byte_size": self.source_byte_size or self.byte_size,
+            "compacted": bool(
+                self.source_byte_size and self.source_byte_size != self.byte_size
+            ),
         }
 
 
@@ -99,9 +160,7 @@ def _too_large(role: str, size: int, limit: int) -> ProviderInputError:
     )
 
 
-def decode_data_url(
-    value: str, *, role: str, max_bytes: int | None = None
-) -> tuple[bytes, str]:
+def decode_data_url(value: str, *, role: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     """解析 data URL,返回 (字节, 声明的 MIME)。
 
     声明的 MIME 只是参考值,调用方仍然要用 Pillow 复核 —— 不然一个
@@ -116,7 +175,7 @@ def decode_data_url(
     if "base64" not in header:
         raise ProviderInputError(f"{role} 的 data URL 不是 base64 编码", provider="vision")
 
-    declared = header[len(DATA_URL_PREFIX):].split(";")[0].strip() or "application/octet-stream"
+    declared = header[len(DATA_URL_PREFIX) :].split(";")[0].strip() or "application/octet-stream"
 
     # **先看文本长度,再解码。** 以前是解完整个 base64 才去比大小,
     # 于是一个 200 MB 的 data URL 会先在内存里变成 150 MB 的 bytes,
@@ -142,9 +201,7 @@ def verify_image(payload: bytes, *, role: str) -> tuple[bytes, str]:
     try:
         from PIL import Image, ImageOps
     except ImportError:  # pragma: no cover - 取决于运行环境
-        raise ProviderInputError(
-            "缺少 Pillow 依赖,无法校验图片", provider="vision"
-        ) from None
+        raise ProviderInputError("缺少 Pillow 依赖,无法校验图片", provider="vision") from None
 
     import io
     import warnings
@@ -256,6 +313,145 @@ def to_data_url(payload: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64," + base64.b64encode(payload).decode("ascii")
 
 
+def compact_for_inline_request(
+    payload: bytes,
+    mime_type: str,
+    *,
+    role: str,
+    max_bytes: int | None,
+    allow_overshoot: bool = False,
+) -> tuple[bytes, str]:
+    """把一张已验证的图片压到内联请求预算内。
+
+    原图仍先经过 ``verify_image`` 的格式、像素和输入大小检查。这里只解决另一件事:
+    多张合法图片经 base64 后叠加,把模型端的**整份请求体**撑爆。
+
+    只有超预算才重编码。非透明图转 JPEG;透明图用 WebP 保留 alpha,不擅自把
+    背景变成白色或黑色。压缩档位先适度缩放、再小幅降质量,避免制造评分伪影。
+    """
+    if max_bytes is None or len(payload) <= max_bytes:
+        return payload, mime_type
+    if max_bytes <= 0:
+        raise ProviderInputError(
+            f"{role} 没有可用的内联请求预算",
+            provider="vision",
+            detail={"role": role, "limit_bytes": max_bytes},
+        )
+
+    import io
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(payload)) as opened:
+            opened.load()
+            has_alpha = opened.mode in ("RGBA", "LA") or (
+                opened.mode == "P" and "transparency" in opened.info
+            )
+            source = opened.convert("RGBA" if has_alpha else "RGB")
+            output_format = "WEBP" if has_alpha else "JPEG"
+            output_mime = "image/webp" if has_alpha else "image/jpeg"
+            profiles = (
+                CANDIDATE_COMPACT_PROFILES
+                if role == "CANDIDATE_IMAGE"
+                else REFERENCE_COMPACT_PROFILES
+            )
+
+            original_width, original_height = source.size
+            smallest: bytes | None = None
+            seen_profiles: set[tuple[tuple[int, int], int]] = set()
+            for edge, quality in profiles:
+                scale = min(1.0, edge / max(original_width, original_height))
+                size = (
+                    max(1, round(original_width * scale)),
+                    max(1, round(original_height * scale)),
+                )
+                profile = (size, quality)
+                if profile in seen_profiles:
+                    continue
+                seen_profiles.add(profile)
+                resized = (
+                    source if size == source.size else source.resize(size, Image.Resampling.LANCZOS)
+                )
+                buffer = io.BytesIO()
+                params: dict[str, Any] = {
+                    "quality": quality,
+                    "optimize": True,
+                }
+                if output_format == "JPEG":
+                    params["progressive"] = True
+                else:
+                    params["method"] = 6
+                resized.save(buffer, format=output_format, **params)
+                encoded = buffer.getvalue()
+                if smallest is None or len(encoded) < len(smallest):
+                    smallest = encoded
+                if len(encoded) <= max_bytes:
+                    logger.info(
+                        "image compacted for multimodal request budget",
+                        extra={
+                            "extra_fields": {
+                                "role": role,
+                                "source_bytes": len(payload),
+                                "result_bytes": len(encoded),
+                                "width": size[0],
+                                "height": size[1],
+                                "quality": quality,
+                                "format": output_format,
+                            }
+                        },
+                    )
+                    return encoded, output_mime
+    except ProviderInputError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Pillow 编码异常统一成可操作的输入错误
+        raise ProviderInputError(
+            f"{role} 无法压缩到模型请求预算内:{type(exc).__name__}",
+            provider="vision",
+            detail={"role": role, "limit_bytes": max_bytes},
+        ) from exc
+
+    if allow_overshoot and smallest is not None:
+        # 自适应总预算允许单张暂时超出份额:其他图片可能远小于自己的份额,
+        # 构造完整请求后才能知道总量是否真的超限。仍超限时评分器会按真实比例
+        # 再收敛,而不是在这里因为一张难压的透明图过早失败。
+        return smallest, output_mime
+
+    raise ProviderInputError(
+        f"{role} 压缩后仍超过内联预算 {max_bytes // 1024} KB;"
+        "请减少参考图或启用 VISION_MODEL_SEND_PUBLIC_URLS",
+        provider="vision",
+        detail={
+            "role": role,
+            "source_bytes": len(payload),
+            "smallest_bytes": len(smallest or b""),
+            "limit_bytes": max_bytes,
+            "min_edge_px": MIN_COMPACT_EDGE_PX,
+        },
+    )
+
+
+def compact_prepared_image(image: PreparedImage, *, max_bytes: int) -> PreparedImage:
+    """压缩一张内联 ``PreparedImage``;URL 图片原样返回。"""
+    if not image.inline or image.byte_size <= max_bytes:
+        return image
+    payload, _declared = decode_data_url(image.payload_url(), role=image.role)
+    compacted, mime = compact_for_inline_request(
+        payload,
+        image.mime_type,
+        role=image.role,
+        max_bytes=max_bytes,
+        allow_overshoot=True,
+    )
+    return PreparedImage(
+        role=image.role,
+        mime_type=mime,
+        byte_size=len(compacted),
+        data_url=to_data_url(compacted, mime),
+        source_byte_size=image.source_byte_size or image.byte_size,
+    )
+
+
 class ImageResolver:
     """把一个地址解析成 PreparedImage。
 
@@ -268,7 +464,12 @@ class ImageResolver:
         self._allowed_hosts = allowed_hosts
 
     async def resolve(
-        self, reference: str, *, role: str, prefer_public_url: bool = False
+        self,
+        reference: str,
+        *,
+        role: str,
+        prefer_public_url: bool = False,
+        inline_max_bytes: int | None = None,
     ) -> PreparedImage:
         if not reference or not str(reference).strip():
             raise ProviderInputError(f"{role} 的图片地址为空", provider="vision")
@@ -276,22 +477,30 @@ class ImageResolver:
         value = str(reference).strip()
 
         if value.startswith(DATA_URL_PREFIX):
-            payload, _declared = decode_data_url(
-                value, role=role, max_bytes=self._max_bytes
-            )
-            return await self._finish(payload, role=role)
+            payload, _declared = decode_data_url(value, role=role, max_bytes=self._max_bytes)
+            return await self._finish(payload, role=role, inline_max_bytes=inline_max_bytes)
 
         if value.startswith(("http://", "https://")):
-            return await self._from_url(value, role=role, prefer_public_url=prefer_public_url)
+            return await self._from_url(
+                value,
+                role=role,
+                prefer_public_url=prefer_public_url,
+                inline_max_bytes=inline_max_bytes,
+            )
 
         # 剩下的都当成项目内的 storage_path
         return await self._from_storage(
-            value, role=role, prefer_public_url=prefer_public_url
+            value,
+            role=role,
+            prefer_public_url=prefer_public_url,
+            inline_max_bytes=inline_max_bytes,
         )
 
     # ------------------------------------------------------------------ 内部
 
-    async def _finish(self, payload: bytes, *, role: str) -> PreparedImage:
+    async def _finish(
+        self, payload: bytes, *, role: str, inline_max_bytes: int | None = None
+    ) -> PreparedImage:
         """大小 -> 校验 -> 编码。顺序不能换:先限大小才不会被超大文件拖垮。
 
         Pillow 的解码和 EXIF 旋转是 CPU 密集的同步调用,放进线程池 ——
@@ -305,14 +514,30 @@ class ImageResolver:
         # EXIF 旋转后可能变大,再查一次
         if len(verified) > self._max_bytes:
             raise _too_large(role, len(verified), self._max_bytes)
+        source_byte_size = len(verified)
+        verified, mime = await asyncio.to_thread(
+            compact_for_inline_request,
+            verified,
+            mime,
+            role=role,
+            max_bytes=inline_max_bytes,
+        )
         return PreparedImage(
             role=role,
             mime_type=mime,
             byte_size=len(verified),
             data_url=to_data_url(verified, mime),
+            source_byte_size=source_byte_size,
         )
 
-    async def _from_url(self, url: str, *, role: str, prefer_public_url: bool) -> PreparedImage:
+    async def _from_url(
+        self,
+        url: str,
+        *,
+        role: str,
+        prefer_public_url: bool,
+        inline_max_bytes: int | None,
+    ) -> PreparedImage:
         """HTTP(S) 地址。
 
         即使只是把地址转发给模型厂商,也要过 SSRF 校验 —— 让厂商去访问
@@ -340,13 +565,20 @@ class ImageResolver:
             # 结果是同一张图走内联模式会被拒收,走公网模式就一路畅通 ——
             # 两条路径的安全性不该差这么多。
             payload = await self._download(url, role=role)
-            return await self._verified_public_url(url, payload, role=role)
+            return await self._verified_public_url(
+                url, payload, role=role, inline_max_bytes=inline_max_bytes
+            )
 
         payload = await self._download(url, role=role)
-        return await self._finish(payload, role=role)
+        return await self._finish(payload, role=role, inline_max_bytes=inline_max_bytes)
 
     async def _verified_public_url(
-        self, url: str, payload: bytes, *, role: str
+        self,
+        url: str,
+        payload: bytes,
+        *,
+        role: str,
+        inline_max_bytes: int | None,
     ) -> PreparedImage:
         """校验字节内容,通过之后才把 URL 交给厂商。
 
@@ -370,15 +602,28 @@ class ImageResolver:
                 "image needed exif rotation, sending inline instead of by url",
                 extra={"extra_fields": {"role": role}},
             )
+            source_byte_size = len(verified)
+            verified, mime = await asyncio.to_thread(
+                compact_for_inline_request,
+                verified,
+                mime,
+                role=role,
+                max_bytes=inline_max_bytes,
+            )
             return PreparedImage(
                 role=role,
                 mime_type=mime,
                 byte_size=len(verified),
                 data_url=to_data_url(verified, mime),
+                source_byte_size=source_byte_size,
             )
 
         return PreparedImage(
-            role=role, mime_type=mime, byte_size=len(verified), url=url
+            role=role,
+            mime_type=mime,
+            byte_size=len(verified),
+            url=url,
+            source_byte_size=len(payload),
         )
 
     async def _download(self, url: str, *, role: str) -> bytes:
@@ -409,9 +654,7 @@ class ImageResolver:
             async with httpx.AsyncClient(
                 timeout=30.0,
                 follow_redirects=False,
-                transport=pinned_transport(
-                    allowed_hosts=self._allowed_hosts, is_async=True
-                ),
+                transport=pinned_transport(allowed_hosts=self._allowed_hosts, is_async=True),
             ) as client:
                 for _ in range(MAX_REDIRECTS + 1):
                     async with client.stream("GET", current) as response:
@@ -435,9 +678,7 @@ class ImageResolver:
                             # net_safety.stream_checked 用的也是它。
                             current = urljoin(current, location)
                             try:
-                                check_download_url(
-                                    current, allowed_hosts=self._allowed_hosts
-                                )
+                                check_download_url(current, allowed_hosts=self._allowed_hosts)
                             except UnsafeDownloadURL as exc:
                                 raise ProviderInputError(
                                     f"{role} 的图片地址重定向到了不允许的位置:{exc}",
@@ -478,12 +719,15 @@ class ImageResolver:
             ) from exc
 
     async def _from_storage(
-        self, storage_path: str, *, role: str, prefer_public_url: bool
+        self,
+        storage_path: str,
+        *,
+        role: str,
+        prefer_public_url: bool,
+        inline_max_bytes: int | None,
     ) -> PreparedImage:
         if self._storage is None:
-            raise ProviderInputError(
-                f"{role} 是存储路径但没有可用的存储后端", provider="vision"
-            )
+            raise ProviderInputError(f"{role} 是存储路径但没有可用的存储后端", provider="vision")
 
         if prefer_public_url:
             try:
@@ -503,7 +747,12 @@ class ImageResolver:
 
                 try:
                     raw = await _asyncio.to_thread(self._storage.read, storage_path)
-                    return await self._verified_public_url(public, raw, role=role)
+                    return await self._verified_public_url(
+                        public,
+                        raw,
+                        role=role,
+                        inline_max_bytes=inline_max_bytes,
+                    )
                 except ProviderInputError:
                     # 验不过就不发这个地址。继续往下走会读同一份字节再验一次、
                     # 再失败一次,所以直接抛出去 —— 让评分那一张明确地失败,
@@ -539,4 +788,4 @@ class ImageResolver:
                 provider="vision",
                 detail={"role": role},
             ) from exc
-        return await self._finish(payload, role=role)
+        return await self._finish(payload, role=role, inline_max_bytes=inline_max_bytes)

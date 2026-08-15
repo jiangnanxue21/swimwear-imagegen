@@ -204,6 +204,7 @@ def _label_contracts() -> list[tuple[str, str, str, set[str]]]:
     from app.core.enums import (
         CopyStatus,
         DraftStatus,
+        EvaluationOutcome,
         ExtractionRunStatus,
         Grade,
         HardFailCode,
@@ -248,6 +249,12 @@ def _label_contracts() -> list[tuple[str, str, str, set[str]]]:
         ("types.ts", "SEVERITY_LABEL", "问题严重度", _values(ProblemSeverity)),
         ("types.ts", "RECOMMENDED_ACTION_LABEL", "建议动作", _values(RecommendedAction)),
         ("types.ts", "TASK_STATUS_LABEL", "任务状态", _values(TaskStatus)),
+        (
+            "types.ts",
+            "EVALUATION_OUTCOME_LABEL",
+            "评分调用结果",
+            _values(EvaluationOutcome),
+        ),
         ("types.ts", "OUTPUT_PURPOSE_LABEL", "成品图用途", _values(OutputPurpose)),
         ("types.ts", "SETTING_SOURCE_LABEL", "设置项来源", setting_sources),
         # ---- workbench.ts：单件流程 ----
@@ -309,7 +316,7 @@ def _union_contracts() -> list[tuple[str, str, set[str]]]:
     dispatch_states = set(re.findall(r'^DISPATCH_\w+ = "([A-Z_]+)"', api_source, re.M))
     assert dispatch_states, "workbench_batch.py 里找不到 DISPATCH_* 常量"
 
-    from app.core.enums import ExtractionRunStatus
+    from app.core.enums import EvaluationOutcome, ExtractionRunStatus
 
     return [
         ("workbench.ts", "FlowStep", _values(FlowStep)),
@@ -317,6 +324,7 @@ def _union_contracts() -> list[tuple[str, str, set[str]]]:
         # 少一个取值时 tsc 当场报错,而那正是我们要的 —— 它替代的是
         # 一段前端自己重算三档的三元运算(硬规则 4)
         ("attributes.ts", "ExtractionRunStatus", _values(ExtractionRunStatus)),
+        ("types.ts", "EvaluationOutcome", _values(EvaluationOutcome)),
         ("workbench.ts", "NextActionCode", _values(NextActionCode)),
         ("batch.ts", "BatchAction", _values(BatchAction)),
         ("batch.ts", "BatchItemStatus", _values(BatchItemStatus)),

@@ -46,6 +46,67 @@ class EvaluationOut(BaseModel):
     problems: list[ProblemOut] = Field(default_factory=list)
 
 
+class EvaluationAttemptOut(BaseModel):
+    """评分调用留痕。
+
+    只暴露已经脱敏的排障字段；`meta` 仍留在服务端，避免以后往其中加入的
+    内部诊断信息未经审查就自动出现在运营界面。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    candidate_id: UUID | None
+    evaluation_id: UUID | None
+    round_number: int
+    outcome: str
+    evaluator: str
+    model_name: str | None
+    depth: EvaluationDepth
+    response_id: str | None
+    http_status: int | None
+    finish_reason: str | None
+    prompt_version: int | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    duration_ms: int | None
+    error_code: str | None
+    error_message: str | None
+    diagnostic: bool = False
+    created_at: datetime
+
+
+class DiagnosticEvaluationOut(BaseModel):
+    """人工评分测试的结构化结果；不写入正式候选评分。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evaluator: str
+    model_name: str | None
+    depth: EvaluationDepth
+    hard_fail: bool
+    hard_fail_codes: list[str]
+    scores: dict[str, float]
+    overall_score: float
+    model_reported_overall: float | None
+    grade: str
+    recommended_action: str
+    grade_reasons: list[str]
+    uncertain_items: list[str]
+    duration_ms: int | None
+    problems: list[ProblemOut] = Field(default_factory=list)
+
+
+class EvaluationDiagnosticOut(BaseModel):
+    success: bool
+    candidate_id: UUID
+    billable: bool
+    message: str
+    evaluation: DiagnosticEvaluationOut | None = None
+    attempt: EvaluationAttemptOut
+
+
 class ReviewOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

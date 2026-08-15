@@ -2,6 +2,7 @@
 
 未配置任何 Provider Key 时应用必须能正常启动,因此所有第三方相关字段均可为空。
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -14,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.vocab import (
     BATCH_EXECUTION_MODES,
     COPY_GENERATORS,
+    DEFAULT_VISION_MAX_OUTPUT_TOKENS,
     TEXT_API_STYLES,
 )
 
@@ -87,6 +89,9 @@ class Settings(BaseSettings):
     APP_ENV: str = "local"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    #: 多模态请求/响应体排障开关。即使打开也会移除密钥、签名 URL 与图片 base64。
+    #: 生命周期、字节数、耗时和状态码不受此开关影响，始终写 INFO 日志。
+    LLM_LOG_PAYLOADS: bool = False
     API_PREFIX: str = "/api"
     CORS_ORIGINS: str = "http://localhost:5173"
 
@@ -187,8 +192,7 @@ class Settings(BaseSettings):
         warn, critical = float(self.SPEND_WARN_RATIO), float(self.SPEND_CRITICAL_RATIO)
         if not 0 < warn < critical:
             raise ValueError(
-                f"SPEND_WARN_RATIO({warn})必须大于 0 且小于 "
-                f"SPEND_CRITICAL_RATIO({critical})"
+                f"SPEND_WARN_RATIO({warn})必须大于 0 且小于 SPEND_CRITICAL_RATIO({critical})"
             )
         return self
 
@@ -252,8 +256,12 @@ class Settings(BaseSettings):
     VISION_MODEL_RESPONSE_FORMAT: str = "json_schema"
     VISION_MODEL_TIMEOUT_SECONDS: float = 90.0
     VISION_MODEL_MAX_IMAGE_MB: int = 8
+    #: 整份多模态 JSON 请求体上限。默认低于部分兼容端点的 6 MiB 硬限制,
+    #: 给 HTTP 客户端序列化差异留出余量;内联图片会按这一总预算自动压缩。
+    VISION_MODEL_MAX_REQUEST_MB: int = 5
     VISION_MODEL_MAX_REFERENCE_IMAGES: int = 4
-    VISION_MODEL_MAX_OUTPUT_TOKENS: int = 1800
+    #: `.env` / 设置页的显式值优先于这里的默认值;修改本地覆盖后必须重载长驻进程。
+    VISION_MODEL_MAX_OUTPUT_TOKENS: int = DEFAULT_VISION_MAX_OUTPUT_TOKENS
     VISION_MODEL_MAX_RETRIES: int = 2
     VISION_MODEL_RETRY_BASE_SECONDS: float = 0.5
     #: low | high | original | auto。FULL 看细节,QUICK 只看大面。
@@ -430,9 +438,7 @@ class Settings(BaseSettings):
         operator = (self.OPERATOR_PASSWORD or "").strip()
         secret = (self.AUTH_SESSION_SECRET or "").strip()
 
-        if self.APP_ENV.strip().lower() in LOCAL_ENVS and not (
-            admin or operator or secret
-        ):
+        if self.APP_ENV.strip().lower() in LOCAL_ENVS and not (admin or operator or secret):
             # 本机开发且三项全空:沿用旧的 Legacy Token + ROLE_DEV 模式。
             # 只要动过其中任意一项,就落到下面的完整校验 —— 半配的登录
             # 比没有登录更难查,见 docstring。
@@ -452,8 +458,7 @@ class Settings(BaseSettings):
             problems.append("AUTH_SESSION_SECRET 为空")
         elif len(secret) < _MIN_SESSION_SECRET_LENGTH:
             problems.append(
-                f"AUTH_SESSION_SECRET 至少 {_MIN_SESSION_SECRET_LENGTH} 个字符"
-                f"(当前 {len(secret)})"
+                f"AUTH_SESSION_SECRET 至少 {_MIN_SESSION_SECRET_LENGTH} 个字符(当前 {len(secret)})"
             )
         for label, value in (
             ("ADMIN_PASSWORD", admin),
@@ -466,8 +471,7 @@ class Settings(BaseSettings):
                 problems.append(f"{label} 仍然是占位值({value})")
         if self.AUTH_SESSION_MAX_AGE_SECONDS <= 0:
             problems.append(
-                f"AUTH_SESSION_MAX_AGE_SECONDS 必须为正(当前 "
-                f"{self.AUTH_SESSION_MAX_AGE_SECONDS})"
+                f"AUTH_SESSION_MAX_AGE_SECONDS 必须为正(当前 {self.AUTH_SESSION_MAX_AGE_SECONDS})"
             )
 
         if problems:
@@ -484,9 +488,8 @@ class Settings(BaseSettings):
                 )
             )
             raise ValueError(
-                why + ":" + ";".join(problems)
-                + "。生成密钥:python3 -c \"import secrets;"
-                "print(secrets.token_urlsafe(48))\""
+                why + ":" + ";".join(problems) + '。生成密钥:python3 -c "import secrets;'
+                'print(secrets.token_urlsafe(48))"'
             )
         return self
 
@@ -512,9 +515,7 @@ class Settings(BaseSettings):
         """
         chosen = v.strip().lower()
         if chosen not in COPY_GENERATORS:
-            raise ValueError(
-                f"COPY_GENERATOR 只能是 {' / '.join(COPY_GENERATORS)},收到 {v!r}"
-            )
+            raise ValueError(f"COPY_GENERATOR 只能是 {' / '.join(COPY_GENERATORS)},收到 {v!r}")
         return chosen
 
     @field_validator("BATCH_EXECUTION_MODE")
@@ -664,9 +665,7 @@ class Settings(BaseSettings):
         复用两个已有配置,不新增 env(新增就要再进一遍 `.env.example` 契约)。
         `PUBLIC_BASE_URL` 默认 http://localhost:8000,于是本地自动为 False。
         """
-        return self.is_production or self.PUBLIC_BASE_URL.strip().lower().startswith(
-            "https://"
-        )
+        return self.is_production or self.PUBLIC_BASE_URL.strip().lower().startswith("https://")
 
     @property
     def is_production(self) -> bool:

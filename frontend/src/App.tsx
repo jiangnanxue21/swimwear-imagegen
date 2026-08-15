@@ -6,6 +6,7 @@ import {
   TeamOutlined, ThunderboltOutlined, WarningOutlined,
   HistoryOutlined, CheckSquareOutlined, HomeOutlined, WalletOutlined,
   CloudUploadOutlined,
+  ExperimentOutlined,
 } from '@ant-design/icons'
 import AppLayout, { type NavGroup } from './components/AppLayout'
 import NotFoundPage from './pages/NotFoundPage'
@@ -35,6 +36,7 @@ import TodayPage from './pages/TodayPage'
  * 只有内容区显示加载态 —— 这也是懒加载唯一会被用户看见的地方。
  */
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'))
+const AITestPage = lazy(() => import('./pages/AITestPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const MediaLibraryPage = lazy(() => import('./pages/MediaLibraryPage'))
 const ModelTemplatesPage = lazy(() => import('./pages/ModelTemplatesPage'))
@@ -151,6 +153,7 @@ export const NAV: NavGroup[] = [
     label: '系统管理',
     items: [
       { key: '/tasks', label: '生成任务(排障)', icon: <PictureOutlined /> },
+      { key: '/ai-tests', label: 'AI 能力测试', icon: <ExperimentOutlined /> },
       { key: '/dashboard', label: '指标仪表盘', icon: <DashboardOutlined /> },
       { key: '/spend', label: '付费调用花费', icon: <WalletOutlined /> },
       { key: '/model-templates', label: '模特模板', icon: <TeamOutlined /> },
@@ -242,6 +245,7 @@ export const router = createBrowserRouter(
         <Route path="/media" element={<MediaLibraryPage />} />
         <Route path="/tasks" element={<TaskListPage />} />
         <Route path="/tasks/:id" element={<TaskDetailPage />} />
+        <Route path="/ai-tests" element={<AITestPage />} />
         <Route path="/reviews" element={<ReviewQueuePage />} />
         <Route path="/reviews/:id" element={<ReviewDetailPage />} />
         <Route path="/model-templates" element={<ModelTemplatesPage />} />

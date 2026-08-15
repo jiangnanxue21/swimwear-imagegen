@@ -11,10 +11,13 @@
 
 只用标准库,因此 core 层可以放心持有它。
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+
+from app.core.vocab import MAX_VISION_MAX_OUTPUT_TOKENS
 
 #: 掩码字符。密钥回传前端时只留末尾几位,足够运营辨认\"是不是我填的那把\",又不泄露。
 MASK_CHAR = "•"
@@ -125,7 +128,7 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 type=TYPE_PASSWORD,
                 secret=True,
                 placeholder="fa-...",
-                help="填好后点\"测试连接\"确认额度。会产生费用。",
+                help='填好后点"测试连接"确认额度。会产生费用。',
             ),
             Field(
                 key="FASHN_TRYON_MODEL",
@@ -142,8 +145,7 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 label="速度/质量档位",
                 type=TYPE_SELECT,
                 help=(
-                    "留空交给 FASHN 自选。performance 仅 tryon-v1.6 支持,"
-                    "fast 仅商品转模特图支持。"
+                    "留空交给 FASHN 自选。performance 仅 tryon-v1.6 支持,fast 仅商品转模特图支持。"
                 ),
                 options=(
                     Option("", "自动"),
@@ -242,8 +244,7 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 label="服务地址",
                 placeholder="http://comfyui:8188",
                 help=(
-                    "内网地址还需要加进下方\"允许下载的内网主机\","
-                    "否则结果图下载会被 SSRF 校验拦下。"
+                    '内网地址还需要加进下方"允许下载的内网主机",否则结果图下载会被 SSRF 校验拦下。'
                 ),
             ),
             Field(
@@ -372,8 +373,12 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 label="最大输出 Token",
                 type=TYPE_INTEGER,
                 minimum=256,
-                maximum=32000,
-                help="太小会截断 JSON,表现为「输出被截断」而不是评分偏差。",
+                # 和截断建议同源。见 vocab.MAX_VISION_MAX_OUTPUT_TOKENS 的注释
+                maximum=MAX_VISION_MAX_OUTPUT_TOKENS,
+                help=(
+                    "FULL 结构化评分建议 8192。这里只是允许上限,通常按实际输出计费;"
+                    "太小会截断 JSON。截断后系统不会自动重试,避免产生第二次费用。"
+                ),
             ),
             Field(
                 key="VISION_MODEL_MAX_REFERENCE_IMAGES",
@@ -389,7 +394,18 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 type=TYPE_INTEGER,
                 minimum=1,
                 maximum=64,
-                help="超了直接拒绝,不会悄悄压缩后发出去。",
+                help="原始输入的安全上限;超过会直接拒绝,不会先解码巨图。",
+            ),
+            Field(
+                key="VISION_MODEL_MAX_REQUEST_MB",
+                label="评分请求总上限(MB)",
+                type=TYPE_INTEGER,
+                minimum=2,
+                maximum=64,
+                help=(
+                    "限制包含全部参考图、候选图、提示词和 Schema 的整份 JSON。"
+                    "内联图片会按总预算自动压缩;千问兼容端点建议保持默认 5MB。"
+                ),
             ),
             Field(
                 key="VISION_MODEL_TIMEOUT_SECONDS",

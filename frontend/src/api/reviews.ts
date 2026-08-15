@@ -1,6 +1,7 @@
-import { apiClient } from './client'
+import { apiClient, LONG_TIMEOUT_MS } from './client'
 import type {
-  Evaluation, Evaluator, Page, Review, ReviewDetail, RuleSet,
+  Evaluation, EvaluationAttempt, EvaluationDiagnosticResult, Evaluator, Page, Review,
+  ReviewDetail, RuleSet,
 } from './types'
 
 export interface ReviewListParams {
@@ -55,4 +56,18 @@ export const evaluationApi = {
 
   forTask: async (taskId: string) =>
     (await apiClient.get<Evaluation[]>(`/generation-tasks/${taskId}/evaluations`)).data,
+
+  attemptsForTask: async (taskId: string) =>
+    (await apiClient.get<EvaluationAttempt[]>(
+      `/generation-tasks/${taskId}/evaluation-attempts`,
+    )).data,
+
+  testCandidate: async (candidateId: string, confirmBillable: boolean) =>
+    (
+      await apiClient.post<EvaluationDiagnosticResult>(
+        `/generation-candidates/${candidateId}/evaluation-test`,
+        { confirm_billable: confirmBillable },
+        { timeout: LONG_TIMEOUT_MS },
+      )
+    ).data,
 }

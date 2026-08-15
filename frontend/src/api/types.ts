@@ -507,6 +507,59 @@ export interface Evaluation {
   problems: EvaluationProblem[]
 }
 
+export type EvaluationOutcome =
+  | 'SUCCEEDED'
+  | 'PARSE_FAILED'
+  | 'PROVIDER_ERROR'
+  | 'UNAVAILABLE'
+  | 'ROUND_RETRY_SCHEDULED'
+
+export const EVALUATION_OUTCOME_LABEL: Record<EvaluationOutcome, string> = {
+  SUCCEEDED: '评分成功',
+  PARSE_FAILED: '返回解析失败',
+  PROVIDER_ERROR: '模型调用失败',
+  UNAVAILABLE: '评分器不可用',
+  ROUND_RETRY_SCHEDULED: '已安排评分重试',
+}
+
+export interface EvaluationAttempt {
+  id: string
+  candidate_id: string | null
+  evaluation_id: string | null
+  round_number: number
+  outcome: EvaluationOutcome
+  evaluator: string
+  model_name: string | null
+  depth: EvaluationDepth
+  response_id: string | null
+  http_status: number | null
+  finish_reason: string | null
+  prompt_version: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  total_tokens: number | null
+  duration_ms: number | null
+  error_code: string | null
+  error_message: string | null
+  diagnostic: boolean
+  created_at: string
+}
+
+export type DiagnosticEvaluation = Omit<
+  Evaluation,
+  'id' | 'candidate_id' | 'round_number' | 'rank_index' | 'similarity_score'
+  | 'realism_score' | 'created_at'
+>
+
+export interface EvaluationDiagnosticResult {
+  success: boolean
+  candidate_id: string
+  billable: boolean
+  message: string
+  evaluation: DiagnosticEvaluation | null
+  attempt: EvaluationAttempt
+}
+
 export interface Review {
   id: string
   task_id: string

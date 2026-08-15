@@ -300,3 +300,9 @@ class EvaluationAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     meta: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
+
+    @property
+    def diagnostic(self) -> bool:
+        """是否由人工能力测试触发，而不是生成任务的自动评分阶段。"""
+
+        return bool((self.meta or {}).get("diagnostic"))

@@ -6,15 +6,16 @@
     POST   /api/reviews/{id}/reject
     POST   /api/reviews/{id}/regenerate
 
-另外挂了两个只读端点:规则集与评分器列表。
-它们不在需求第十六章的清单里,但分档标准和当前评分器是运营**必须看得见**的东西 ——
-否则"这张图为什么被判 C"只能去翻代码。两者都只读,不提供编辑入口。
+另外挂了评分详情、调用台账、规则集与评分器列表等只读端点。
+它们不在需求第十六章的清单里,但分档标准、当前评分器和失败调用是运营
+**必须看得见**的东西 —— 否则"这张图为什么被判 C / 为什么没有分"只能去翻日志。
 """
 from __future__ import annotations
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,14 +23,18 @@ from app.api.deps import current_actor, db_session, require_operator
 from app.core import audience as audience_rules
 from app.core.config import settings
 from app.core.enums import AUDIENCE_LABELS, DispatchReason, ReviewReason, ReviewStatus
+from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.evaluators.registry import describe_all as describe_evaluators
-from app.models.evaluation import CandidateEvaluation
+from app.models.evaluation import CandidateEvaluation, EvaluationAttempt
 from app.models.generation import GenerationTask
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
 from app.schemas.common import Page
 from app.schemas.evaluation import (
+    DiagnosticEvaluationOut,
+    EvaluationAttemptOut,
+    EvaluationDiagnosticOut,
     EvaluationOut,
     EvaluatorOut,
     ReviewApprove,
@@ -382,6 +387,75 @@ def list_task_evaluations(
 ) -> list[CandidateEvaluation]:
     gs.get_task(session, task_id)  # 不存在时抛 404
     return evaluation_service.list_evaluations(session, task_id)
+
+
+@router.get(
+    "/generation-tasks/{task_id}/evaluation-attempts",
+    response_model=list[EvaluationAttemptOut],
+)
+def list_task_evaluation_attempts(
+    task_id: UUID, session: Session = Depends(db_session)
+) -> list[EvaluationAttempt]:
+    """评分排障台账：成功、解析失败与模型调用失败都会返回。"""
+
+    gs.get_task(session, task_id)  # 不存在时与评分详情一样抛 404
+    return evaluation_service.list_evaluation_attempts(session, task_id)
+
+
+class EvaluationDiagnosticIn(BaseModel):
+    """真实评分器可能收费，调用方必须明确确认。"""
+
+    confirm_billable: bool = False
+
+
+@router.post(
+    "/generation-candidates/{candidate_id}/evaluation-test",
+    response_model=EvaluationDiagnosticOut,
+)
+def test_candidate_evaluation(
+    candidate_id: UUID,
+    payload: EvaluationDiagnosticIn,
+    session: Session = Depends(db_session),
+) -> EvaluationDiagnosticOut:
+    """拿既有候选图真实跑一次评分，但不覆盖正式分数或候选图状态。"""
+
+    from app.evaluators.registry import get_active_evaluator
+    from app.models.generation import GenerationCandidate
+
+    candidate = session.get(GenerationCandidate, candidate_id)
+    if candidate is None:
+        raise NotFoundError("候选图不存在")
+    task = gs.get_task(session, candidate.task_id)
+    evaluator = get_active_evaluator()
+    billable = bool(getattr(evaluator, "billable", False))
+    if billable and not payload.confirm_billable:
+        raise ValidationError(
+            "当前评分器会产生费用；勾选费用确认后才能测试",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+
+    result, attempt = evaluation_service.diagnose_candidate(
+        session,
+        task,
+        candidate,
+        evaluator=evaluator,
+    )
+    session.commit()
+    return EvaluationDiagnosticOut(
+        success=result is not None,
+        candidate_id=candidate.id,
+        billable=billable,
+        message=(
+            "评分测试完成"
+            if result is not None
+            else attempt.error_message or "评分测试未成功"
+        ),
+        evaluation=(
+            DiagnosticEvaluationOut.model_validate(result) if result is not None else None
+        ),
+        attempt=attempt,
+    )
 
 
 @router.get("/rule-sets", response_model=list[RuleSetOut])

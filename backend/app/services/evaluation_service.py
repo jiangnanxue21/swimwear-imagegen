@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -238,6 +240,8 @@ def _record_attempt(
     error_message: str | None = None,
     raw: dict[str, Any] | None = None,
     billable_provider: str | None = None,
+    diagnostic: bool = False,
+    round_number: int | None = None,
 ) -> EvaluationAttempt:
     """给每一次评分请求留一条痕,**成功与失败一视同仁**。
 
@@ -265,7 +269,7 @@ def _record_attempt(
         task_id=task.id,
         candidate_id=candidate.id if candidate is not None else None,
         evaluation_id=evaluation_id,
-        round_number=task.current_round,
+        round_number=round_number if round_number is not None else task.current_round,
         outcome=outcome.value,
         evaluator=evaluator or "",
         model_name=(model_name or meta.get("model") or None),
@@ -286,6 +290,7 @@ def _record_attempt(
             "api_style": meta.get("api_style"),
             "response_format": meta.get("response_format"),
             "images": meta.get("images"),
+            "diagnostic": diagnostic,
         },
     )
     session.add(row)
@@ -308,6 +313,180 @@ def _record_attempt(
         )
 
     return row
+
+
+#: 诊断路径的墙钟上限(秒)。
+#:
+#: 自动评分跑在 worker 里,慢一点只是慢;诊断不是 —— 它是一个**同步 HTTP
+#: 请求处理函数里的真实模型调用**(`api/reviews.py` 里 `asyncio.run` 那一段),
+#: 人在页面上等着。按默认配置 `VISION_MODEL_TIMEOUT_SECONDS=90` +
+#: `VISION_MODEL_MAX_RETRIES=2` 算,最坏是 3 次往返各 90 秒再加退避,约 272 秒;
+#: 而这中间任何一个反代或客户端先超时,连接就断了 —— 用户看到的是 502,
+#: 而那几次调用**已经计费**,台账里也不会有记录(响应还没回来,异常分支还没跑到)。
+#:
+#: 240 秒的来历:它必须小于链路上最短的那个耐心值。常见反代默认 60/300,
+#: 浏览器 fetch 无默认上限但运营的耐心有,所以取一个「比 300 明显小、
+#: 又能容下一次 high detail 的完整评分」的值。改这个数之前先确认反代配置。
+DIAGNOSTIC_WALL_CLOCK_BUDGET_SECONDS = 240.0
+
+
+def _bounded_for_diagnostics(evaluator: ImageQualityEvaluator) -> ImageQualityEvaluator:
+    """返回一个墙钟封顶的评分器副本,专供诊断路径用。
+
+    做两件事:超时封顶到 `DIAGNOSTIC_WALL_CLOCK_BUDGET_SECONDS`,重试归零。
+    重试归零是有意的 —— 诊断的目的是**看清这一次调用发生了什么**,自动重试
+    只会把第一次的真实错误换成第三次的错误,还多计两次费。真要重试,人点第二次。
+
+    **为什么是副本而不是就地改**:调用方(`api/reviews.py`)自己持有这个
+    evaluator 实例并用它判过 `billable`,而传输层是每次调用现读 `self.config`
+    的。就地改会让这次诊断的封顶永久留在那个实例上,表现是「某次诊断之后,
+    这条路径上的超时莫名其妙变短了」—— 一个没人会想到去查的耦合。
+
+    没有 `config` 的评分器(Mock、测试替身)原样返回:它们不发网络请求,
+    没有可封顶的东西,而强行构造副本只会在替身上炸出 AttributeError。
+    """
+    config = getattr(evaluator, "config", None)
+    if config is None:
+        return evaluator
+
+    try:
+        current = float(getattr(config, "timeout_seconds", DIAGNOSTIC_WALL_CLOCK_BUDGET_SECONDS))
+    except (TypeError, ValueError):
+        current = DIAGNOSTIC_WALL_CLOCK_BUDGET_SECONDS
+    try:
+        bounded = dataclasses.replace(
+            config,
+            timeout_seconds=min(current, DIAGNOSTIC_WALL_CLOCK_BUDGET_SECONDS),
+            max_retries=0,
+        )
+    except (TypeError, ValueError):
+        # config 不是 dataclass,或没有这两个字段 —— 同样是「没有可封顶的东西」
+        return evaluator
+
+    clone = copy.copy(evaluator)
+    clone.config = bounded
+    # 传输层自己存了一份 config 引用,且是**调用时现读**的(见
+    # `llm/transport.MultimodalClient.send`)。只改 clone.config 而不改它,
+    # 封顶就完全不生效 —— 而且是静默不生效。
+    transport = getattr(clone, "_transport", None)
+    if transport is not None:
+        transport = copy.copy(transport)
+        transport.config = bounded
+        clone._transport = transport
+    return clone
+
+
+def diagnose_candidate(
+    session: Session,
+    task: GenerationTask,
+    candidate: GenerationCandidate,
+    *,
+    evaluator: ImageQualityEvaluator | None = None,
+) -> tuple[EvaluationResult | None, EvaluationAttempt]:
+    """人工测试一张候选图，不覆盖正式评分或候选图状态。
+
+    真实评分器仍可能计费，所以成功与失败都进入原有调用与费用台账；
+    `meta.diagnostic` 用来和自动评分区分。
+    """
+
+    if candidate.task_id != task.id:
+        raise ValueError("候选图不属于指定生成任务")
+
+    rule_set = load_active_rule_set(session)
+    # 封顶在这里、而不是在 api 层:任何调用 diagnose_candidate 的入口都跑在
+    # 同步请求里,漏接一个入口就等于这条防线不存在
+    evaluator = _bounded_for_diagnostics(evaluator or get_active_evaluator())
+    product = session.get(Product, task.product_id)
+    metadata = product_metadata(product, session) if product else {}
+    prompt_context = {
+        **_prompt_context(
+            session, getattr(product, "audience", None) if product else None
+        ),
+        **_rule_pack_context(product),
+    }
+    depth = EvaluationDepth.FULL
+    payload = rule_set.payload(
+        mock_evaluator={
+            **rule_set.evaluator_options.get("mock_evaluator", {}),
+            **(task.provider_params or {}).get("mock_evaluator", {}),
+            "round_number": candidate.round_number,
+            "quick_only": False,
+        },
+        **{VISION_DEPTH_KEY: depth.value},
+        **prompt_context,
+    )
+
+    try:
+        result = asyncio.run(
+            evaluator.evaluate_structured(
+                _reference_asset_paths(session, task),
+                candidate.storage_path or "",
+                metadata,
+                payload,
+                depth=depth,
+            )
+        )
+    except EvaluationParseError as exc:
+        attempt = _record_attempt(
+            session,
+            task,
+            candidate,
+            outcome=EvaluationOutcome.PARSE_FAILED,
+            evaluator=evaluator.evaluator_name,
+            depth=depth,
+            prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            error_code=str(exc.code),
+            error_message=exc.message,
+            duration_ms=exc.duration_ms,
+            raw={"_vision_meta": exc.vision_meta} if exc.vision_meta else None,
+            billable_provider=_billing(evaluator),
+            diagnostic=True,
+            round_number=candidate.round_number,
+        )
+        return None, attempt
+    except ProviderError as exc:
+        attempt = _record_attempt(
+            session,
+            task,
+            candidate,
+            outcome=EvaluationOutcome.PROVIDER_ERROR,
+            evaluator=evaluator.evaluator_name,
+            depth=depth,
+            prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            error_code=str(exc.code),
+            error_message=exc.message,
+            duration_ms=getattr(exc, "duration_ms", None),
+            raw=(
+                {"_vision_meta": exc.vision_meta}
+                if getattr(exc, "vision_meta", None)
+                else None
+            ),
+            billable_provider=_billing(evaluator),
+            diagnostic=True,
+            round_number=candidate.round_number,
+        )
+        return None, attempt
+
+    decision = grade_candidate(result, rule_set.thresholds)
+    result.grade = decision.grade
+    result.recommended_action = decision.action
+    result.grade_reasons = list(decision.reasons)
+    attempt = _record_attempt(
+        session,
+        task,
+        candidate,
+        outcome=EvaluationOutcome.SUCCEEDED,
+        evaluator=result.evaluator,
+        depth=result.depth,
+        prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+        model_name=result.model_name,
+        duration_ms=result.duration_ms,
+        raw=result.raw,
+        billable_provider=_billing(evaluator),
+        diagnostic=True,
+        round_number=candidate.round_number,
+    )
+    return result, attempt
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -554,6 +733,21 @@ def evaluate_round(
                 prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
                 error_code=str(exc.code),
                 error_message=exc.message,
+                # 和上面的解析失败分支对齐。截断、内容安全拒绝这类
+                # ProviderError 是**已经计费的成功 HTTP 调用** —— 评分器在
+                # `_extract_or_fail` 那一层已经把响应 ID、模型名、token 用量、
+                # finish reason 挂到异常上了。以前这个分支不取,于是生产评分
+                # 路径上最该对账的一类失败,`evaluation_attempts` 里反而是空的
+                # (而同一份数据在诊断路径上是落库的,两条路径就此分叉)。
+                #
+                # 用 getattr 而不是直接取属性:限流、超时这些是传输层抛的,
+                # 请求根本没成功,身上没有这两个字段,取不到就该是 None。
+                duration_ms=getattr(exc, "duration_ms", None),
+                raw=(
+                    {"_vision_meta": getattr(exc, "vision_meta", None)}
+                    if getattr(exc, "vision_meta", None)
+                    else None
+                ),
                 billable_provider=_billing(evaluator),
             )
             scorer_failures.append((key, str(exc.code), exc.message))
@@ -750,6 +944,18 @@ def list_evaluations(session: Session, task_id: UUID) -> list[CandidateEvaluatio
             select(CandidateEvaluation)
             .where(CandidateEvaluation.task_id == task_id)
             .order_by(CandidateEvaluation.round_number, CandidateEvaluation.created_at)
+        )
+    )
+
+
+def list_evaluation_attempts(session: Session, task_id: UUID) -> list[EvaluationAttempt]:
+    """按发生顺序返回成功与失败的评分调用，供任务详情排障。"""
+
+    return list(
+        session.scalars(
+            select(EvaluationAttempt)
+            .where(EvaluationAttempt.task_id == task_id)
+            .order_by(EvaluationAttempt.created_at, EvaluationAttempt.id)
         )
     )
 

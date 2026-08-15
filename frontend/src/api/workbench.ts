@@ -15,7 +15,7 @@
  * 就是为了让「界面上冒出一串英文常量」不可能悄悄发生。
  */
 import axios from 'axios'
-import { apiClient, describeError, isResultUnknown } from './client'
+import { apiClient, describeError, isResultUnknown, LONG_TIMEOUT_MS } from './client'
 import { decodeExportName } from './batch'
 import type { BrandToken } from '../theme'
 import type { Audience } from './types'
@@ -349,6 +349,40 @@ export interface WorkbenchListResponse {
   page: number
   page_size: number
   items: WorkbenchListItem[]
+}
+
+export interface CopyDiagnosticViolation {
+  code: string
+  message: string
+  location: string | null
+  blocking: boolean
+}
+
+export interface CopyDiagnosticResult {
+  success: boolean
+  billable: boolean
+  generator: string
+  prompt_version: string
+  message: string
+  error_code: string | null
+  copy: {
+    title: string
+    bullet_points: string[]
+    description: string
+    keywords: string[]
+  } | null
+  notes: string[]
+  trace: {
+    model?: string | null
+    response_id?: string | null
+    http_status?: number | null
+    duration_ms?: number | null
+    provider_attempts?: number | null
+    prompt_tokens?: number | null
+    completion_tokens?: number | null
+    total_tokens?: number | null
+  }
+  violations: CopyDiagnosticViolation[]
 }
 
 export interface CopyViolation {
@@ -896,6 +930,15 @@ export const workbenchApi = {
         { only_fields: onlyFields ?? null },
       )
     ).data.copy,
+
+  testCopy: async (productId: string, confirmBillable: boolean) =>
+    (
+      await apiClient.post<CopyDiagnosticResult>(
+        `/workbench/products/${productId}/copy/test`,
+        { confirm_billable: confirmBillable },
+        { timeout: LONG_TIMEOUT_MS },
+      )
+    ).data,
 
   saveCopy: async (
     productId: string,

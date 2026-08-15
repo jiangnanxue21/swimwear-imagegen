@@ -1,13 +1,51 @@
 # 网站商品展示图自动生成系统
 
-**服装**商品的网站展示图生产流水线:上传商品资料与原图 → 多 Provider 生成候选图 → 自动评分分档 → 自动重生或人工审核 → 输出网站可直接使用的多尺寸图片 URL。
+<div align="center">
+
+**服装商品展示图的生产流水线** · 多 Provider 生成 · 确定性评分分档 · 自动重生与人工审核
+
+🚀 [快速开始](#快速开始) · 🗺️ [架构图册](docs/ARCHITECTURE.md) · 📊 [能力现状](docs/STATUS.md) · 🧪 [评分器接入](docs/VISION-EVALUATOR.md) · 🚢 [部署](docs/DEPLOYMENT.md) · 🧭 [设计决策](docs/DECISIONS.md)
+
+</div>
+
+---
+
+上传商品资料与原图 → 多 Provider 生成候选图 → 自动评分分档 → 自动重生或人工审核 → 输出网站可直接使用的多尺寸图片 URL。
+
+```mermaid
+flowchart LR
+    A["建档与素材<br/>SPU / SKU / 原图"] --> B["生成<br/>每轮 4 张候选"]
+    B --> C["评分分档<br/>A / B / C / D"]
+    C -->|"A 档"| D["五个尺寸版本<br/>导出与上架"]
+    C -->|"还有轮次"| B
+    C -->|"轮次耗尽"| E["人工审核"]
+    E -->|"通过"| D
+    E -->|"追加轮次"| B
+```
+
+> 每一步的展开、以及轮级决策、Provider 错误策略、请求预算拟合、脱敏链路、
+> 交付闸门的完整图解,见 **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**。
 
 品类是参数,不是写死的:渠道字段 spec 按 `spec/{category_id}.yaml` 载入,属性注册表按品类校准。
 **泳装是目前唯一已校准、且有渠道 spec 的品类**,所以样例数据与评分提示词里说的是泳装 ——
 那是在描述这个品类,不是系统的边界。
 
-> **能力现状、已知限制与文档地图见 `docs/STATUS.md`** —— 想知道某项能不能用,从那份开始。
-> 部署与运维见 `docs/DEPLOYMENT.md`;视觉评分器与提示词编辑见 `docs/VISION-EVALUATOR.md`。
+### 文档地图
+
+| 想知道 | 看这份 |
+| --- | --- |
+| 各条流程长什么样(图) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| 某项能力能不能用、已知限制 | [`docs/STATUS.md`](docs/STATUS.md) —— **不确定时从这份开始** |
+| 为什么这么设计、升级须知 | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| 部署与运维 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
+| 接真实视觉评分模型 | [`docs/VISION-EVALUATOR.md`](docs/VISION-EVALUATOR.md) |
+| 接 FASHN | [`docs/PROVIDER-FASHN.md`](docs/PROVIDER-FASHN.md) |
+| 后台设置项的取舍 | [`docs/SETTINGS.md`](docs/SETTINGS.md) |
+| 人工验收步骤 | [`docs/MANUAL-ACCEPTANCE.md`](docs/MANUAL-ACCEPTANCE.md) |
+
+> ⚠️ **升级一个已在运行的部署之前,先读 `docs/DECISIONS.md` 第三节。**
+> 那里按主题归并了全部升级须知:必须做的人工动作(主密钥轮换、`ADMIN_TOKEN`、
+> beat 进程)、原本能跑通但现在会被挡下的操作、以及几处不报错的看板口径变更。
 >
 > ⚠️ **升级一个已在运行的部署之前,先读 `docs/DECISIONS.md` 第三节。**
 > 那里按主题归并了全部升级须知:必须做的人工动作(主密钥轮换、`ADMIN_TOKEN`、
@@ -178,17 +216,22 @@ make seed                          # 导入示例商品与素材
 
 候选图不靠人眼逐张看,而是走一条确定性的流水线:
 
+```mermaid
+flowchart TD
+    R["每轮 4 张候选"] --> PRE["轮内预排序<br/>感知哈希 + 真实性代理指标(可关闭)"]
+    PRE --> SPLIT["前两名完整评分<br/>后两名快速硬错误检查"]
+    SPLIT --> G{"A / B / C / D 分档"}
+    G -->|"A"| PASS["自动通过<br/>按比例随机抽检"]
+    G -->|"B"| FIX["按问题代码生成<br/>确定性修复参数,定向重生"]
+    G -->|"C"| SWAP["淘汰,换 seed 或模特模板<br/>必要时换 Provider"]
+    G -->|"D"| DROP["当前候选直接淘汰"]
+    FIX & SWAP & DROP --> MORE{"还有轮次?"}
+    MORE -->|"有"| R
+    MORE -->|"耗尽且无 A 档"| HUMAN["任务进人工审核"]
 ```
-每轮 4 张候选
-  → 轮内预排序(感知哈希 + 真实性代理指标,可关闭)
-  → 前两名完整评分,后两名快速硬错误检查
-  → A/B/C/D 分档
-  → A 档:自动通过(按比例随机抽检)
-    B 档:按问题代码生成确定性修复参数,定向重生
-    C 档:淘汰,换 seed 或模特模板,必要时换 Provider
-    D 档:当前候选直接淘汰
-  → 还有轮次就继续生成,轮次耗尽仍无 A 档 → 任务进人工审核
-```
+
+> 分档门槛、硬错误全表(18 项)与 Provider 错误策略矩阵见
+> [`docs/ARCHITECTURE.md` 第 2、3 节](docs/ARCHITECTURE.md#2-轮级决策什么时候重生什么时候找人)。
 
 三条规则值得单独强调:
 

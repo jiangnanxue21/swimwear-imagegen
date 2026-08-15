@@ -81,7 +81,8 @@ backend 不再对外发布端口)。只跑 `docker compose up -d --build` 起的
 | `POSTGRES_PASSWORD` | 明文弱口令 | 改掉,并用 secret 管理而不是 `.env` |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | 改成真实域名,否则导出的图片 URL 无法访问 |
 | `STORAGE_BACKEND` | `local` | 建议 `s3`;本地存储由后端进程直接托管,不适合生产 |
-| `LOG_LEVEL` | `INFO` | 保持 INFO;DEBUG 会打出请求体 |
+| `LOG_LEVEL` | `INFO` | 保持 INFO;模型 HTTP 生命周期在 INFO 下可见 |
+| `LLM_LOG_PAYLOADS` | `false` | 常态关闭;端点兼容性排障时临时打开，图片与密钥仍会脱敏 |
 | `CELERY_TASK_ALWAYS_EAGER` | `false` | 必须是 false,否则生成会在 HTTP 请求里同步跑 |
 | `DOWNLOAD_ALLOWED_HOSTS` | 空 | 只在自建 ComfyUI 时填,填了等于放行内网下载 |
 | `ADMIN_PASSWORD` | 空 | **必填**,浏览器登录的管理员密码;不填则非本机环境起不来 |

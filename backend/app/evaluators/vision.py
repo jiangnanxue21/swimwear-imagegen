@@ -15,15 +15,22 @@
 日志与 ``raw_response`` 里**不出现** API Key、图片字节、base64、完整请求体。
 可以出现的是:模型名、响应 ID、token 用量、finish reason、HTTP 状态码、解析后的分数。
 """
+
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 from app.core.enums import Audience, EvaluationDepth
 from app.core.logging import get_logger
+from app.core.vocab import (
+    DEFAULT_VISION_MAX_OUTPUT_TOKENS,
+    MAX_VISION_MAX_OUTPUT_TOKENS,
+)
 from app.evaluators.base import ImageQualityEvaluator
 from app.evaluators.vision_schema import (
     DEFAULT_SYSTEM_PROMPT,
@@ -33,10 +40,11 @@ from app.evaluators.vision_schema import (
     response_format_name,
 )
 from app.llm import endpoint_trust
-from app.llm.images import ImageResolver, PreparedImage
+from app.llm.images import ImageResolver, PreparedImage, compact_prepared_image
 from app.llm.transport import (
     LLMRequest,
     MultimodalClient,
+    canonical_json_bytes,
     extract_chat_text,
     extract_responses_text,
     find_finish_reason,
@@ -77,6 +85,46 @@ PROMPT_KEY = "_system_prompt"
 AUDIENCE_KEY = "_audience"
 ENABLED_CODES_KEY = "_enabled_hard_fail_codes"
 
+#: 由占位请求算出真实的非图片开销后,再留一点序列化余量。不是预留 1MB 这种
+#: 拍脑袋常量:提示词与 Schema 变大时,占位请求会跟着变大。
+REQUEST_BODY_SAFETY_MARGIN_BYTES = 16 * 1024
+#: Base64 每 3 字节变 4 字符;再扣一点 padding 与 data URL MIME 前缀余量。
+ENCODED_TO_RAW_BUDGET_RATIO = 0.74
+CANDIDATE_BUDGET_PERCENT = 55
+MAX_REQUEST_FIT_PASSES = 3
+
+#: 判定为「输出被截断」的 finish_reason。
+#:
+#: 裸 `"incomplete"` 是 Responses API 的形状:`status="incomplete"` 但
+#: `incomplete_details` 缺失或不带 reason 时,`find_finish_reason` 就返回它
+#: (见 llm/transport.py)。漏掉这一项的表现很误导 —— 截断会一路掉到下面的
+#: 空输出分支,报成「上游返回空输出」,把人引去查网络和鉴权,
+#: 而真正该调的是 token 上限。
+TRUNCATED_FINISH_REASONS = ("length", "max_output_tokens", "max_tokens", "incomplete")
+
+#: 已经算「不必再降」的推理档位。停在这里的意义是别给一条做不到的建议。
+LOW_REASONING_EFFORTS = ("low", "none", "minimal", "")
+
+
+def recommended_max_output_tokens(current: int) -> int:
+    """截断之后,建议把 `VISION_MODEL_MAX_OUTPUT_TOKENS` 调到多少。
+
+    唯一的硬要求:**结果要么严格大于当前值,要么就别把它说成一条建议**。
+    这里以前恒返回 `DEFAULT_VISION_MAX_OUTPUT_TOKENS`(8192),而 8192 正是
+    默认值 —— 于是最常见的那次截断(默认配置跑 FULL 评分被截)给出的
+    指示是「当前 8192,建议设为 8192」。运营照做,什么都没变,再截一次。
+
+    低于默认值先抬到默认值;到了默认值之上翻倍递进,并封在设置页允许的
+    上限上 —— 建议一个表单填不进去的数,和不给建议是一回事。
+    """
+    try:
+        current = int(current)
+    except (TypeError, ValueError):
+        return DEFAULT_VISION_MAX_OUTPUT_TOKENS
+    if current < DEFAULT_VISION_MAX_OUTPUT_TOKENS:
+        return DEFAULT_VISION_MAX_OUTPUT_TOKENS
+    return min(MAX_VISION_MAX_OUTPUT_TOKENS, current * 2)
+
 
 def audience_from(rule_set: dict | None) -> Audience | None:
     """本次评分的受众。取不到就是 None —— 与提示词同一条降级思路:
@@ -99,6 +147,8 @@ def enabled_codes_from(rule_set: dict | None) -> list[str] | None:
     if not raw:
         return None
     return [str(c).upper() for c in raw]
+
+
 PROMPT_VERSION_KEY = "_system_prompt_version"
 
 # 这里原来有一份 RETRYABLE_STATUS / MAX_RETRY_AFTER_SECONDS 的本地定义,
@@ -134,8 +184,9 @@ class VisionEvaluatorConfig:
     response_format: str = FORMAT_JSON_SCHEMA
     timeout_seconds: float = 90.0
     max_image_bytes: int = 8 * 1024 * 1024
+    max_request_bytes: int = 5 * 1024 * 1024
     max_reference_images: int = 4
-    max_output_tokens: int = 1800
+    max_output_tokens: int = DEFAULT_VISION_MAX_OUTPUT_TOKENS
     max_retries: int = 2
     retry_base_seconds: float = 0.5
     full_image_detail: str = "high"
@@ -150,11 +201,13 @@ class VisionEvaluatorConfig:
     @classmethod
     def from_settings(cls) -> VisionEvaluatorConfig:
         style = (
-            provider_setting("VISION_MODEL_API_STYLE", API_STYLE_RESPONSES) or ""
-        ).strip().lower()
+            (provider_setting("VISION_MODEL_API_STYLE", API_STYLE_RESPONSES) or "").strip().lower()
+        )
         fmt = (
-            provider_setting("VISION_MODEL_RESPONSE_FORMAT", FORMAT_JSON_SCHEMA) or ""
-        ).strip().lower()
+            (provider_setting("VISION_MODEL_RESPONSE_FORMAT", FORMAT_JSON_SCHEMA) or "")
+            .strip()
+            .lower()
+        )
         return cls(
             api_key=provider_setting("VISION_MODEL_API_KEY"),
             base_url=provider_setting("VISION_MODEL_BASE_URL"),
@@ -163,19 +216,22 @@ class VisionEvaluatorConfig:
             response_format=fmt if fmt in RESPONSE_FORMATS else FORMAT_JSON_SCHEMA,
             timeout_seconds=provider_float("VISION_MODEL_TIMEOUT_SECONDS", 90.0),
             max_image_bytes=provider_int("VISION_MODEL_MAX_IMAGE_MB", 8) * 1024 * 1024,
+            max_request_bytes=provider_int("VISION_MODEL_MAX_REQUEST_MB", 5) * 1024 * 1024,
             max_reference_images=provider_int("VISION_MODEL_MAX_REFERENCE_IMAGES", 4),
-            max_output_tokens=provider_int("VISION_MODEL_MAX_OUTPUT_TOKENS", 1800),
+            max_output_tokens=provider_int(
+                "VISION_MODEL_MAX_OUTPUT_TOKENS", DEFAULT_VISION_MAX_OUTPUT_TOKENS
+            ),
             max_retries=provider_int("VISION_MODEL_MAX_RETRIES", 2),
             retry_base_seconds=provider_float("VISION_MODEL_RETRY_BASE_SECONDS", 0.5),
-            full_image_detail=(
-                provider_setting("VISION_MODEL_FULL_IMAGE_DETAIL", "high") or "high"
-            ).strip().lower(),
-            quick_image_detail=(
-                provider_setting("VISION_MODEL_QUICK_IMAGE_DETAIL", "low") or "low"
-            ).strip().lower(),
-            reasoning_effort=(
-                provider_setting("VISION_MODEL_REASONING_EFFORT", "low") or "low"
-            ).strip().lower(),
+            full_image_detail=(provider_setting("VISION_MODEL_FULL_IMAGE_DETAIL", "high") or "high")
+            .strip()
+            .lower(),
+            quick_image_detail=(provider_setting("VISION_MODEL_QUICK_IMAGE_DETAIL", "low") or "low")
+            .strip()
+            .lower(),
+            reasoning_effort=(provider_setting("VISION_MODEL_REASONING_EFFORT", "low") or "low")
+            .strip()
+            .lower(),
             send_public_urls=provider_flag("VISION_MODEL_SEND_PUBLIC_URLS", False),
             fail_closed=provider_flag("VISION_MODEL_FAIL_CLOSED", True),
             allow_anonymous=provider_flag("VISION_MODEL_ALLOW_ANONYMOUS", False),
@@ -202,7 +258,7 @@ class VisionEvaluatorConfig:
 
         **失败方向和上面那段自述正好相反**:那里写着"猜错的方向是多要一个 Key",
         而这一支猜错的方向是少要一个 Key,并且把凭据缺失伪装成配置完成。
-        
+
 
         反过来做 —— 默认所有端点都不需要 Key —— 的后果是:忘了配 Key 时
         ``is_configured()`` 返回 True,评分器被选中,然后每一张候选图都因为 401 失败,
@@ -481,9 +537,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
         识别费和评分费会在 `/spend` 页分列在两个厂商下)。
         """
         raw = str(getattr(self.config, "base_url", "") or "")
-        return endpoint_trust.provider_label_from_base_url(
-            raw, fallback=self.evaluator_name
-        )
+        return endpoint_trust.provider_label_from_base_url(raw, fallback=self.evaluator_name)
 
     def __init__(
         self,
@@ -563,7 +617,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             reference_count=len(references),
             allowed_hard_fail_codes=allowed_codes,
         )
-        request = self._adapter.build(
+        request = await self._fit_request_to_budget(
             depth=depth,
             audience=audience,
             allowed_hard_fail_codes=allowed_codes,
@@ -577,14 +631,10 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
         response_payload, status = await self._send_with_retries(request)
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
-        text = self._extract_or_fail(response_payload, status=status)
-
-        # 元数据**先于**解析构造。HTTP 请求这一步已经成功了 —— 响应 ID、
+        # 元数据**先于输出完整性检查与解析构造**。HTTP 请求这一步已经成功了 —— 响应 ID、
         # 厂商实际路由到的模型、token 用量、耗时全都拿到了,而它们恰恰是
         # 事后拿着响应 ID 找厂商查一次异常调用的全部依据,且只在这一刻存在。
-        # 先解析再构造元数据的话,响应体不是合法 JSON 时异常直接穿出去,
-        # `evaluation_attempts` 里那条失败记录只剩一句「解析不了」——
-        # 一张专门为留痕而建的表,在最需要留痕的场景里什么都没留下。
+        # 截断也是一次已经计费的成功 HTTP 调用,不能只给解析失败留这些字段。
         meta = self._build_metadata(
             response=response_payload,
             request=request,
@@ -593,6 +643,15 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             elapsed_ms=elapsed_ms,
             prompt_version=(rule_set or {}).get(PROMPT_VERSION_KEY),
         )
+
+        try:
+            text = self._extract_or_fail(response_payload, status=status)
+        except ProviderError as exc:
+            if getattr(exc, "vision_meta", None) is None:
+                exc.vision_meta = meta
+            if getattr(exc, "duration_ms", None) is None:
+                exc.duration_ms = elapsed_ms
+            raise
 
         from app.evaluators.scoring import EvaluationParseError
 
@@ -692,6 +751,214 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
         )
         return references, candidate
 
+    def _build_request(
+        self,
+        *,
+        depth: EvaluationDepth,
+        audience: Audience | None,
+        allowed_hard_fail_codes: Sequence[str] | None,
+        system_prompt: str,
+        user_prompt: str,
+        references: list[PreparedImage],
+        candidate: PreparedImage,
+    ) -> VisionRequest:
+        return self._adapter.build(
+            depth=depth,
+            audience=audience,
+            allowed_hard_fail_codes=allowed_hard_fail_codes,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            references=references,
+            candidate=candidate,
+        )
+
+    @staticmethod
+    def _request_body_bytes(request: VisionRequest) -> int:
+        # 和 `_send_once` 用同一个序列化器。自己再写一遍 json.dumps 的表现是:
+        # 参数哪天分叉了,预算检查会继续给出一个"通过",而线上是 413
+        return len(canonical_json_bytes(request.body))
+
+    @staticmethod
+    def _placeholder(image: PreparedImage) -> PreparedImage:
+        if not image.inline:
+            return image
+        return PreparedImage(
+            role=image.role,
+            mime_type=image.mime_type,
+            byte_size=0,
+            data_url=f"data:{image.mime_type};base64,",
+            source_byte_size=image.source_byte_size,
+        )
+
+    @staticmethod
+    def _allocate_inline_budgets(
+        images: list[PreparedImage], total_raw_bytes: int
+    ) -> dict[str, int]:
+        """候选图优先,并把小图没用完的预算自动归还给其他图片。
+
+        公网 URL 不在 ``images`` 里,不会因为“图片数量”被误分走请求体预算。
+        候选图先占图片预算的 55%,全部参考图共享 45%;若任一原图本来就小于
+        它的份额,按真实大小结算,空余再次按权重分配。
+        """
+        if not images or total_raw_bytes <= 0:
+            return {}
+        references = [image for image in images if image.role != "CANDIDATE_IMAGE"]
+        weights = {
+            image.role: (
+                Fraction(CANDIDATE_BUDGET_PERCENT, 100)
+                if image.role == "CANDIDATE_IMAGE"
+                else Fraction(
+                    100 - CANDIDATE_BUDGET_PERCENT,
+                    100 * max(1, len(references)),
+                )
+            )
+            for image in images
+        }
+        unresolved = {image.role: image for image in images}
+        budgets: dict[str, int] = {}
+        remaining = total_raw_bytes
+        while unresolved:
+            weight_total = sum(weights[role] for role in unresolved)
+            settled = []
+            for role, image in unresolved.items():
+                share = int(remaining * weights[role] / weight_total)
+                if image.byte_size <= share:
+                    budgets[role] = image.byte_size
+                    remaining -= image.byte_size
+                    settled.append(role)
+            if not settled:
+                roles = list(unresolved)
+                assigned = 0
+                for role in roles[:-1]:
+                    share = max(1, int(remaining * weights[role] / weight_total))
+                    budgets[role] = share
+                    assigned += share
+                budgets[roles[-1]] = max(1, remaining - assigned)
+                break
+            for role in settled:
+                unresolved.pop(role)
+        return budgets
+
+    async def _fit_request_to_budget(
+        self,
+        *,
+        depth: EvaluationDepth,
+        audience: Audience | None,
+        allowed_hard_fail_codes: Sequence[str] | None,
+        system_prompt: str,
+        user_prompt: str,
+        references: list[PreparedImage],
+        candidate: PreparedImage,
+    ) -> VisionRequest:
+        """先发原图形状;确实超限时才压缩,并按真实 JSON 二次收敛。"""
+        build_kwargs = {
+            "depth": depth,
+            "audience": audience,
+            "allowed_hard_fail_codes": allowed_hard_fail_codes,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+        request = self._build_request(
+            **build_kwargs, references=references, candidate=candidate
+        )
+        original_size = self._request_body_bytes(request)
+        if original_size <= self.config.max_request_bytes:
+            return request
+
+        all_images = [*references, candidate]
+        inline_images = [image for image in all_images if image.inline]
+        if not inline_images:
+            self._ensure_request_fits(request)
+
+        placeholder_refs = [self._placeholder(image) for image in references]
+        placeholder_candidate = self._placeholder(candidate)
+        placeholder_request = self._build_request(
+            **build_kwargs,
+            references=placeholder_refs,
+            candidate=placeholder_candidate,
+        )
+        encoded_budget = (
+            self.config.max_request_bytes
+            - self._request_body_bytes(placeholder_request)
+            - REQUEST_BODY_SAFETY_MARGIN_BYTES
+        )
+        if encoded_budget <= 0:
+            raise ProviderInputError(
+                "VISION_MODEL_MAX_REQUEST_MB 太小,不足以容纳评分提示词和响应 Schema",
+                provider=self.evaluator_name,
+                detail={"limit_bytes": self.config.max_request_bytes},
+            )
+        raw_budget = max(1, int(encoded_budget * ENCODED_TO_RAW_BUDGET_RATIO))
+
+        by_role = {image.role: image for image in inline_images}
+        fitted_request = request
+        for _attempt in range(MAX_REQUEST_FIT_PASSES):
+            budgets = self._allocate_inline_budgets(inline_images, raw_budget)
+            compacted: dict[str, PreparedImage] = {}
+            for role, image in by_role.items():
+                compacted[role] = await asyncio.to_thread(
+                    compact_prepared_image,
+                    image,
+                    max_bytes=budgets[role],
+                )
+            fitted_refs = [compacted.get(image.role, image) for image in references]
+            fitted_candidate = compacted.get(candidate.role, candidate)
+            fitted_request = self._build_request(
+                **build_kwargs,
+                references=fitted_refs,
+                candidate=fitted_candidate,
+            )
+            fitted_size = self._request_body_bytes(fitted_request)
+            if fitted_size <= self.config.max_request_bytes:
+                logger.info(
+                    "vision request fitted to endpoint body budget",
+                    extra={
+                        "extra_fields": {
+                            "original_body_bytes": original_size,
+                            "fitted_body_bytes": fitted_size,
+                            "limit_bytes": self.config.max_request_bytes,
+                            "inline_count": len(inline_images),
+                        }
+                    },
+                )
+                return fitted_request
+            # 始终从原始 PreparedImage 重新编码,不对上一轮 JPEG 再压一次。
+            # 真实超出比例决定下一轮预算,再留 3% 收敛余量。
+            raw_budget = max(
+                1,
+                int(
+                    raw_budget
+                    * self.config.max_request_bytes
+                    / fitted_size
+                    * 0.97
+                ),
+            )
+
+        self._ensure_request_fits(fitted_request)
+        return fitted_request  # pragma: no cover - 上一行只在符合预算时返回
+
+    def _ensure_request_fits(self, request: VisionRequest) -> None:
+        """发送前按实际 JSON 复核,不把已知超限请求交给厂商换一个 400。
+
+        「实际」这个词现在是字面意思:`canonical_json_bytes` 的返回值就是
+        `_send_once` 原样 `content=` 发出去的那一串。
+        """
+        body_bytes = len(canonical_json_bytes(request.body))
+        if body_bytes <= self.config.max_request_bytes:
+            return
+        raise ProviderInputError(
+            f"视觉评分请求体 {body_bytes // 1024} KB,超过配置总上限 "
+            f"{self.config.max_request_bytes // 1024} KB;"
+            "请减少参考图或启用 VISION_MODEL_SEND_PUBLIC_URLS",
+            provider=self.evaluator_name,
+            detail={
+                "request_body_bytes": body_bytes,
+                "limit_bytes": self.config.max_request_bytes,
+                "image_count": len(request.images),
+                "inline_count": sum(1 for image in request.images if image.inline),
+            },
+        )
+
     # ---------------- HTTP ----------------
 
     async def _send_with_retries(self, request: VisionRequest) -> tuple[dict[str, Any], int]:
@@ -748,17 +1015,46 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
                 provider=self.evaluator_name,
                 detail=self._error_detail(status=status),
             )
-        if finish in ("length", "max_output_tokens", "max_tokens"):
+        if finish in TRUNCATED_FINISH_REASONS:
             # 截断的 JSON 一定解析失败。与其让它在 parser 里炸出一个含混的
             # "不是合法 JSON",不如在这里说清楚是被截断了、该调哪个配置
+            current_tokens = self.config.max_output_tokens
+            recommended = recommended_max_output_tokens(current_tokens)
+            effort = (self.config.reasoning_effort or "").strip().lower()
+            detail = {
+                **self._error_detail(status=status),
+                "finish_reason": finish,
+                "configured_max_output_tokens": current_tokens,
+                "configured_reasoning_effort": self.config.reasoning_effort,
+                "recommended_max_output_tokens": recommended,
+                #: 建议值封在这里。写进 detail 是为了让前端能解释
+                #: "为什么不建议再调大" —— 否则到顶之后那条建议看起来像漏了
+                "max_output_tokens_ceiling": MAX_VISION_MAX_OUTPUT_TOKENS,
+                "automatic_retry": False,
+            }
+            if recommended > current_tokens:
+                advice = f"建议把 VISION_MODEL_MAX_OUTPUT_TOKENS 从 {current_tokens} 调到 {recommended}"
+            else:
+                # 已经顶到设置页允许的上限。这时候再说"调大"就是一条执行不了的
+                # 建议 —— 表单会直接打回。剩下能动的只有推理档位和评分深度。
+                advice = (
+                    f"VISION_MODEL_MAX_OUTPUT_TOKENS 已是允许的上限 "
+                    f"{MAX_VISION_MAX_OUTPUT_TOKENS},无法再调大"
+                )
+            if effort not in LOW_REASONING_EFFORTS:
+                # 只在真的还能降的时候才说。已经是 low/none 还建议"降到 low/none",
+                # 和上面那条"把 8192 改成 8192"是同一类空话
+                advice += f";也可把 VISION_MODEL_REASONING_EFFORT 从 {effort} 降到 low,腾出输出预算"
             raise ProviderInputError(
                 self._error_message(
-                    "输出被截断,请调大 VISION_MODEL_MAX_OUTPUT_TOKENS",
+                    f"输出被截断;当前 VISION_MODEL_MAX_OUTPUT_TOKENS={current_tokens}。"
+                    f"{advice}。"
+                    "系统未自动重试,避免产生第二次模型费用",
                     status=status,
                     extra=finish,
                 ),
                 provider=self.evaluator_name,
-                detail=self._error_detail(status=status),
+                detail=detail,
             )
 
         text = self._adapter.extract_text(payload)

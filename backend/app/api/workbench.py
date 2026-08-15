@@ -35,6 +35,7 @@ from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.http_headers import download_headers
 from app.core.search import ESCAPE_CHAR, like_pattern
 from app.core.sorting import normalize_sort, sort_in_memory
+from app.listings import copy_generator
 from app.models.audit_log import AuditLog
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
@@ -542,6 +543,36 @@ class CopyGenerateIn(BaseModel):
             "S/M/L 三行各点一次不会变成三次付费调用"
         ),
     )
+
+
+class CopyDiagnosticIn(BaseModel):
+    """独立文案能力测试。真实模型可能计费,但不保存正式文案。"""
+
+    confirm_billable: bool = False
+    generator: str | None = None
+
+
+@router.post("/products/{product_id}/copy/test")
+def test_copy_generation(
+    product_id: UUID,
+    payload: CopyDiagnosticIn,
+    session: Session = Depends(db_session),
+) -> dict[str, Any]:
+    product = _product(session, product_id)
+    generator = copy_generator.get_generator(payload.generator)
+    if generator.billable and not payload.confirm_billable:
+        raise ValidationError(
+            "当前文案生成器会调用外部模型并可能产生费用,请先确认",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+    result = wb.diagnose_copy(
+        session,
+        product,
+        generator_name=payload.generator,
+    )
+    session.commit()
+    return result
 
 
 class CopySaveIn(BaseModel):

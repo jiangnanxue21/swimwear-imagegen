@@ -32,6 +32,13 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# 运行期日志。uvicorn 的 stdout/stderr 落盘后含完整请求行、异常栈、图片绝对
+# 路径与上游 URL 查询串;这两个具名文件已随交付包出去过两次,所以除了通配
+# 之外再逐个点名,避免以后有人把通配那行当噪音删掉。
+*.log
+backend/.api-stdout.log
+backend/.api-stderr.log
+
 # 编辑器与系统
 .DS_Store
 .idea/

@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.db import locks
 from app.listings import content_plan as plan_rules
 from app.listings import copy_rules
+from app.listings.contracts import ContentPlanData
 from app.models.listing_copy import ContentPlan, ListingCopy
 from app.models.product import Product
 from app.services import audit
@@ -44,6 +45,29 @@ def build_content_plan(
     用 SUGGESTED 的值生成文案,等于把一个还没人看过的模型猜测
     写进面向消费者的商品描述里。
     """
+    data = content_plan_data(session, product=product, **kwargs)
+    row = ContentPlan(
+        spu=data.spu,
+        facts=dict(data.facts),
+        selling_points=list(data.selling_points),
+        forbidden_claims=list(data.forbidden_claims),
+        facts_version=data.facts_version,
+        attr_snapshot_ids=list(data.attr_snapshot_ids),
+    )
+    session.add(row)
+    session.flush()
+    audit.record(
+        session, actor=actor, action=AuditAction.CREATE,
+        entity_type="ContentPlan", entity_id=row.id,
+        payload={"spu": data.spu, "facts": len(data.facts)},
+    )
+    return row
+
+
+def content_plan_data(
+    session: Session, *, product: Product, **kwargs
+) -> ContentPlanData:
+    """组装但不落库的事实计划,供独立能力测试复用生产口径。"""
     values = attr_service.effective_map(session, product.id, product=product)
     confirmed = {
         name: row.value_json
@@ -61,22 +85,7 @@ def build_content_plan(
         attr_version_ids=version_ids,
         **kwargs,
     )
-    row = ContentPlan(
-        spu=data.spu,
-        facts=dict(data.facts),
-        selling_points=list(data.selling_points),
-        forbidden_claims=list(data.forbidden_claims),
-        facts_version=data.facts_version,
-        attr_snapshot_ids=list(data.attr_snapshot_ids),
-    )
-    session.add(row)
-    session.flush()
-    audit.record(
-        session, actor=actor, action=AuditAction.CREATE,
-        entity_type="ContentPlan", entity_id=row.id,
-        payload={"spu": data.spu, "facts": len(data.facts)},
-    )
-    return row
+    return data
 
 
 def _next_version(

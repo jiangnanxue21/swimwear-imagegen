@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from app.core.errors import ErrorCode, ValidationError
@@ -122,6 +123,8 @@ class CopyDraft:
     prompt_version: str = TEMPLATE_VERSION
     #: 生成器自己知道自己没能力做到的事。**不是错误**,是给人看的说明
     notes: tuple[str, ...] = ()
+    #: 仅保存可安全展示的调用摘要,不含提示词、响应正文或密钥。
+    trace: Mapping[str, Any] = field(default_factory=dict)
 
     def as_copy_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +137,8 @@ class CopyDraft:
 
 class CopyGenerator(Protocol):
     name: str
+    billable: bool
+    usage_provider: str
 
     def is_configured(self) -> bool: ...
 
@@ -245,6 +250,8 @@ class TemplateCopyGenerator:
     """
 
     name: str = TEMPLATE_GENERATOR
+    billable: bool = False
+    usage_provider: str = TEMPLATE_GENERATOR
 
     def is_configured(self) -> bool:
         return True
@@ -433,6 +440,7 @@ def merge_fields(
         generator=fresh.generator,
         prompt_version=fresh.prompt_version,
         notes=fresh.notes,
+        trace=fresh.trace,
     )
 
 
@@ -485,6 +493,21 @@ class LLMCopyGenerator:
     retry_base_seconds: float = 0.5
     rules: Any = None
     _client: Any = field(default=None, repr=False)
+    _last_trace: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+
+    @property
+    def billable(self) -> bool:
+        return True
+
+    @property
+    def usage_provider(self) -> str:
+        from app.llm.endpoint_trust import provider_label_from_base_url
+
+        return provider_label_from_base_url(self.base_url, fallback="text-model")
+
+    @property
+    def last_trace(self) -> Mapping[str, Any]:
+        return dict(self._last_trace)
 
     def is_configured(self) -> bool:
         return bool(self.base_url and self.model)
@@ -637,7 +660,8 @@ class LLMCopyGenerator:
             previous=previous,
         )
         text = self._call(system, user)
-        return merge_fields(previous, self.parse_response(text), only_fields)
+        parsed = replace(self.parse_response(text), trace=dict(self._last_trace))
+        return merge_fields(previous, parsed, only_fields)
 
     def _call(self, system: str, user: str) -> str:
         """发一次同步请求。
@@ -695,7 +719,36 @@ class LLMCopyGenerator:
             body=body,
         )
         client = MultimodalClient(self, name="copy-llm", http_client=self._client)
-        payload, _ = asyncio.run(client.send(request))
+        attempts = 0
+        started = time.monotonic()
+
+        def on_attempt(number: int) -> None:
+            nonlocal attempts
+            attempts = number
+
+        try:
+            payload, status = asyncio.run(client.send(request, on_attempt=on_attempt))
+        except Exception:
+            self._last_trace = {
+                "model": self.model,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                "provider_attempts": attempts,
+            }
+            raise
+
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        self._last_trace = {
+            "model": str(payload.get("model") or self.model),
+            "response_id": str(payload.get("id") or "") or None,
+            "http_status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "provider_attempts": attempts,
+            "prompt_tokens": usage.get("prompt_tokens", usage.get("input_tokens")),
+            "completion_tokens": usage.get(
+                "completion_tokens", usage.get("output_tokens")
+            ),
+            "total_tokens": usage.get("total_tokens"),
+        }
         return extract(payload)
 
 

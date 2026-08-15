@@ -35,11 +35,12 @@ from app.core.enums import (
     ImageSetStatus,
     MediaStatus,
 )
-from app.core.errors import ErrorCode, NotFoundError, ValidationError
+from app.core.errors import AppError, ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.db import locks
 from app.listings import (
     copy_generator,
+    copy_rules,
     copy_service,
     export_preview,
     export_writer,
@@ -63,7 +64,7 @@ from app.models.listing_copy import ContentPlan, ListingCopy, ListingDraft
 from app.models.listing_image import ListingImageItem, ListingImageSet
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
-from app.services import audit, product_service
+from app.services import audit, generation_service, product_service
 from app.workbench import audience_rules as audience_gate
 from app.workbench import flow as flow_rules
 from app.workbench import platform as pf
@@ -972,6 +973,104 @@ def _content_plan_or_raise(
             http_status=409,
         )
     return plan
+
+
+def diagnose_copy(
+    session: Session,
+    product: Product,
+    *,
+    generator_name: str | None = None,
+) -> dict[str, Any]:
+    """用生产生成器做一次不落正式文案的能力测试。
+
+    事实、提示词与校验规则都复用正式链路,但不创建 ContentPlan / ListingCopy,
+    因而不会改变工作台流程状态。真实模型调用仍如实进入费用台账。
+    """
+    plan = copy_service.content_plan_data(session, product=product)
+    if not plan.facts:
+        raise ValidationError(
+            "还没有任何已确认的属性,无法测试文案生成。先确认商品属性",
+            code=ErrorCode.INPUT_INVALID,
+            http_status=409,
+        )
+
+    rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
+    generator = copy_generator.get_generator(generator_name)
+    try:
+        draft = generator.generate(
+            facts=plan.facts,
+            selling_points=list(plan.selling_points),
+            forbidden_claims=list(plan.forbidden_claims),
+            locale=generic.LOCALE,
+        )
+    except AppError as exc:
+        trace = dict(getattr(generator, "last_trace", {}) or {})
+        if generator.billable:
+            generation_service.record_usage(
+                session,
+                provider=generator.usage_provider,
+                task_id=None,
+                attempt_id=None,
+                operation="text_copy",
+                succeeded=False,
+                duration_ms=trace.get("duration_ms"),
+                error_code=str(getattr(exc, "code", ErrorCode.INTERNAL_ERROR)),
+                billable_units=max(int(trace.get("provider_attempts") or 0), 1),
+                provider_attempts=trace.get("provider_attempts"),
+            )
+        return {
+            "success": False,
+            "billable": generator.billable,
+            "generator": generator.name,
+            "prompt_version": "",
+            "message": exc.message,
+            "error_code": str(exc.code),
+            "copy": None,
+            "notes": [],
+            "trace": trace,
+            "violations": [],
+        }
+
+    violations = copy_rules.validate_copy(
+        draft.as_copy_dict(),
+        list(draft.claims),
+        plan.facts,
+        rules,
+        forbidden_claims=plan.forbidden_claims,
+    )
+    trace = dict(draft.trace)
+    if generator.billable:
+        generation_service.record_usage(
+            session,
+            provider=generator.usage_provider,
+            task_id=None,
+            attempt_id=None,
+            operation="text_copy",
+            succeeded=True,
+            duration_ms=trace.get("duration_ms"),
+            billable_units=max(int(trace.get("provider_attempts") or 0), 1),
+            provider_attempts=trace.get("provider_attempts"),
+        )
+    return {
+        "success": True,
+        "billable": generator.billable,
+        "generator": draft.generator,
+        "prompt_version": draft.prompt_version,
+        "message": "文案测试完成",
+        "error_code": None,
+        "copy": draft.as_copy_dict(),
+        "notes": list(draft.notes),
+        "trace": trace,
+        "violations": [
+            {
+                "code": item.code.value,
+                "message": item.message,
+                "location": item.location,
+                "blocking": item.is_blocking,
+            }
+            for item in violations
+        ],
+    }
 
 
 def _copy_unit(

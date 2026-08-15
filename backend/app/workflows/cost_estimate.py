@@ -34,18 +34,20 @@ from app.core.pricing import UnitPrice, format_money, resolve_unit_price
 #: 计费动作 -> 给运营看的名字。**键必须与 `record_usage(operation=...)` 传的
 #: 字面量一致**,否则预估查的是一个厂商永远不会收费的动作,金额恒为"未配价"。
 #:
-#: 今天有四个动作会写流水(`grep record_usage` 的四个调用点):
+#: 今天有五类动作会写流水(`grep record_usage`):
 #:
 #:     submit             出图。`generation_tasks` 提交那一刻
 #:     download           取回候选图(多数厂商不单独计费,列出来是为了
 #:                        价目表配了它的时候预估不会漏)
 #:     vision_score       候选图评分。`evaluation_service` 每张一次
 #:     attribute_extract  属性识别。`attributes/service` 每次 run 一条
+#:     text_copy          文本文案生成。当前由独立能力测试的真实模型调用写入
 OPERATION_LABELS: Mapping[str, str] = {
     "submit": "出图",
     "download": "取回候选图",
     "vision_score": "候选图评分",
     "attribute_extract": "属性识别",
+    "text_copy": "文案生成",
 }
 
 

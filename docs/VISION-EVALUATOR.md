@@ -46,6 +46,7 @@ VISION_MODEL_RESPONSE_FORMAT=json_schema
 VISION_MODEL_FULL_IMAGE_DETAIL=original
 VISION_MODEL_QUICK_IMAGE_DETAIL=low
 VISION_MODEL_REASONING_EFFORT=low
+VISION_MODEL_MAX_OUTPUT_TOKENS=8192
 VISION_MODEL_FAIL_CLOSED=true
 ```
 
@@ -66,6 +67,7 @@ VISION_MODEL_RESPONSE_FORMAT=json_schema
 VISION_MODEL_FULL_IMAGE_DETAIL=high
 VISION_MODEL_QUICK_IMAGE_DETAIL=low
 VISION_MODEL_REASONING_EFFORT=low
+VISION_MODEL_MAX_OUTPUT_TOKENS=8192
 VISION_MODEL_FAIL_CLOSED=true
 ```
 
@@ -83,11 +85,19 @@ VISION_MODEL_RESPONSE_FORMAT=json_object
 VISION_MODEL_FULL_IMAGE_DETAIL=high
 VISION_MODEL_QUICK_IMAGE_DETAIL=low
 VISION_MODEL_REASONING_EFFORT=none
+VISION_MODEL_MAX_OUTPUT_TOKENS=8192
 VISION_MODEL_FAIL_CLOSED=true
 ```
 
 `REASONING_EFFORT=none` 是有意的:思考内容混进输出会破坏标准 JSON。
 设成 `none` 时代码改发 `temperature=0` 而不发 `reasoning` 字段。
+
+`VISION_MODEL_MAX_OUTPUT_TOKENS=8192` 是 FULL 结构化评分的安全上限,不是要求模型
+必须输出 8192 Token。FULL 最多包含 11 个维度、问题、不确定项和事实一致性;
+旧默认 1800 在启用轻量推理时曾被真实 Responses 端点以
+`incomplete/max_output_tokens` 截断。截断代表 HTTP 调用已经发生且通常已经计费,
+系统会保留响应 ID、usage 与实际模型,但**不会自动重试**,避免一次确认变成两次费用。
+如果设置页已有低于 8192 的数据库覆盖值,需手工改为 8192 或清除覆盖回到默认值。
 
 ---
 
@@ -125,11 +135,25 @@ VISION_MODEL_FAIL_CLOSED=true
 
 每张图在编码前检查:
 
-- 大小超过 `VISION_MODEL_MAX_IMAGE_MB`(默认 8MB)→ 明确报错,**不会悄悄压缩后发出去**;
+- 原始输入大小超过 `VISION_MODEL_MAX_IMAGE_MB`(默认 8MB)→ 在解码前明确拒绝;
 - 用 Pillow 验证确实是图片,只接受 JPEG / PNG / WEBP;
 - 扩展名不作数 —— 一个改名成 `.png` 的 PDF 会在这里被拦下;
 - 自动应用 EXIF Orientation。不转的话模型会看到一张躺倒的图,
   然后如实报告"人体姿态异常" —— 一个纯粹由我们自己引入的假阳性。
+
+单张输入上限不等于模型端的请求体上限:data URL 会产生约 4/3 的 Base64 膨胀,
+多张参考图还会叠加。评分器因此另用 `VISION_MODEL_MAX_REQUEST_MB`(默认 5MB)
+约束整份 JSON。它先用原图构造真实请求:**本来放得下就完全不压缩**。确实超限时,
+用占位图片精确计算提示词、Schema、字段名和公网 URL 的开销,只把剩余空间分给
+真正内联的图片;公网 URL 不占内联额度。候选图优先取得 55% 图片预算,参考图共享
+45%,小图用不完的份额会自动归还给其他图片。
+
+超预算的发送副本按预设保真档位压缩:先适度缩放,再小幅降低质量,避免在超大
+分辨率上把 JPEG quality 一路压低而制造块状伪影;候选图的分辨率与质量档位高于
+参考图。非透明图使用 JPEG,透明图使用 WebP 保留 alpha,不擅自合成白底。
+原始素材始终不改。构造完成后按真实 JSON 字节数复核,必要时从原始副本重新编码
+做最多三轮比例收敛,不会对上一轮 JPEG 反复有损压缩。这样可适配请求体硬限制为
+6MiB 的 Responses 兼容端点,也不会用一次已知超限的付费请求去换 400。
 
 参考图最多发 `VISION_MODEL_MAX_REFERENCE_IMAGES` 张(默认 4),超出部分截断,
 保留原顺序 —— 顺序即重要性。候选图缺失或参考图为空一律直接失败:
@@ -176,8 +200,26 @@ HTTP(S) 地址一律过项目已有的 SSRF 校验(`net_safety.check_download_ur
 最多重试 `VISION_MODEL_MAX_RETRIES` 次。响应带 `Retry-After` 时优先尊重它,
 但上限 30 秒 —— 见过返回 3600 的实现,那会把整轮生成挂死。
 
+每次 HTTP 调用在 INFO 级别都有同一个 `llm_call_id` 串起的生命周期日志:
+
+```text
+llm request prepared
+llm request attempt started
+llm http response received
+llm request completed
+```
+
+失败时最后两条换成 `llm request attempt failed`，需要重试时再跟一条
+`llm request retrying`。日志包含 attempt、请求/响应字节数、耗时、HTTP 状态码、
+响应 ID、模型、finish reason 与 token 用量。设置 `LLM_LOG_PAYLOADS=true` 后，
+还会记录脱敏的请求体和返回体，适合排查兼容端点的字段形状；修改后需重启 API/worker。
+
+脱敏不可关闭：API Key、Authorization、Cookie、图片 base64 永不写入日志；签名 URL
+去掉查询串。图片只记 MIME、base64 字符数和短摘要。因此这里的“请求体/返回体”是
+保留 JSON 结构与提示词的安全副本，不是逐字节复制原始图片。
+
 错误信息里一定有:评分器名、模型名、API Style、HTTP 状态码、可安全展示的摘要。
-**一定没有**:API Key、base64、完整请求体、Authorization 头。
+**一定没有**:API Key、base64、Authorization 头。
 
 `raw_response` 里留档的是:模型名、响应 ID、token 用量、finish reason、
 API Style、HTTP 状态码、解析后的结构化评分、每张图的大小与 MIME。

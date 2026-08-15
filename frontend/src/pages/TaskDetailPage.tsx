@@ -13,10 +13,13 @@ import GradeTag from '../components/GradeTag'
 import ErrorNotice from '../components/ErrorNotice'
 import EvaluationDetail from '../components/EvaluationDetail'
 import ForceRetryModal from '../components/ForceRetryModal'
+import {
+  EvaluationAttemptCard, ScoringStatusCard,
+} from '../components/task/TaskScoringDiagnostics'
 import { isResultUnknown, readError, readWriteError } from '../api/client'
 import {
-  MODE_LABEL, TASK_STATUS_LABEL, taskLiveness, taskPollInterval,
-  type Attempt, type Candidate, type Evaluation,
+  EVALUATION_OUTCOME_LABEL, MODE_LABEL, TASK_STATUS_LABEL, taskLiveness, taskPollInterval,
+  type Attempt, type Candidate, type Evaluation, type EvaluationAttempt,
 } from '../api/types'
 import { brandVars, fontScale, imageTile } from '../theme'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -39,13 +42,26 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
  */
 
 function CandidateTile({
-  candidate, evaluation, onInspect,
+  candidate, evaluation, attempt, evaluationLoading, evaluationError, onInspect,
 }: {
   candidate: Candidate
   evaluation?: Evaluation
+  attempt?: EvaluationAttempt
+  evaluationLoading: boolean
+  evaluationError: boolean
   onInspect: () => void
 }) {
   const failed = candidate.status === 'DOWNLOAD_FAILED'
+  const attemptFailed = attempt && !['SUCCEEDED', 'ROUND_RETRY_SCHEDULED'].includes(attempt.outcome)
+  const scoreAction = evaluationError
+    ? '评分记录读取失败'
+    : evaluation
+      ? '查看评分'
+      : evaluationLoading
+        ? '读取评分中'
+        : attemptFailed
+          ? '查看评分失败'
+          : '查看评分状态'
   return (
     <figure className="asset-tile" style={{ margin: 0 }}>
       {failed ? (
@@ -71,6 +87,7 @@ function CandidateTile({
           <GradeTag grade={candidate.grade} score={candidate.overall_score} compact />
           {candidate.status === 'SELECTED' && <Tag color="success">采用</Tag>}
           {evaluation?.hard_fail && <Tag color="error">硬错误</Tag>}
+          {!evaluation && attemptFailed && <Tag color="error">评分未成功</Tag>}
           {failed && (
             <Tooltip title={candidate.error_message}>
               <Tag color="error">错误</Tag>
@@ -81,11 +98,16 @@ function CandidateTile({
           {candidate.width ?? '—'}×{candidate.height ?? '—'}
         </div>
         <div className="mono" style={{ color: brandVars.textMuted }}>seed {candidate.seed ?? '—'}</div>
-        {evaluation && (
-          <Button size="small" type="link" style={{ padding: 0, height: 20 }} onClick={onInspect}>
-            查看评分
-          </Button>
-        )}
+        <Button
+          size="small"
+          type="link"
+          danger={evaluationError || Boolean(attemptFailed)}
+          loading={evaluationLoading}
+          style={{ padding: 0, height: 20 }}
+          onClick={onInspect}
+        >
+          {scoreAction}
+        </Button>
       </figcaption>
     </figure>
   )
@@ -135,6 +157,16 @@ export default function TaskDetailPage() {
       query.data && taskLiveness(query.data.status) === 'LIVE' ? 4000 : false,
   })
 
+  // 成功评分和评分调用台账必须分开取：前者只在解析成功后才有行，后者才包含
+  // 限流、鉴权失败、超时和非法 JSON。只查前者会把“调用失败”显示成“没评分”。
+  const evaluationAttempts = useQuery({
+    queryKey: ['task-evaluation-attempts', id],
+    queryFn: () => evaluationApi.attemptsForTask(id),
+    enabled: Boolean(id),
+    refetchInterval: () =>
+      query.data && taskLiveness(query.data.status) === 'LIVE' ? 4000 : false,
+  })
+
   /*
    * FE-TASK-DETAIL-02:任务先到终态,评分轮询在同一轮渲染里立刻停掉。
    *
@@ -151,7 +183,8 @@ export default function TaskDetailPage() {
     // 评分刚落库才进的状态,把它排除掉等于在最需要补拉的那一档上不补。
     if (!id || !status || taskLiveness(status) === 'LIVE') return
     evaluations.refetch()
-    // evaluations 是 query handle,每次渲染都是新对象;依赖只跟状态走
+    evaluationAttempts.refetch()
+    // 两个 query handle 每次渲染都是新对象；依赖只跟状态走
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, status])
 
@@ -189,6 +222,10 @@ export default function TaskDetailPage() {
   const submitUnknown = task.error_code === SUBMIT_RESULT_UNKNOWN
   const rounds = [...new Set(task.candidates.map((c) => c.round_number))].sort((a, b) => a - b)
   const evalByCandidate = new Map((evaluations.data ?? []).map((e) => [e.candidate_id, e]))
+  const attemptByCandidate = new Map<string, EvaluationAttempt>()
+  for (const attempt of evaluationAttempts.data ?? []) {
+    if (attempt.candidate_id) attemptByCandidate.set(attempt.candidate_id, attempt)
+  }
 
   const attemptColumns: ColumnsType<Attempt> = [
     { title: '轮', dataIndex: 'round_number', width: 50, align: 'center' },
@@ -236,12 +273,13 @@ export default function TaskDetailPage() {
         <Button
           size="small"
           icon={<ReloadOutlined />}
-          loading={query.isFetching || evaluations.isFetching}
+          loading={query.isFetching || evaluations.isFetching || evaluationAttempts.isFetching}
           onClick={() => {
             // FE-TASK-DETAIL-03:刷新按钮原来只刷任务。评分是另一条 query,
             // 于是"刷新"之后分数还是旧的 —— 而运营点刷新多半正是为了看分
             query.refetch()
             evaluations.refetch()
+            evaluationAttempts.refetch()
           }}
         >
           刷新
@@ -361,6 +399,20 @@ export default function TaskDetailPage() {
         />
       )}
 
+      <ScoringStatusCard
+        taskStatus={task.status}
+        evaluationCount={evaluations.data?.length ?? 0}
+        attemptCount={evaluationAttempts.data?.length ?? 0}
+        evaluationsLoading={evaluations.isLoading}
+        attemptsLoading={evaluationAttempts.isLoading}
+        evaluationsError={evaluations.error}
+        attemptsError={evaluationAttempts.error}
+        evaluationsFetching={evaluations.isFetching}
+        attemptsFetching={evaluationAttempts.isFetching}
+        onRetryEvaluations={() => evaluations.refetch()}
+        onRetryAttempts={() => evaluationAttempts.refetch()}
+      />
+
       <Card size="small" title={<span className="mono">{task.id.slice(0, 8)}</span>}>
         <Descriptions size="small" column={3} bordered>
           <Descriptions.Item label="商品">
@@ -377,7 +429,7 @@ export default function TaskDetailPage() {
           <Descriptions.Item label="队列派发">
             {task.dispatch_status ?? '—'}（尝试 {task.dispatch_attempts} 次）
           </Descriptions.Item>
-          <Descriptions.Item label="基础 seed">{task.base_seed ?? '默认'}</Descriptions.Item>
+          <Descriptions.Item label="基础 seed" span={3}>{task.base_seed ?? '默认'}</Descriptions.Item>
           <Descriptions.Item label="幂等键" span={3}>
             <span className="mono" style={{ fontSize: fontScale.meta }}>{task.idempotency_key}</span>
           </Descriptions.Item>
@@ -406,6 +458,11 @@ export default function TaskDetailPage() {
                       key={c.id}
                       candidate={c}
                       evaluation={evalByCandidate.get(c.id)}
+                      attempt={attemptByCandidate.get(c.id)}
+                      evaluationLoading={evaluations.isLoading
+                        || (!evalByCandidate.has(c.id) && evaluationAttempts.isLoading)}
+                      evaluationError={evaluations.isError
+                        || (!evalByCandidate.has(c.id) && evaluationAttempts.isError)}
                       onInspect={() => setInspecting(c.id)}
                     />
                   ))}
@@ -413,6 +470,26 @@ export default function TaskDetailPage() {
             </div>
           ))
         )}
+      </Card>
+
+      <EvaluationAttemptCard
+        attempts={evaluationAttempts.data ?? []}
+        loading={evaluationAttempts.isLoading}
+        fetching={evaluationAttempts.isFetching}
+        error={evaluationAttempts.error}
+        onRetry={() => evaluationAttempts.refetch()}
+      />
+
+      <Card size="small" title="标题、卖点与描述">
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <span>
+            文案不是生成任务的一部分：它使用已确认的商品属性生成标题、卖点、描述和关键词，
+            并在商品向导中单独版本化、校验和批准。
+          </span>
+          <Link to={`/wizard/${task.product_id}?step=COPY`}>
+            <Button type="primary">进入文案生成</Button>
+          </Link>
+        </Space>
       </Card>
 
       <Drawer
@@ -435,7 +512,34 @@ export default function TaskDetailPage() {
             retrying={evaluations.isFetching}
           />
         ) : (
-          <EvaluationDetail evaluation={evalByCandidate.get(inspecting) ?? null} />
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <EvaluationDetail evaluation={evalByCandidate.get(inspecting) ?? null} />
+            {evaluationAttempts.isError && (
+              <ErrorNotice
+                title="拉不到这张图的评分调用记录"
+                error={evaluationAttempts.error}
+                onRetry={() => evaluationAttempts.refetch()}
+                retrying={evaluationAttempts.isFetching}
+              />
+            )}
+            {attemptByCandidate.get(inspecting) && (
+              <Descriptions size="small" column={1} bordered title="最近一次评分调用">
+                <Descriptions.Item label="结果">
+                  {attemptByCandidate.get(inspecting)?.outcome
+                    ? EVALUATION_OUTCOME_LABEL[attemptByCandidate.get(inspecting)!.outcome]
+                    : '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="评分器 / 模型">
+                  {attemptByCandidate.get(inspecting)?.evaluator || '—'} /{' '}
+                  {attemptByCandidate.get(inspecting)?.model_name || '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="错误">
+                  {attemptByCandidate.get(inspecting)?.error_code || '—'}{' '}
+                  {attemptByCandidate.get(inspecting)?.error_message || ''}
+                </Descriptions.Item>
+              </Descriptions>
+            )}
+          </Space>
         )}
       </Drawer>
 

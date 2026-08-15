@@ -157,6 +157,11 @@ FORBIDDEN_FILES=(
   '*.pyo'
   '*.tsbuildinfo'
   '.DS_Store'
+  # 运行期日志。`backend/.api-stdout.log` / `.api-stderr.log` 连着两个交付包
+  # 出去过:里面是 uvicorn 的完整请求行与异常栈,含图片绝对路径、上游 URL 与
+  # 查询串。它和 `data/` 那张图同类 —— 没有任何机制拦着它,既不在 .gitignore
+  # 也没有代码引用。**basename 匹配**,任意层级都拦。
+  '*.log'
   # Claude Code 的个人权限配置。里面是**开发机的绝对路径**(实测带出过
   # `/c/Users/<user>/.claude/…` 这样的 Windows 用户名与本地路径),对收包方
   # 没有任何用处,而且泄露了打包者的机器信息。它不像凭据那样致命,但和

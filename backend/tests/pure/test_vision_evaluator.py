@@ -8,6 +8,7 @@
 网络那一层的测试在 ``tests/test_vision_http.py``,用 httpx.MockTransport,
 需要装依赖才能跑。两边不重复:凡是这里能测的,那边不再测一遍。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +36,7 @@ from app.evaluators.vision_schema import (
     build_user_prompt,
     dimensions_for,
 )
-from app.llm.images import ImageResolver, PreparedImage, to_data_url
+from app.llm.images import ImageResolver, PreparedImage, decode_data_url, to_data_url
 from app.llm.transport import (
     extract_chat_text,
     extract_responses_text,
@@ -108,8 +109,13 @@ def _prepared(role: str) -> PreparedImage:
 
 # ---------------------------------------------------------------- 配置
 
+
 def test_base_url_and_model_and_key_together_make_it_configured():
     assert VisionModelImageQualityEvaluator(_config()).is_configured() is True
+
+
+def test_full_scoring_default_has_room_for_structured_json():
+    assert VisionEvaluatorConfig().max_output_tokens == 8192
 
 
 def test_public_endpoint_without_a_key_is_not_configured():
@@ -143,6 +149,7 @@ def test_missing_model_name_is_not_configured():
 
 # ---------------------------------------------------------------- 端点拼接
 
+
 def test_responses_endpoint_is_joined_correctly():
     adapter = ResponsesAdapter(_config(base_url="https://api.openai.com/v1"))
     assert adapter.endpoint() == "https://api.openai.com/v1/responses"
@@ -153,8 +160,7 @@ def test_chat_completions_endpoint_is_joined_correctly():
         _config(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
     )
     assert (
-        adapter.endpoint()
-        == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        adapter.endpoint() == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     )
 
 
@@ -169,6 +175,7 @@ def test_endpoint_never_doubles_the_version_segment():
 
 
 # ---------------------------------------------------------------- Schema
+
 
 def test_full_schema_requires_every_dimension():
     schema = build_response_schema(EvaluationDepth.FULL)
@@ -220,10 +227,9 @@ def test_dimensions_for_depth():
 
 # ---------------------------------------------------------------- 提示词
 
+
 def test_prompt_lists_every_hard_fail_code():
-    prompt = build_user_prompt(
-        depth=EvaluationDepth.FULL, product_metadata={}, reference_count=2
-    )
+    prompt = build_user_prompt(depth=EvaluationDepth.FULL, product_metadata={}, reference_count=2)
     for code in HardFailCode:
         assert code.value in prompt
 
@@ -255,6 +261,7 @@ def test_prompt_survives_unserialisable_metadata():
 
 
 # ---------------------------------------------------------------- 请求体
+
 
 def _build(adapter, depth=EvaluationDepth.FULL, refs=2, system_prompt="SYSTEM"):
     return adapter.build(
@@ -372,6 +379,7 @@ def test_request_log_summary_never_contains_image_payloads():
 
 # ---------------------------------------------------------------- 图片读取
 
+
 def test_storage_path_becomes_a_data_url():
     storage = FakeStorage({"products/a.png": png_bytes(64, 64)})
     resolver = ImageResolver(storage, max_bytes=8 * 1024 * 1024)
@@ -419,9 +427,7 @@ def test_non_image_file_is_rejected():
     """扩展名说了不算。一个改名成 .png 的 PDF 必须在这里被拦下。"""
     storage = FakeStorage({"fake.png": b"%PDF-1.4 not really an image"})
     resolver = ImageResolver(storage, max_bytes=8 * 1024 * 1024)
-    err = expect_raises(
-        ProviderInputError, lambda: _run(resolver.resolve("fake.png", role="C"))
-    )
+    err = expect_raises(ProviderInputError, lambda: _run(resolver.resolve("fake.png", role="C")))
     assert "不是可识别的图片" in err.message
 
 
@@ -432,17 +438,13 @@ def test_unsupported_image_format_is_rejected():
     Image.new("RGB", (8, 8)).save(buf, format="BMP")
     storage = FakeStorage({"x.bmp": buf.getvalue()})
     resolver = ImageResolver(storage, max_bytes=8 * 1024 * 1024)
-    err = expect_raises(
-        ProviderInputError, lambda: _run(resolver.resolve("x.bmp", role="C"))
-    )
+    err = expect_raises(ProviderInputError, lambda: _run(resolver.resolve("x.bmp", role="C")))
     assert "不受支持" in err.message
 
 
 def test_missing_file_is_reported_clearly():
     resolver = ImageResolver(FakeStorage(), max_bytes=8 * 1024 * 1024)
-    err = expect_raises(
-        ProviderInputError, lambda: _run(resolver.resolve("gone.png", role="C"))
-    )
+    err = expect_raises(ProviderInputError, lambda: _run(resolver.resolve("gone.png", role="C")))
     assert "不存在" in err.message
 
 
@@ -465,6 +467,64 @@ def test_prepared_image_summary_has_no_base64():
     assert "base64" not in json.dumps(image.describe())
 
 
+def test_inline_image_is_compacted_to_its_share_of_the_request_budget():
+    """单图安全上限通过,不代表多图 base64 后还能塞进模型的整份请求。"""
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(20260813)
+    raw = rng.randbytes(1024 * 1024 * 3)
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (1024, 1024), raw).save(buffer, format="PNG")
+
+    target = 220 * 1024
+    resolver = ImageResolver(
+        FakeStorage({"noise.png": buffer.getvalue()}), max_bytes=8 * 1024 * 1024
+    )
+    image = _run(
+        resolver.resolve(
+            "noise.png",
+            role="CANDIDATE_IMAGE",
+            inline_max_bytes=target,
+        )
+    )
+
+    assert image.inline is True
+    assert image.mime_type == "image/jpeg"
+    assert image.byte_size <= target
+    assert len(image.payload_url()) < int(target * 1.4) + 128
+
+
+def test_transparent_image_keeps_alpha_when_compacted():
+    import random
+
+    from PIL import Image
+
+    rgb = Image.frombytes(
+        "RGB", (256, 256), random.Random(29).randbytes(256 * 256 * 3)
+    )
+    source = rgb.convert("RGBA")
+    source.putalpha(Image.new("L", source.size, 180))
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG")
+    resolver = ImageResolver(
+        FakeStorage({"alpha.png": buffer.getvalue()}), max_bytes=8 * 1024 * 1024
+    )
+    image = _run(
+        resolver.resolve(
+            "alpha.png",
+            role="REFERENCE_IMAGE_1",
+            inline_max_bytes=100 * 1024,
+        )
+    )
+    payload, _mime = decode_data_url(image.payload_url(), role=image.role)
+    with Image.open(io.BytesIO(payload)) as compacted:
+        assert image.mime_type == "image/webp"
+        assert "A" in compacted.mode
+        assert compacted.getchannel("A").getextrema()[0] < 255
+
+
 def test_probe_png_is_a_real_png():
     from PIL import Image
 
@@ -473,6 +533,7 @@ def test_probe_png_is_a_real_png():
 
 
 # ---------------------------------------------------------------- 图片编排
+
 
 def _evaluator_with(files: dict[str, bytes], **overrides):
     return VisionModelImageQualityEvaluator(_config(**overrides), storage=FakeStorage(files))
@@ -489,24 +550,130 @@ def test_missing_candidate_image_fails_immediately():
 def test_missing_reference_images_fail_immediately():
     """没有参考图就无从判断"是不是同一件衣服" —— 那是这套评分的第一优先级。"""
     evaluator = _evaluator_with({"c.png": png_bytes()})
-    err = expect_raises(
-        ProviderInputError, lambda: _run(evaluator.evaluate([], "c.png", {}, {}))
-    )
+    err = expect_raises(ProviderInputError, lambda: _run(evaluator.evaluate([], "c.png", {}, {})))
     assert "参考图" in err.message
 
 
 def test_reference_images_are_capped_and_keep_their_order():
     files = {f"r{i}.png": png_bytes(32, 32, color=(i * 20, 10, 10)) for i in range(6)}
     evaluator = _evaluator_with(files, max_reference_images=3)
-    refs, candidate = _run(
-        evaluator._prepare_images([f"r{i}.png" for i in range(6)], "r0.png")
-    )
+    refs, candidate = _run(evaluator._prepare_images([f"r{i}.png" for i in range(6)], "r0.png"))
     assert [r.role for r in refs] == [
         "REFERENCE_IMAGE_1",
         "REFERENCE_IMAGE_2",
         "REFERENCE_IMAGE_3",
     ]
     assert candidate.role == "CANDIDATE_IMAGE"
+
+
+def test_candidate_gets_more_budget_than_each_reference():
+    images = [
+        PreparedImage(
+            role="REFERENCE_IMAGE_1", mime_type="image/png", byte_size=4_000_000
+        ),
+        PreparedImage(
+            role="REFERENCE_IMAGE_2", mime_type="image/png", byte_size=4_000_000
+        ),
+        PreparedImage(
+            role="CANDIDATE_IMAGE", mime_type="image/png", byte_size=4_000_000
+        ),
+    ]
+    budgets = VisionModelImageQualityEvaluator._allocate_inline_budgets(
+        images, 3_000_000
+    )
+    assert budgets["CANDIDATE_IMAGE"] == 1_650_000
+    assert budgets["REFERENCE_IMAGE_1"] == 675_000
+    assert budgets["REFERENCE_IMAGE_2"] == 675_000
+
+
+def test_small_inline_image_returns_its_unused_budget_to_the_others():
+    images = [
+        PreparedImage(
+            role="REFERENCE_IMAGE_1", mime_type="image/png", byte_size=100_000
+        ),
+        PreparedImage(
+            role="REFERENCE_IMAGE_2", mime_type="image/png", byte_size=4_000_000
+        ),
+        PreparedImage(
+            role="CANDIDATE_IMAGE", mime_type="image/png", byte_size=4_000_000
+        ),
+    ]
+    budgets = VisionModelImageQualityEvaluator._allocate_inline_budgets(
+        images, 3_000_000
+    )
+    assert budgets["REFERENCE_IMAGE_1"] == 100_000
+    assert sum(budgets.values()) <= 3_000_000
+    assert budgets["CANDIDATE_IMAGE"] > budgets["REFERENCE_IMAGE_2"]
+
+
+def test_public_url_images_do_not_consume_inline_budget():
+    inline_candidate = PreparedImage(
+        role="CANDIDATE_IMAGE", mime_type="image/jpeg", byte_size=4_000_000
+    )
+    budgets = VisionModelImageQualityEvaluator._allocate_inline_budgets(
+        [inline_candidate], 2_000_000
+    )
+    assert budgets == {"CANDIDATE_IMAGE": 2_000_000}
+
+
+def test_images_are_left_untouched_when_the_real_request_already_fits():
+    evaluator = _evaluator_with(
+        {"r.png": png_bytes(64, 64), "c.png": png_bytes(64, 64)},
+        max_request_bytes=5 * 1024 * 1024,
+    )
+    refs, candidate = _run(evaluator._prepare_images(["r.png"], "c.png"))
+    request = _run(
+        evaluator._fit_request_to_budget(
+            depth=EvaluationDepth.FULL,
+            audience=None,
+            allowed_hard_fail_codes=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            references=refs,
+            candidate=candidate,
+        )
+    )
+    assert [image.mime_type for image in request.images] == ["image/png", "image/png"]
+    assert all(not image.describe()["compacted"] for image in request.images)
+
+
+def test_oversized_request_is_adaptively_fitted_before_sending():
+    import random
+
+    from PIL import Image
+
+    raw = random.Random(73).randbytes(768 * 768 * 3)
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (768, 768), raw).save(buffer, format="PNG")
+    evaluator = _evaluator_with(
+        {"r.png": buffer.getvalue(), "c.png": buffer.getvalue()},
+        max_request_bytes=1_200_000,
+    )
+    refs, candidate = _run(evaluator._prepare_images(["r.png"], "c.png"))
+    request = _run(
+        evaluator._fit_request_to_budget(
+            depth=EvaluationDepth.FULL,
+            audience=None,
+            allowed_hard_fail_codes=None,
+            system_prompt="SYSTEM",
+            user_prompt="USER",
+            references=refs,
+            candidate=candidate,
+        )
+    )
+    assert evaluator._request_body_bytes(request) <= 1_200_000
+    assert all(image.describe()["compacted"] for image in request.images)
+    assert request.images[-1].role == "CANDIDATE_IMAGE"
+    assert request.images[-1].byte_size >= request.images[0].byte_size
+
+
+def test_actual_json_body_is_checked_before_the_http_call():
+    evaluator = _evaluator_with({}, max_request_bytes=1024)
+    request = _build(ResponsesAdapter(_config()))
+    request.body["input"][1]["content"].append({"type": "input_text", "text": "x" * 2048})
+    err = expect_raises(ProviderInputError, evaluator._ensure_request_fits, request)
+    assert "请求体" in err.message
+    assert err.detail["request_body_bytes"] > err.detail["limit_bytes"]
 
 
 def test_depth_travels_through_the_rule_set():
@@ -527,6 +694,7 @@ def test_evaluation_service_passes_the_depth_key():
 
 
 # ---------------------------------------------------------------- 响应解析
+
 
 def test_responses_text_from_convenience_field():
     assert extract_responses_text({"output_text": '{"a":1}'}) == '{"a":1}'
@@ -572,9 +740,7 @@ def test_empty_choices_yield_empty_text():
 
 def test_refusal_is_detected_in_both_shapes():
     assert find_refusal({"choices": [{"message": {"refusal": "我不能这么做"}}]}) == "我不能这么做"
-    assert (
-        find_refusal({"output": [{"type": "refusal", "refusal": "拒绝"}]}) == "拒绝"
-    )
+    assert find_refusal({"output": [{"type": "refusal", "refusal": "拒绝"}]}) == "拒绝"
     assert find_refusal({"choices": [{"message": {"content": "ok"}}]}) is None
 
 
@@ -596,6 +762,7 @@ def test_error_body_summary_handles_html_pages():
 
 
 # ---------------------------------------------------------------- 输出校验
+
 
 def _evaluator():
     return VisionModelImageQualityEvaluator(_config(), storage=FakeStorage())
@@ -629,6 +796,19 @@ def test_truncated_output_says_which_setting_to_raise():
         status=200,
     )
     assert "VISION_MODEL_MAX_OUTPUT_TOKENS" in err.message
+    assert "8192" in err.message
+    assert err.detail["configured_max_output_tokens"] == 8192
+    # 建议值必须**严格大于当前值**。这一行以前断言的是 8192 —— 和
+    # configured 一模一样,也就是说它固化的正是"建议你把 8192 改成 8192"
+    # 这条空建议:最常见的那次截断(默认配置跑 FULL)照着做等于什么都没做,
+    # 再截一次。递进规则见 evaluators/vision.recommended_max_output_tokens。
+    assert err.detail["recommended_max_output_tokens"] == 16384
+    assert err.detail["recommended_max_output_tokens"] > err.detail[
+        "configured_max_output_tokens"
+    ]
+    assert err.detail["automatic_retry"] is False
+    # 配置里的 reasoning_effort 已经是 low,就不该再建议"降到 low"
+    assert "REASONING_EFFORT" not in err.message
 
 
 def test_empty_output_is_an_explicit_failure():
@@ -658,6 +838,7 @@ def test_markdown_fenced_json_is_tolerated():
 
 # ---------------------------------------------------------------- 错误归类
 
+
 def _classify(status, body=None, headers=None):
     return _evaluator()._error_from_status(status, body or {"error": {"message": "x"}}, headers)
 
@@ -671,17 +852,17 @@ def test_status_classification_table():
     """
     #  状态码  期望的错误类型         可重试
     table = [
-        (401, ProviderAuthError,      False),
-        (403, ProviderAuthError,      False),
+        (401, ProviderAuthError, False),
+        (403, ProviderAuthError, False),
         (429, ProviderRateLimitError, True),
-        (400, None,                   False),
-        (404, None,                   False),
-        (422, None,                   False),
-        (408, None,                   True),
-        (500, None,                   True),
-        (502, None,                   True),
-        (503, None,                   True),
-        (504, None,                   True),
+        (400, None, False),
+        (404, None, False),
+        (422, None, False),
+        (408, None, True),
+        (500, None, True),
+        (502, None, True),
+        (503, None, True),
+        (504, None, True),
     ]
     for status, expected_type, retriable in table:
         err = _classify(status)
@@ -727,6 +908,7 @@ def test_error_messages_never_contain_the_api_key():
 
 # ---------------------------------------------------------------- 重试循环
 
+
 class _ScriptedEvaluator(VisionModelImageQualityEvaluator):
     """按脚本回放 ``_send_once`` 的结果,不碰网络。
 
@@ -768,9 +950,7 @@ def test_non_retriable_errors_stop_at_the_first_attempt():
     """不可重试的错误必须原样抛出,且只发一次请求。"""
     for error in (ProviderAuthError("401"), ProviderContentSafetyError("filtered")):
         evaluator = _ScriptedEvaluator([error, {"ok": True}])
-        expect_raises(
-            type(error), lambda e=evaluator: _run(e._send_with_retries(_request()))
-        )
+        expect_raises(type(error), lambda e=evaluator: _run(e._send_with_retries(_request())))
         assert evaluator.calls == 1, f"{type(error).__name__} 不该被重试"
 
 
@@ -912,6 +1092,7 @@ def test_model_name_falls_back_to_the_configured_model():
 
 
 # ---------------------------------------------------------------- 连接测试
+
 
 def test_test_connection_reports_unconfigured_without_network():
     result = _run(VisionModelImageQualityEvaluator(VisionEvaluatorConfig()).test_connection())

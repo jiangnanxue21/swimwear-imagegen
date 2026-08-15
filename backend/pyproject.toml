@@ -16,7 +16,12 @@ dependencies = [
     # Kombu transport 的底层 Connection。
     "redis>=8.1,<9",
     "celery>=5.4,<6",
-    "httpx>=0.27",
+    # 上界按本仓惯例钉住。传输层现在用 `content=` 直接发 canonical 字节
+    # (见 llm/transport.canonical_json_bytes),不再依赖 httpx 的 JSON 序列化,
+    # 所以 1.x 的序列化行为变化已经影响不到请求体 —— 但 `AsyncClient` 的
+    # timeout 语义与 `MockTransport` 签名仍在 1.0 里有破坏性变更计划,
+    # 而那两样是重试逻辑和全套 HTTP 测试的地基。
+    "httpx>=0.27,<1.0",
     "pillow>=11.0",
     "python-multipart>=0.0.12",
     "pyyaml>=6.0",
