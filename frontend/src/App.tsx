@@ -232,7 +232,7 @@ export const router = createBrowserRouter(
         <Route path="/spus/new" element={<SpuCreatePage />} />
         {/* 生成方案面板的宿主页(阶段 4)。**必须排在 /spus/new 后面** ——
             `:spuId` 会把 "new" 也吃掉,那时建档页永远打不开,而路由不报错。
-            react-router 6 的排序是分数优先、静态段胜过动态段,所以今天两条
+            react-router 的排序是分数优先、静态段胜过动态段,所以今天两条
             顺序反过来也对;写成这个顺序是为了让读代码的人不必去查那条规则 */}
         <Route path="/spus/:spuId" element={<SpuDetailPage />} />
         <Route path="/workbench-spus" element={<WorkbenchSpuPage />} />

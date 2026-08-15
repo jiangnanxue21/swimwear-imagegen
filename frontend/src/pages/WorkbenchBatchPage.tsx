@@ -15,7 +15,7 @@
  * 结果相同),所以重试按钮只对后者亮。
  */
 import { useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Alert, Button, Card, Descriptions, Drawer, Empty, Input, Modal, Space, Statistic,
   Table, Tag, Tooltip, Typography, App,
@@ -209,16 +209,17 @@ export default function WorkbenchBatchPage() {
    *
    * 用函数式更新 + `URLSearchParams` 的增删,让"我只管我这一个键"这件事
    * 在代码里是显式的。
+   *
+   * 打开那一半现在是 `detailHref` + `<Link to>`:详情抽屉本来就有地址,
+   * 行入口就该是链接(可复制、可新标签打开、键盘可达)。它与下面
+   * `closeDetail` 仍是同一份"只管 `open` 这一个键"的增删 —— 换成整体替换
+   * 的话,链接会丢掉筛选参数,而且只有把它贴给别人的那一次才看得出来。
    */
-  const openDetail = (id: string) =>
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev)
-        next.set('open', id)
-        return next
-      },
-      { replace: false },
-    )
+  const detailHref = (id: string) => {
+    const next = new URLSearchParams(params)
+    next.set('open', id)
+    return `?${next.toString()}`
+  }
 
   const closeDetail = () =>
     setParams(
@@ -413,9 +414,15 @@ export default function WorkbenchBatchPage() {
       width: 220,
       render: (_, row) => (
         <div>
-          <a className="mono" onClick={() => openDetail(row.id)}>
+          {/*
+            详情抽屉是**有地址的**(`?open=<id>`),所以行入口该是链接:
+            可复制、可新标签打开、键盘可达。`to` 从 `detailHref` 取,
+            与 `openDetail` 同一份键增删逻辑 —— 两处各拼一次的话,
+            链接会丢掉筛选参数而点击不会,同一个入口两种结果。
+          */}
+          <Link className="mono" to={detailHref(row.id)}>
             {row.id.slice(0, 8)}
-          </a>
+          </Link>
           <div style={{ fontSize: fontScale.meta, color: brandVars.slate }}>
             {row.label || row.action_label}
           </div>
@@ -534,9 +541,9 @@ export default function WorkbenchBatchPage() {
       width: 190,
       render: (_, row) => (
         <div>
-          <a className="mono" onClick={() => navigate(`/workbench/${row.product_id}`)}>
+          <Link className="mono" to={`/workbench/${row.product_id}`}>
             {row.sku}
-          </a>
+          </Link>
           <div style={{ fontSize: fontScale.meta, color: brandVars.slate }}>{row.spu}</div>
         </div>
       ),

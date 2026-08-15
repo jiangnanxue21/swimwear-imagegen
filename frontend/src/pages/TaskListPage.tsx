@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { App, Button, Card, Empty, Select, Space, Table, Tag, Tooltip } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
@@ -143,9 +143,9 @@ export default function TaskListPage() {
       dataIndex: 'id',
       width: 130,
       render: (id: string) => (
-        <a className="mono" onClick={() => navigate(`/tasks/${id}`)}>
+        <Link className="mono" to={`/tasks/${id}`}>
           {id.slice(0, 8)}
-        </a>
+        </Link>
       ),
     },
     {

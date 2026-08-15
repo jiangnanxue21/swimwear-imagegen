@@ -1,6 +1,10 @@
 # CLAUDE.md — 前端
 
-React 18 + TypeScript + Vite 5 + antd 5 + TanStack Query + react-router 6。
+React 18 + TypeScript + Vite + antd 5 + TanStack Query + react-router。
+**主版本号刻意不写在这里** —— 这一行原来写着「Vite 5 …… react-router 6」,
+而锁文件早已是 Vite 8 与 react-router 7。这是每个进场的人被要求先读的文件,
+它说错的代价是有人照着一个不存在的版本去查文档。准确的版本只有一个来源:
+`package-lock.json`(`npm ls vite react-router-dom antd` 现问一遍)。
 Node 22(与 `Dockerfile` 的 `node:22-alpine` 对齐,分叉会导致 CI 绿而镜像红)。
 
 ## 门禁与顺序

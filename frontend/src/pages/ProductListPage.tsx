@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Button, Card, Empty, Input, Select, Space, Table, Tag,
 } from 'antd'
@@ -95,9 +95,9 @@ const filters = useUrlFilters({
       sorter: true,
       sortOrder: sort.orderFor('sku'),
       render: (v: string, row) => (
-        <a className="mono" onClick={() => navigate(`/products/${row.id}`)}>
+        <Link className="mono" to={`/products/${row.id}`}>
           {v}
-        </a>
+        </Link>
       ),
     },
     {

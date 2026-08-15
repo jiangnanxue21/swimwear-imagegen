@@ -13,7 +13,7 @@
  *
  * 所以这一段按颜色逐行铺开,并把"哪几个颜色拦着"单独说一遍。
  */
-import { Card, Empty, Space, Table, Tag } from 'antd'
+import { Button, Card, Empty, Space, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   COLOR_SUBSTATE_LABEL,
@@ -134,9 +134,10 @@ export default function OverviewTab({
               </Space>
             }
             extra={
-              <a onClick={() => onJump(STEP_TAB[step.step])}>
+              // 切换同一页内的标签,不产生新地址 —— 按钮而不是无 href 的锚点
+              <Button type="link" size="small" onClick={() => onJump(STEP_TAB[step.step])}>
                 去{step.label}标签页
-              </a>
+              </Button>
             }
           >
             <IssueList

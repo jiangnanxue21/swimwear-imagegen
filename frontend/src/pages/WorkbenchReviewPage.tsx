@@ -198,6 +198,15 @@ function ReviewCentreTiles({
 /** 这一页只处理这两个动作。其余动作不是"审",而是"做"。 */
 const REVIEW_ACTIONS: NextActionCode[] = ['APPROVE_IMAGE_SET', 'APPROVE_COPY']
 
+/**
+ * 一次载入多少件。**抽成常量是因为界面要把这个数说出来**(见 `notLoaded`)——
+ * 写死在请求里的话,调大它就会留下一句说错数的提示,而那句提示恰恰是
+ * 为了消掉"两个数互相矛盾"才加的。
+ *
+ * 上限 100 与后端 `api/workbench.py` 的 `le=100` 对齐,不能再大。
+ */
+const QUEUE_PAGE_SIZE = 100
+
 type Filter = 'ALL' | 'APPROVE_IMAGE_SET' | 'APPROVE_COPY'
 
 /** 本轮处理过的一件。存 SKU 而不只是 id —— 理由见 `processed` 的注释 */
@@ -580,12 +589,38 @@ export default function WorkbenchReviewPage() {
     queries: wanted.map((action) => ({
       queryKey: ['review-queue', action],
       queryFn: () =>
-        workbenchApi.list({ next_action: action, page_size: 100 }),
+        workbenchApi.list({ next_action: action, page_size: QUEUE_PAGE_SIZE }),
     })),
   })
 
   const loading = queues.some((q) => q.isLoading)
   const failed = queues.find((q) => q.isError)
+
+  /**
+   * 这一轮**没载进来**的件数。0 表示队列就是全部。
+   *
+   * ## 为什么必须说出来
+   *
+   * 队列按每个动作各拉 `QUEUE_PAGE_SIZE` 条,而同一屏顶部的计数瓦片显示的是
+   * 后端在**全量筛选结果**上算的真实 total。待批图片集有 260 件时,原来的表现是:
+   *
+   *     瓦片        260
+   *     进度条      0 / 100        ← 两个数在同一屏上互相矛盾
+   *     清完 100 件 「队列已空」    ← 其余 160 件在他手动点「重新载入队列」前不存在
+   *
+   * 批准是本系统定义的**不可撤销**动作,一个让人以为"审完了"的完成态,
+   * 风险等级与数据缺陷同级 —— 他会带着这个结论去汇报。
+   *
+   * 这一页的注释把每个取舍都写了(快照不重排、只预取 1 件、100 件量级下
+   * 并发请求比改接口便宜),唯独没写"超过 100 会怎样" —— 说明它是遗漏,
+   * 不是取舍。所以补的是**如实说出来**,不是偷偷改成自动续拉:
+   * 后者会让"快照不重排"那条设计当场失效(见 `doneKeys` 那一段)。
+   */
+  const notLoaded = queues.reduce((sum, q) => {
+    const data = q.data
+    if (!data) return sum
+    return sum + Math.max(data.total - data.items.length, 0)
+  }, 0)
 
   /*
    * 候选图审核的件数(a47 §6)。`page_size: 1` 只为了拿 `total` ——
@@ -622,6 +657,26 @@ export default function WorkbenchReviewPage() {
     ? null
     : summaryQuery.data?.summary.by_next_action ?? null
 
+  /**
+   * 「这几条队列查询的数据换过没有」压成一个字符串。
+   *
+   * 这一行原来是内联在依赖数组里的 `queues.map(...).join(',')`,而
+   * `exhaustive-deps` 对复杂表达式一律报警(它静态分析不了)——
+   * **本仓当初把整条规则从 error 降成 warn,就是为了迁就这一处写法。**
+   * 一条规则的强度被一个表达式的位置决定,那不划算:代价是全仓 16 个
+   * 手写依赖数组从此无人看管,而那类缺陷("偶尔不刷新、状态错乱")
+   * 恰恰是 UAT 里最难复现的。
+   *
+   * 提出来命名之后,规则看得懂它,升级就不再欠着这一处。
+   */
+  const queuesFreshness = queues.map((q) => q.dataUpdatedAt).join(',')
+
+  /*
+   * `queues` 本身不进依赖:`useQueries` 每次渲染都返回**新数组**,
+   * 写进去等于让这个 memo 恒失效 —— 而它排的是整条审核队列的序,
+   * 每次渲染重排会让"快照不重排"那条设计当场失效(见下面 `doneKeys`)。
+   * 真正会变的那部分已经由 `queuesFreshness` 表达了。
+   */
   const queue: WorkbenchListItem[] = useMemo(() => {
     const rows = queues.flatMap((q) => q.data?.items ?? [])
     // 按 SPU 再按 SKU 排序:同 SPU 的图片集/文案是共享对象,连着审能少看几遍同一组图
@@ -632,7 +687,8 @@ export default function WorkbenchReviewPage() {
           ? a.product.sku.localeCompare(b.product.sku)
           : a.product.spu.localeCompare(b.product.spu),
       )
-  }, [queues.map((q) => q.dataUpdatedAt).join(','), doneKeys])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queuesFreshness, doneKeys])
 
   const current = queue[Math.min(index, Math.max(queue.length - 1, 0))]
 
@@ -1039,6 +1095,15 @@ export default function WorkbenchReviewPage() {
               size="small"
             />
           )}
+          {/* 进度条的分母是**这一批**,不是全部待批。两者不等时必须常驻说出来,
+              否则它和顶部瓦片那个数在同一屏上互相矛盾,而运营没有办法分辨
+              哪个是真的 */}
+          {notLoaded > 0 && (
+            <Typography.Text type="warning" style={{ fontSize: fontScale.meta }}>
+              队列一次只载入 {QUEUE_PAGE_SIZE} 件,另有 {notLoaded} 件还没进来。
+              清完这一批后点「重新载入队列」继续。
+            </Typography.Text>
+          )}
           {/* 二次走查 B-1:本轮已处理名单。
               进度条只给分子(「3 / 20」),而运营想复查的恰恰是**名单** ——
               「刚才那三件是哪三件」。批准不可撤销,这份名单是按错之后
@@ -1072,11 +1137,18 @@ export default function WorkbenchReviewPage() {
 
       {!loading && !current && (
         <Card size="small">
+          {/*
+            完成态的判据是「队列空**且** notLoaded 为 0」,不只是队列空。
+            少了后半句,清完第一批 100 件的人读到的是「队列已空」——
+            而后面还排着 160 件。这句话会被他当成"今天审完了"。
+          */}
           <Empty
             description={
-              processed.length
-                ? `这一轮处理了 ${processed.length} 件,队列已空`
-                : '当前没有待批准的商品'
+              notLoaded > 0
+                ? `这一批 ${processed.length} 件处理完了,还有 ${notLoaded} 件没载入 —— 点上面的「重新载入队列」继续`
+                : processed.length
+                  ? `这一轮处理了 ${processed.length} 件,队列已空`
+                  : '当前没有待批准的商品'
             }
           />
         </Card>

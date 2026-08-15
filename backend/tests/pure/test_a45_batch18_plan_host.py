@@ -241,11 +241,21 @@ def test_the_aggregate_page_links_with_the_key_not_the_code():
 
     窗口取 SPU 那一列的 `render` 块:整文件读的话,表格里正常显示的
     `{row.spu}` 会把这条断言喂假,守卫红在完全正确的代码上。
+
+    **地标带上 `/spus/` 是后加的(2026-08-15)。** 原来只锚
+    `<Link className="mono" to={`,而那时这一页只有这一条这样的链接。
+    前端评审 P1-5 把 SKU 列的伪链接(`<a onClick={navigate(...)}>`)也换成了
+    `<Link>`,同款地标于是出现两次,`braced_block` 当场按"起点不唯一"拒绝执行。
+
+    它红得对:一个能匹配两处的地标,下一次多半会静静切错那一处。修法是把
+    地标收窄到这一列真正的目标路径,而不是回头去改前端迁就它 —— 那条链接
+    本来就该是 `<Link>`。反向断言仍然成立:换成 `row.spu` 时地标照样命中,
+    切出来的块里就有 `row.spu}`。
     """
     aggregate = _code_only(FRONTEND / "pages" / "WorkbenchSpuPage.tsx")
     link_block = braced_block(
         aggregate,
-        "<Link className=\"mono\" to={",
+        "<Link className=\"mono\" to={`/spus/",
         what="聚合页 SPU 列的链接目标",
     )
     assert "row.spu_id" in link_block

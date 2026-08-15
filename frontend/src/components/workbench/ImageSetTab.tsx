@@ -64,6 +64,17 @@ interface Draft extends ImageSetItemInput {
   key: string
 }
 
+/**
+ * 一次拉多少张素材来建 URL 索引。**抽成常量是因为界面要把这个数说出来**
+ * (见 `assetsTruncated` 那个格子的提示)。
+ *
+ * 写死在请求里的话,调大它就会留下一句说错数的提示 —— 而那句提示恰恰是
+ * 为了消掉"对着真实存在的图说它可能已被删除"才加的。
+ *
+ * 200 与后端 `api/media_library.py` 的 `page_size: le=200` 对齐,不能再大。
+ */
+const MEDIA_PAGE_SIZE = 200
+
 /** 行标识。三处(`toDraft` / `add` / `setVariant`)必须用同一个函数拼。 */
 function rowKey(mediaAssetId: string, variantId: string | null | undefined): string {
   return `${mediaAssetId}#${variantId ?? ''}`
@@ -169,7 +180,7 @@ export default function ImageSetTab({
 
   const assets = useQuery({
     queryKey: ['workbench-media', productId],
-    queryFn: () => mediaApi.list({ product_id: productId, page_size: 200 }),
+    queryFn: () => mediaApi.list({ product_id: productId, page_size: MEDIA_PAGE_SIZE }),
     enabled: Boolean(productId),
   })
 
@@ -488,6 +499,19 @@ export default function ImageSetTab({
 
   const detailBroken = Boolean(imageSetId) && current.isError
   const assetsBroken = assets.isError
+
+  /**
+   * 这份素材清单**没拉全**(第 `MEDIA_PAGE_SIZE + 1` 张之后的查不到)。
+   *
+   * 下面那个"不在本 SKU"的格子原来枚举了三种成因,而**第四种一直没写**:
+   * 这张图就在这个 SKU 下,只是排在第 201 位。一个素材量大的 SPU 会让运营
+   * 对着一张真实存在的图读到「也可能已被删除,到素材库查证后再决定是否移除」
+   * —— 那句话的下一步是删掉它。
+   *
+   * 分不开的时候不许说死(同格子那段注释的原话)。所以拿到这个事实就
+   * 加一档,而不是继续用一句涵盖不了它的话。
+   */
+  const assetsTruncated = (assets.data?.total ?? 0) > (assets.data?.items.length ?? 0)
 
   /*
    * 阻断范围要精确到"哪个读失败挡哪个动作",不能一刀切:
@@ -861,21 +885,29 @@ export default function ImageSetTab({
                     />
                   ) : (
                     /*
-                     * 这个格子原来一律写"素材缺失",而它其实有三种成因,只有一种是坏事:
+                     * 这个格子原来一律写"素材缺失",而它其实有**四种**成因,
+                     * 只有一种是坏事:
                      *
                      *   素材接口失败       什么都不知道
+                     *   清单没拉全         只取前 MEDIA_PAGE_SIZE 张,这一张排在后面。
+                     *                      它就在本 SKU 下,一点问题都没有
                      *   属于同 SPU 的兄弟 SKU   图片集是 SPU 级的,而这里的素材只按
                      *                      product_id 拉 —— 兄弟 SKU 加进来的图
                      *                      本来就不在这份清单里,并**不是**缺失
                      *   真的被删了         这才是要报警的那一种
                      *
-                     * 分不开的时候不许说死。说死的代价是运营把一张好图删掉。
+                     * 分不开的时候不许说死。说死的代价是运营把一张好图删掉 ——
+                     * 而"清单没拉全"这一档原来正是被那句说死的话涵盖着的
+                     * (前端评审 P2-6):素材量大的 SPU 上,一张好端端的图会被
+                     * 指引去"查证后再决定是否移除"。
                      */
                     <Tooltip
                       title={
                         assetsBroken
                           ? '素材接口读取失败,无法确认这一张是否还在'
-                          : '这张图不在本 SKU 的素材清单里。图片集是 SPU 级的,它可能属于同 SPU 的其他 SKU;也可能已被删除。到素材库按 SPU 查证后再决定是否移除'
+                          : assetsTruncated
+                            ? `本 SKU 的素材超过 ${MEDIA_PAGE_SIZE} 张,这一页只取了前 ${MEDIA_PAGE_SIZE} 张 —— 这张图很可能就在本 SKU 下,只是没被载入。先去素材库确认,不要直接移除`
+                            : '这张图不在本 SKU 的素材清单里。图片集是 SPU 级的,它可能属于同 SPU 的其他 SKU;也可能已被删除。到素材库按 SPU 查证后再决定是否移除'
                       }
                     >
                       <div
@@ -886,7 +918,7 @@ export default function ImageSetTab({
                           color: brandVars.danger, fontSize: fontScale.meta, padding: 2,
                         }}
                       >
-                        {assetsBroken ? '读不到' : '不在本 SKU'}
+                        {assetsBroken ? '读不到' : assetsTruncated ? '未载入' : '不在本 SKU'}
                       </div>
                     </Tooltip>
                   )}

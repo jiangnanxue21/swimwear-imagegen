@@ -875,8 +875,11 @@ export const batchApi = {
   importPreview: async (file: File) => {
     const form = new FormData()
     form.append('file', file)
+    // 上传时间算在超时里,见 client.ts 的 LONG_TIMEOUT_MS
     return (
-      await apiClient.post<ImportPreviewResponse>('/workbench/import/preview', form)
+      await apiClient.post<ImportPreviewResponse>('/workbench/import/preview', form, {
+        timeout: LONG_TIMEOUT_MS,
+      })
     ).data
   },
 
@@ -884,8 +887,12 @@ export const batchApi = {
     const form = new FormData()
     form.append('file', file)
     form.append('preview_token', previewToken)
+    // **五个上传点里最要紧的一个**:它是写。一次由偏短超时造出来的
+    // "结果未知"会让运营面对一批可能已经建档的商品,而不许直接重做
     return (
-      await apiClient.post<ImportPreviewResponse>('/workbench/import/commit', form)
+      await apiClient.post<ImportPreviewResponse>('/workbench/import/commit', form, {
+        timeout: LONG_TIMEOUT_MS,
+      })
     ).data
   },
 }

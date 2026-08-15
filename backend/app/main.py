@@ -40,6 +40,28 @@ _HTTP_STATUS_TO_CODE: dict[int, ErrorCode] = {
     422: ErrorCode.INPUT_INVALID,
 }
 
+#: Starlette 自己那几句英文默认 detail -> 说得出下一步的中文。
+#:
+#: 键带上原文而不是只按状态码匹配,是**刻意的**:业务代码里手写的
+#: `HTTPException(404, "这一版图片集不存在")` 必须原样透出去。只按状态码
+#: 兜底的话,那句写得更准的话会被这里这句更泛的盖掉 —— 那是退步。
+#:
+#: 这两句都点名"接口"而不是"数据",因为它们的成因只有一种:请求打到了一条
+#: 这个后端没有的路由(或用错了方法)。而运营最可能撞见它的场景是前端比
+#: 后端新 —— 所以话里必须出现"后端版本"这四个字,否则他会去刷新页面,
+#: 而刷新一百次也不会让那条路由长出来。
+_STARLETTE_DEFAULT_DETAIL: dict[tuple[int, str | None], str] = {
+    (404, "Not Found"): (
+        "这个接口在当前后端上不存在。多半是前端比后端新 —— "
+        "请让管理员确认后端已更新到与页面同一版本并重启;"
+        "刷新页面不会解决它"
+    ),
+    (405, "Method Not Allowed"): (
+        "这个接口不接受该请求方式。多半是前端与后端版本不一致 —— "
+        "请让管理员确认两侧是同一版本"
+    ),
+}
+
 #: 静态挂载出去的那个前缀。取自存储层的公开前缀清单,不在这里另写一份 ——
 #: 两处各写一份字符串,改一处忘一处的那次就是把私有素材挂上公网。
 PUBLIC_STORAGE_PREFIX = _STORAGE_PUBLIC_PREFIXES[0]
@@ -425,13 +447,35 @@ def create_app() -> FastAPI:
         405、以及任何第三方中间件抛出的 HTTPException 都会走这里。
 
         `detail` 已经是结构化对象时原样放进 `fields`,不强行字符串化。
+
+        ## Starlette 的两句英文默认 detail 要换掉(2026-08-15)
+
+        路由没匹配上时 Starlette 抛的是 `HTTPException(404, "Not Found")`,
+        405 是 `"Method Not Allowed"`。上面那行 `detail` 原样透出,于是它们
+        一路走到 `message.error()`,**运营看到的是一个英文单词**。
+
+        这不是文案瑕疵,是一次真的把人带偏的事故:界面上新加了「删除素材」
+        按钮,而后端进程还是加它之前那个,点下去只说 `Not Found` ——
+        看起来像"这条素材找不到了",实际是"这个接口在当前后端上还不存在"。
+        两者的下一步完全相反(一个是刷新页面,一个是重启/更新后端),
+        而那个英文单词指向的是错的那一个。
+
+        业务 404 不受影响:它们走 `AppError`(`NotFoundError`),
+        文案本来就是中文的,压根不经过这个处理器。这里换掉的**只有**
+        Starlette 自己那两句 —— 手写的 `HTTPException(404, "中文…")`
+        原样保留,不做兜底覆盖。
         """
         detail = exc.detail
         code = _HTTP_STATUS_TO_CODE.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
+        message = _STARLETTE_DEFAULT_DETAIL.get(
+            (exc.status_code, detail if isinstance(detail, str) else None)
+        )
+        if message is None:
+            message = detail if isinstance(detail, str) else "请求无法处理"
         payload: dict = {
             "error": {
                 "code": str(code),
-                "message": detail if isinstance(detail, str) else "请求无法处理",
+                "message": message,
             }
         }
         if not isinstance(detail, str) and detail is not None:

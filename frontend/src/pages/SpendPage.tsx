@@ -24,7 +24,7 @@
  * 账户里还剩多少;共用同一把 Key 的其他系统、赠送额度、失败但仍计费的调用
  * 都不在其中。
  */
-import { Alert, Card, Progress, Skeleton, Space, Statistic, Table, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Progress, Skeleton, Space, Statistic, Table, Tooltip, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { BUDGET_LABEL, usageApi, type ProviderSpend } from '../api/usage'
 import { readError } from '../api/client'
@@ -101,7 +101,13 @@ export default function SpendPage() {
           showIcon
           message="拿不到花费数据"
           description={readError(error)}
-          action={<a onClick={() => void refetch()}>重试</a>}
+          action={
+            // 纯动作,没有目标地址 —— 用按钮而不是无 href 的锚点:
+            // 后者不进 Tab 序列,键盘用户到不了这颗"重试"
+            <Button type="link" size="small" onClick={() => void refetch()}>
+              重试
+            </Button>
+          }
         />
       )}
 

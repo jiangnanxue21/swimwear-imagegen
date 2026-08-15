@@ -1,4 +1,4 @@
-import { apiClient} from './client'
+import { apiClient, LONG_TIMEOUT_MS } from './client'
 import type {
   ModelTemplate, Page, Provider, ProviderTestResult, Task, TaskDetail,
 } from './types'
@@ -132,7 +132,12 @@ export const modelTemplatesApi = {
     const form = new FormData()
     form.append('file', file)
     Object.entries(fields).forEach(([k, v]) => form.append(k, String(v)))
-    return (await apiClient.post<ModelTemplate>('/model-templates', form)).data
+    // 上传时间算在超时里,见 client.ts 的 LONG_TIMEOUT_MS
+    return (
+      await apiClient.post<ModelTemplate>('/model-templates', form, {
+        timeout: LONG_TIMEOUT_MS,
+      })
+    ).data
   },
 
   /**

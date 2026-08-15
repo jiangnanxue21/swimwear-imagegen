@@ -15,7 +15,7 @@
  * 平均值会给出"4 个 SKU 三个做完了 = 75%"这种读数,而这个 SPU 一件也上不了架。
  */
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import {
   Alert, Button, Card, Empty, Input, Progress, Space, Table, Tag, Tooltip,
 } from 'antd'
@@ -30,7 +30,6 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 export default function WorkbenchSpuPage() {
   useDocumentTitle('SPU 聚合')
-  const navigate = useNavigate()
   const [search, setSearch] = useState('')
   /** 输入框里的字。与已生效的 `search` 分开:敲字不该每个字符打一次接口,
       但两者必须能被同一个动作一起清掉(走查 P0-3:非受控输入框会说谎) */
@@ -181,9 +180,9 @@ export default function WorkbenchSpuPage() {
       key: 'sku',
       width: 220,
       render: (_, row) => (
-        <a className="mono" onClick={() => navigate(`/workbench/${row.product_id}`)}>
+        <Link className="mono" to={`/workbench/${row.product_id}`}>
           {row.sku}
-        </a>
+        </Link>
       ),
     },
     {

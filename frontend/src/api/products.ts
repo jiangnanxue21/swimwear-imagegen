@@ -1,4 +1,4 @@
-import { apiClient } from './client'
+import { apiClient, LONG_TIMEOUT_MS } from './client'
 import type { Asset, AssetType, ImportResult, Page, Product } from './types'
 import type { ColorVariant } from './spus'
 
@@ -46,7 +46,12 @@ export const productsApi = {
   importCsv: async (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return (await apiClient.post<ImportResult>('/products/import', form)).data
+    // 上传时间算在超时里,见 client.ts 的 LONG_TIMEOUT_MS
+    return (
+      await apiClient.post<ImportResult>('/products/import', form, {
+        timeout: LONG_TIMEOUT_MS,
+      })
+    ).data
   },
 
   assets: async (id: string) => (await apiClient.get<Asset[]>(`/products/${id}/assets`)).data,
@@ -87,9 +92,11 @@ export const productsApi = {
     form.append('file', file)
     form.append('asset_type', assetType)
     if (colorVariantId) form.append('color_variant_id', colorVariantId)
+    // 素材上限 20MB,60 秒的默认超时在办公室上行带宽下不够(见 LONG_TIMEOUT_MS)
     return (await apiClient.post<{ asset: Asset; deduplicated: boolean }>(
       `/products/${id}/assets`,
       form,
+      { timeout: LONG_TIMEOUT_MS },
     )).data
   },
 }

@@ -88,13 +88,16 @@ interface FakeErrorInit {
   data?: unknown
   code?: string
   requestId?: string
+  /** 这次请求配的超时(毫秒)。话术里的秒数从它派生,不是常量 */
+  timeout?: number
 }
 
-function axiosError({ status, data, code, requestId }: FakeErrorInit): unknown {
+function axiosError({ status, data, code, requestId, timeout }: FakeErrorInit): unknown {
   return {
     isAxiosError: true,
     code,
     message: 'boom',
+    config: timeout === undefined ? undefined : { timeout },
     response:
       status === undefined
         ? undefined
@@ -130,6 +133,50 @@ describe('describeError:失败判定只有这一份', () => {
     // A12 的硬约束:运营那一层不出现命令、容器名、表名、文件名
     expect(view.text).not.toContain('docker')
     expect(view.technical.hint).toContain('worker')
+  })
+
+  /*
+   * 超时秒数**从这次请求真实的 timeout 派生**,不是写死的常量。
+   *
+   * 修之前三处话术都写着"30 秒",而默认超时在 A-33 就抬到了 60s、
+   * 长动作挂着 LONG_TIMEOUT_MS(300s)。一个跑满 5 分钟才超时的发布请求
+   * 会被告知"后端 30 秒内没有回答" —— 差一个数量级,而这句话恰恰出现在
+   * **结果未知、禁止直接重做**那一支上,是要运营据此做判断的。
+   *
+   * 这几条钉的是"派生"这件事本身:把常量改成 60 能让第一条过,
+   * 但第二条(300s 说 5 分钟)只有真的从 config 读才可能绿。
+   */
+  describe('超时秒数说的是这一次请求真实等了多久', () => {
+    it('默认超时的请求说 60 秒,不是 30 秒', () => {
+      const view = describeError(axiosError({ code: 'ECONNABORTED', timeout: 60_000 }))
+      expect(view.text).toContain('60 秒')
+      expect(view.text).not.toContain('30 秒')
+    })
+
+    it('长动作(300s)说 5 分钟 —— 秒在这个量级已经帮不上忙', () => {
+      const view = describeError(axiosError({ code: 'ECONNABORTED', timeout: 300_000 }))
+      expect(view.text).toContain('5 分钟')
+      // 管理员那一层读同一个数,两层不许各说一个
+      expect(view.technical.hint).toContain('5 分钟')
+    })
+
+    it('写请求的「结果未知」那句也用同一个数', () => {
+      const view = describeError(
+        axiosError({ code: 'ECONNABORTED', timeout: 300_000 }),
+        'write',
+      )
+      expect(view.outcome).toBe('UNKNOWN')
+      expect(view.text).toContain('5 分钟')
+      // 这一支刻意不出现"请重试" —— 它要防的正是那个动作
+      expect(view.text).not.toContain('请重试')
+    })
+
+    it('拿不到 config 时回落到默认值,不出现 NaN 或 undefined', () => {
+      const view = describeError(axiosError({ code: 'ECONNABORTED' }))
+      expect(view.text).toContain('秒')
+      expect(view.text).not.toContain('NaN')
+      expect(view.text).not.toContain('undefined')
+    })
   })
 
   it('连不上:明确告诉运营「这不是你操作错了」', () => {

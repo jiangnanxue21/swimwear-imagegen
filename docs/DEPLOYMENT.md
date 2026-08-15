@@ -223,8 +223,11 @@ docker compose logs backend | grep '"request_id": "<id>"'
 
 #### ① 换行符:`.env` 带 `\r` 会让密码悄悄变错
 
-仓库里没有 `.gitattributes`,而 Windows 上 `git clone` 默认 `core.autocrlf=true`
-会把文本文件改写成 CRLF。后果最隐蔽的一处是 `.env`:
+**这件事现在由仓库自己兜住了,你不需要动全局配置。** 下面留着是因为它解释了
+症状 —— 撞见过一次的人会来这里查。
+
+Windows 上 `git clone` 默认 `core.autocrlf=true`,会把文本文件改写成 CRLF。
+后果最隐蔽的一处是 `.env`:
 
 ```
 POSTGRES_PASSWORD=s3cret\r
@@ -232,23 +235,35 @@ POSTGRES_PASSWORD=s3cret\r
 
 `env_file` 把 `\r` 当成密码的一部分带进容器,于是 backend 连不上库,
 而日志只说认证失败 —— 密码"看起来"完全正确。同理 CRLF 的 `Makefile` 会让
-GNU make 报 `missing separator`。
+GNU make 报 `missing separator`,CRLF 的 `Dockerfile` 会让 `RUN ... \` 的续行断掉。
 
-**clone 之前**先设好,或者建一个 `.gitattributes`:
+**这一节原来写的是「仓库里没有 `.gitattributes`」并建议你自己建一个,
+那句话已经过期两次。** 第一次:`.gitattributes` 后来加了,但只实现了一张
+5 条模式的白名单 —— 实测 814 个跟踪文件里**只有 4 个**被盖住(`Makefile`、
+两个打包脚本、`ci.yml`),`.env.example` 恰恰不在其中,也就是说这一节
+诊断出来的那个症状**当时并没有被修掉**。第二次:兜底规则补上了,
+而这一节还在教人手动建文件。
 
-```bash
-git config --global core.autocrlf input     # Windows 上推荐 input,不是 true
-```
+今天仓库根的 `.gitattributes` 第一行就是这一节当初建议的那条规则:
 
 ```gitattributes
-# .gitattributes —— 建议直接加进仓库
 * text=auto eol=lf
-*.png binary
-*.jpg binary
 ```
 
-已经 clone 过的:`git config core.autocrlf input && git rm --cached -r . && git reset --hard`。
-只想救 `.env` 的话,用编辑器另存为 LF 即可。
+它让 **Windows 的工作树也是 LF**,所以打包机器是谁不再影响交付物内容。
+`backend/tests/pure/test_a45_batch11_fixes.py` 里两条守卫盯着它:
+一条扫全仓有没有 CRLF,一条盯着兜底规则不许被改回白名单。
+
+所以正常情况下你什么都不用做。真撞上了(比如用了别的工具解压、或者
+从一个更老的包里取的文件):
+
+```bash
+git config core.autocrlf input      # 只对这个仓库,不用改全局
+git rm --cached -r . && git reset --hard
+```
+
+只想救 `.env` 的话,用编辑器另存为 LF 即可 —— `.env` 不进仓库,
+`.gitattributes` 管不到它。
 
 > macOS 不会自动改写换行,但如果 `.env` 是从 Windows 同事那里拷来的,同样中招。
 > 排查一句话:`file .env` 输出里出现 `CRLF` 就是它。

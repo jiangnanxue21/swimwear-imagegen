@@ -21,7 +21,7 @@
  * 组件内不存第二份。地址可复制、刷新保留、后退保留 —— 这三条从前都不成立。
  */
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Dropdown, Empty, Input, Modal, Progress, Segmented, Select,
   Space, Table, Tag, Tooltip,
@@ -558,9 +558,16 @@ export default function WorkbenchListPage() {
             </Tooltip>
           )}
           <div style={{ minWidth: 0 }}>
-            <a className="mono" onClick={() => open(row)}>
+            {/*
+              行入口是**链接**,不是 onClick 锚点。这一页整套 `useUrlFilters`
+              存在的理由就是"把地址贴进群里",而在此之前列表的行入口本身
+              贴不出去:运营想把这一件发给同事,得先点进详情页再复制地址栏。
+              换成 <Link> 之后中键/Ctrl 点开新标签、右键复制链接、键盘 Tab
+              全部回来,点击行为一字不变(`open(row)` 走的是同一个地址)。
+            */}
+            <Link className="mono" to={`/workbench/${row.product.id}`}>
               {row.product.sku}
-            </a>
+            </Link>
             <div style={{ color: brandVars.slate, fontSize: fontScale.meta }}>
               {row.product.spu} <AudienceTag product={row.product} />
             </div>

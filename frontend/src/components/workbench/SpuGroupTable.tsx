@@ -24,23 +24,22 @@
  */
 import { Progress, Space, Table, Tag, Tooltip, Empty } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import type { SpuGroup, SpuSkuRow } from '../../api/batch'
 import { FLOW_STEP_LABEL, type FlowStep } from '../../api/workbench'
 import { brandVars, fontScale } from '../../theme'
 
 /** 展开行:这一款下面的 SKU 明细。列比主表窄,因为它是"看一眼"而不是"在这里干活" */
 function SkuDetail({ group }: { group: SpuGroup }) {
-  const navigate = useNavigate()
   const columns: ColumnsType<SpuSkuRow> = [
     {
       title: 'SKU',
       dataIndex: 'sku',
       width: 200,
       render: (sku: string, row) => (
-        <a className="mono" onClick={() => navigate(`/workbench/${row.product_id}`)}>
+        <Link className="mono" to={`/workbench/${row.product_id}`}>
           {sku}
-        </a>
+        </Link>
       ),
     },
     {

@@ -494,7 +494,10 @@ export default function AttributeTab({
       width: 90,
       render: (_, row) =>
         row.evidence_ids.length ? (
-          <a onClick={() => setEvidenceOf(row)}>{row.evidence_ids.length} 条</a>
+          // 开抽屉,不是导航 —— 按钮而不是无 href 的锚点(键盘可达)
+          <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => setEvidenceOf(row)}>
+            {row.evidence_ids.length} 条
+          </Button>
         ) : (
           <span style={{ color: brandVars.textFaint }}>—</span>
         ),

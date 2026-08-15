@@ -193,12 +193,25 @@ export default function CopyTab({
   const [description, setDescription] = useState('')
   const [keywords, setKeywords] = useState('')
 
-  // 服务端版本变了就丢掉本地编辑 —— 否则重生完还显示旧文字,而用户以为重生没生效
+  /*
+   * 服务端版本变了就丢掉本地编辑 —— 否则重生完还显示旧文字,而用户以为重生没生效。
+   *
+   * **依赖只能是 `id` 与 `version`,四个正文字段不许进去。**
+   * `exhaustive-deps` 要求补上它们,而补上的后果是:后台每一次轮询回来
+   * (对象是新的、内容可能一字未变)都会把运营**正在敲的那段文案覆盖掉**。
+   * 触发条件本来就是"服务端换了一版",而版本号正是那件事的标识 ——
+   * 四个正文字段是**结果**,不是触发条件。
+   *
+   * 所以这里是一条写明理由的豁免,不是一条待修的警告。`exhaustive-deps`
+   * 升成 error 之后它必须显式写出来,而这正是升级的意义:让"我知道我在
+   * 违反它"和"我没看见这条警告"在代码里长得不一样。
+   */
   useEffect(() => {
     setTitle(copy?.title ?? '')
     setBullets((copy?.bullet_points ?? []).join('\n'))
     setDescription(copy?.description ?? '')
     setKeywords((copy?.keywords ?? []).join(', '))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [copy?.id, copy?.version])
 
   const attributes = useQuery({

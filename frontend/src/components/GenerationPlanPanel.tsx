@@ -165,6 +165,25 @@ export default function GenerationPlanPanel({
     [variantLabels],
   )
 
+  /**
+   * 先看代价再启用(§7.5)。后端算,前端只展示 —— 这一步不改任何状态。
+   *
+   * `useCallback` 不是为了省一次渲染,是为了让它**能进** `columns` 的依赖数组:
+   * 原来它是个每次渲染都新建的函数声明,写进依赖等于让 memo 失效,不写进去
+   * 则 `exhaustive-deps` 一直警告 —— 于是它长期停在"有一条没人读的警告"上。
+   * 依赖升成 error 之前必须把这种two-way dead end 拆掉,而不是加一行 disable。
+   */
+  const openPreview = useCallback(
+    async (planId: string) => {
+      try {
+        setEffect(await previewActivation(planId))
+      } catch (error) {
+        reportWriteError(error)
+      }
+    },
+    [reportWriteError],
+  )
+
   const columns = useMemo(
     () => [
       {
@@ -219,17 +238,9 @@ export default function GenerationPlanPanel({
           ) : null,
       },
     ],
-    [scopeLabel],
+    [scopeLabel, openPreview],
   )
 
-  async function openPreview(planId: string) {
-    try {
-      // 先看代价再启用(§7.5)。后端算,前端只展示 —— 这一步不改任何状态
-      setEffect(await previewActivation(planId))
-    } catch (error) {
-      reportWriteError(error)
-    }
-  }
 
   async function confirmActivate() {
     if (!effect) return

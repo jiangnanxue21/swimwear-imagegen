@@ -347,6 +347,100 @@ def test_packaging_entrypoints_are_pinned_to_lf():
         assert b"\r" not in payload, f"{relative} 出现 CRLF/混合换行,Windows 打包会复发"
 
 
+#: 换行符扫描要跳过的目录。与 `tools/pack.sh` 的排除表同向 —— 它们要么不进
+#: 交付包,要么根本不是我们写的代码(`node_modules` 里什么行尾都有,而且合法)。
+_LINE_ENDING_SKIP_DIRS = frozenset(
+    {
+        ".git", ".idea", ".vscode", "__pycache__", ".pytest_cache", ".ruff_cache",
+        ".vite-cache", ".import_linter_cache", ".venv", "venv", "node_modules",
+        "test-results", "playwright-report", "dist", "coverage", "storage",
+        ".secrets", "data",
+    }
+)
+
+#: 唯一允许 CRLF 的两类:Windows 原生启动器(`.gitattributes` 同向)。
+_CRLF_ALLOWED_SUFFIXES = (".bat", ".cmd")
+
+
+def _looks_binary(payload: bytes) -> bool:
+    """和 git 的 `text=auto` 同一个判据:头部有 NUL 就当二进制。
+
+    自己判而不是问 git,是因为这批用例要在**只有 python3**的机器上跑
+    (`tools/run_pure_tests.py`),那里不保证有 git,更不保证仓库是个 checkout。
+    """
+    return b"\x00" in payload[:8000]
+
+
+def test_no_tracked_text_file_carries_crlf():
+    """**全仓没有 CRLF**,而不只是三个打包入口。
+
+    ## 这条守卫补的是什么
+
+    上面那条只盯 `tools/pack.sh` / `tools/pack.ps1` / `Makefile` 三个文件,
+    而 `.gitattributes` 当时也只是一张 5 条模式的白名单 —— 实测
+    `git check-attr` 的结果是 814 个跟踪文件里**只有 4 个有规则**。
+    其余 810 个跟着打包那台机器的 `core.autocrlf` 走,而 Git for Windows
+    默认 `true`。
+
+    于是同一个版本在两台机器上打出来的包内容不同,而**两个打包脚本都没做错**:
+    它们逐字节复制工作树。三处会真的坏掉(compose 的 `env_file` 保留 `\\r`
+    让密码悄悄变错、Dockerfile 的续行断掉、`.dockerignore` 条目失配),
+    理由全文在 `.gitattributes` 顶部。
+
+    ## 为什么扫文件系统而不是问 git
+
+    `eol=lf` 之后 Windows 的工作树也是 LF,所以文件系统扫描在两个平台上
+    结论相同 —— 而 `git ls-files` 在纯测试运行器里不保证可用(见 `_looks_binary`)。
+    代价是会看到未跟踪的临时文件,所以跳过表要和打包排除表同向。
+    """
+    offenders = []
+    for path in PROJECT_ROOT.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if _LINE_ENDING_SKIP_DIRS & set(path.relative_to(PROJECT_ROOT).parts):
+            continue
+        if path.suffix.lower() in _CRLF_ALLOWED_SUFFIXES:
+            continue
+        payload = path.read_bytes()
+        if _looks_binary(payload) or b"\r\n" not in payload:
+            continue
+        offenders.append(str(path.relative_to(PROJECT_ROOT)))
+
+    assert not offenders, (
+        "以下文本文件带 CRLF —— 打包会把它带进交付物,而 compose 的 env_file、"
+        "Dockerfile 续行、.dockerignore 都会因此出错:\n  "
+        + "\n  ".join(sorted(offenders)[:20])
+        + "\n修法:确认 .gitattributes 的兜底规则还在,然后 `git add --renormalize .`"
+    )
+
+
+def test_gitattributes_normalizes_the_whole_tree_not_a_whitelist():
+    """**反向断言,窗口封闭。** 兜底规则不许被改回白名单。
+
+    上一条扫的是"今天的树干净不干净",这一条扫的是"明天还会不会干净" ——
+    少了兜底,一次 Windows 上的 clone 就能让 810 个文件重新变成 CRLF,
+    而那台机器上的工作树看起来完全正常。两条缺一不可。
+
+    兜底必须排在最前:`.gitattributes` 的规则**越靠后越优先**,写在
+    `*.bat text eol=crlf` 后面的话会把那条覆盖掉,而 `cmd.exe` 对 LF 的
+    `.bat` 行为不可靠。
+    """
+    lines = [
+        line.strip()
+        for line in _read(PROJECT_ROOT / ".gitattributes").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert lines, ".gitattributes 里一条规则都没有"
+    assert lines[0] == "* text=auto eol=lf", (
+        "第一条规则必须是全仓兜底 `* text=auto eol=lf`。"
+        f"现在是 {lines[0]!r} —— 白名单只盖得住它点名的那几个文件"
+    )
+    for suffix in ("*.bat", "*.cmd"):
+        assert any(line.startswith(f"{suffix} ") and "eol=crlf" in line for line in lines), (
+            f"{suffix} 必须保留 CRLF:cmd.exe 对 LF 结尾的批处理行为不可靠"
+        )
+
+
 def test_make_pack_uses_the_native_windows_entrypoint():
     makefile = _read(PROJECT_ROOT / "Makefile")
     assert "ifeq ($(OS),Windows_NT)" in makefile

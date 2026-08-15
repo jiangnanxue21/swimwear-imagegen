@@ -15,19 +15,38 @@
  *
  * 所以这份配置的取舍是:类型能管的交给类型,ESLint 只做 tsc 做不到的事。
  *
- * ## 为什么 exhaustive-deps 是 warn 不是 error
+ * ## exhaustive-deps 已经升成 error(前端评审 P2-3)
  *
- * 现有代码里有**刻意**偏离这条规则的写法,例如 `WorkbenchReviewPage` 的
+ * **这一段原来论证的是"为什么它是 warn"** —— 现有代码里有刻意偏离规则的
+ * 写法(`WorkbenchReviewPage` 用一个拼接串表达"任一队列的数据新鲜度变了",
+ * 规则不认这种复杂表达式),而一上来设成 error 的结果不是这些地方被修好,
+ * 是整个 lint 在第一天就被关掉。那个判断在当时是对的。
  *
- *     useMemo(..., [queues.map((q) => q.dataUpdatedAt).join(','), doneIds])
+ * 它的问题在于**后半句一直没有兑现**:"等 Gate A 之后逐个消化,再决定是否
+ * 升级"。多轮批次过去,升级没有发生,而 `npm run lint` 当时也没有
+ * `--max-warnings=0` —— 于是 warn 在 CI 里等于日志噪音,16 个含手写依赖
+ * 数组的文件实际处于**无保护状态**。而这条规则正是本仓上 ESLint 的
+ * 唯一真实增量(见上一段):它管的那类缺陷是"偶尔不刷新、状态错乱",
+ * UAT 里最难复现的那一种。
  *
- * 用一个拼接串表达"任一队列的数据新鲜度变了",规则不认这种复杂表达式。
- * 一上来就设成 error 的结果不是这些地方被修好,是整个 lint 在第一天就被
- * 关掉或者被 `--no-verify` 绕过——一个没人跑的门禁比没有门禁更糟,
- * 因为它会让人以为有人在看。
+ * 一条永远停在 warn 的规则和没有这条规则是一样的,只是更让人放心。
  *
- * 先让它可见(warn),等 Gate A 之后逐个消化,再决定是否升级为 error 并加
- * `--max-warnings=0`。**升级这件事要单独做一次**,不要顺手。
+ * 升级时做的三件事:
+ *
+ *     1. 真能修的就修   `GenerationPlanPanel.openPreview` 改成 useCallback ——
+ *                       它原来是每次渲染新建的函数声明,进依赖会让 memo 失效、
+ *                       不进则永远警告,是个死结,拆开就没了
+ *     2. 复杂表达式提名  `queues.map(...).join(',')` 提成 `queuesFreshness`,
+ *                       规则从此看得懂它
+ *     3. 剩下的写明理由  两处**刻意**偏离(CopyTab 只在版本变时重置本地编辑、
+ *                       queue 的 memo 不能吃每次新建的 queues 数组)改成
+ *                       显式 `eslint-disable-next-line` + 一段说明
+ *
+ * 第 3 条才是升级的意义:**让"我知道我在违反它"和"我没看见这条警告"
+ * 在代码里长得不一样。** 前者进 code review,后者滚进日志。
+ *
+ * `npm run lint` 同时加了 `--max-warnings=0` —— 少了它,error 之外新长出来的
+ * warning 又会回到没人读的状态,这次升级半年后就白做了。
  *
  * ## 为什么手动注册 react-hooks 而不用它的预设
  *
@@ -65,7 +84,7 @@ export default tseslint.config(
     rules: {
       // —— 这份配置存在的理由,见文件头 ——
       'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
+      'react-hooks/exhaustive-deps': 'error',
 
       // —— 关掉与 tsconfig 重复的那些 ——
       // `noUnusedLocals` / `noUnusedParameters` 已经在 typecheck 里报了,

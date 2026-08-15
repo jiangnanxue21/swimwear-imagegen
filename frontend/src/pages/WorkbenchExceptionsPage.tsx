@@ -18,7 +18,7 @@
  * 同一件商品被数两次。界面上用一个 Tag 区分来源。
  */
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Button, Card, Collapse, Empty, Input, Space, Switch, Table, Tag, Tooltip,
 } from 'antd'
@@ -62,9 +62,9 @@ export default function WorkbenchExceptionsPage() {
       width: 200,
       render: (_, row) => (
         <div>
-          <a className="mono" onClick={() => navigate(`/workbench/${row.product_id}`)}>
+          <Link className="mono" to={`/workbench/${row.product_id}`}>
             {row.sku}
-          </a>
+          </Link>
           <div style={{ fontSize: fontScale.meta, color: brandVars.slate }}>{row.spu}</div>
         </div>
       ),

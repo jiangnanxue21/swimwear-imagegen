@@ -27,6 +27,17 @@ const DEFAULT_TIMEOUT_MS = 60_000
  *
  * 用法:`apiClient.post(url, body, { timeout: LONG_TIMEOUT_MS })`。
  * 加新的长接口时往这里挂,不要去动默认值。
+ *
+ * ## multipart 上传一律挂它,不看后端算得快不快
+ *
+ * axios 的 timeout 盖的是**整个请求周期,含把字节推上去的那段**。
+ * 一个 20MB 的素材(后端上限)在办公室上行带宽下 60 秒传不完是常态,
+ * 而超时的那一刻后端可能刚收完、正在写库。
+ *
+ * 这一条原来漏了全部五个上传点(素材、商品 CSV、批量导入预览与提交、
+ * 模特模板),其中 `importCommit` 是**写**:它超时会走进本仓最重的那一支
+ * ——「结果未知,不许直接重做」—— 而那个"未知"是前端自己用一个偏短的
+ * 超时造出来的。A-33 修的正是这个病灶,只是当时只看了 JSON 接口。
  */
 export const LONG_TIMEOUT_MS = 300_000
 
@@ -37,11 +48,26 @@ export const apiClient = axios.create({
    * 浏览器登录的 Session Cookie 靠它送出去。**这一行是整条登录链路的最后一跳。**
    *
    * 后端已经在 `/auth/login` 上发了 HttpOnly Cookie,而 axios 默认
-   * `withCredentials: false` —— 同源部署(nginx 把 `/api/` 反代到后端、
-   * dev 走 vite proxy)下浏览器仍然会带上 Cookie,所以**开发和默认部署都看不出
-   * 少了这一行**。出问题的是 `VITE_API_BASE_URL` 指向另一个源的那种部署:
-   * Cookie 一次都不会发出去,每个请求 401,而登录接口本身返回 200 ——
-   * 表现是"登录成功了,然后立刻又要登录"。
+   * `withCredentials: false`。同源部署(nginx 把 `/api/` 反代到后端、
+   * dev 走 vite proxy)下 axios 会因为这一行把 Cookie 带上,
+   * **少了它,一次同源的 XHR 也不会携带凭据**。
+   *
+   * ## 它**修不了**跨源部署 —— 这一段原来说反了
+   *
+   * 原文写的是:出问题的是 `VITE_API_BASE_URL` 指向另一个源的那种部署,
+   * Cookie 一次都不会发出去,表现是"登录成功了,然后立刻又要登录",
+   * 言下之意这一行把它修好了。**没有。** 后端那枚 Cookie 是
+   * `SameSite=Lax`(`backend/app/main.py` 的 `same_site="lax"`),
+   * 跨站 XHR 本来就不带它;`withCredentials` 管的是"要不要带",
+   * 不能让浏览器违反 SameSite。也就是说真配了跨源地址的部署会**精确复现**
+   * 那段注释声称已修复的症状。
+   *
+   * 今天的结论只有一句:**同源反代是唯一受支持的会话部署形态。**
+   * 跨源要可用得后端改 `SameSite=None; Secure` 并配带 credentials 的 CORS,
+   * 那是另一个安全权衡(`core/config.py` 里 `CORS_ORIGINS=*` 那一段写着:
+   * 今天那个洞正是被 Lax 兜着的)。同样的话写在 `.env.example` 上。
+   *
+   * 这一行本身仍然是必需的,只是它服务的是同源那一档。
    *
    * 这正是本仓 §3.43 那一族缺陷:上游全对,断在最后一跳,而两侧的测试都绿。
    * 所以它有一条源码级守卫
@@ -348,15 +374,39 @@ function genericText(requestId: string): string {
 }
 
 /**
+ * 这一次请求**实际**等了多久,写成一句人话("60 秒" / "5 分钟")。
+ *
+ * ## 为什么是派生的,不是写死的常量
+ *
+ * 这三句话原来都写着"30 秒",而默认超时在 A-33 那一轮就抬到了 60s、
+ * 长动作还挂着 `LONG_TIMEOUT_MS`(300s)。也就是说一个跑满 5 分钟才超时的
+ * 发布请求,界面会告诉运营"后端 30 秒内没有回答" —— 差一个数量级,
+ * 而这句话恰恰出现在**结果未知、禁止直接重做**那一支上,是要他据此做判断的。
+ *
+ * 把 30 改成 60 只是把下一次过期推迟到下一次调超时。axios 把这次请求真实
+ * 用的 `timeout` 放在 `err.config` 里,从那儿读,文案就永远说得准 ——
+ * 这与本仓「会变的数字不写死」是同一条规矩,只是以前只用在文档上。
+ *
+ * 拿不到 config(极少数情况下 axios 不带它)就回落到默认值:说一个可能
+ * 偏小的数,好过说一个凭空来的数。
+ */
+function timeoutPhrase(err: unknown): string {
+  const ms = (axios.isAxiosError(err) ? err.config?.timeout : undefined) || DEFAULT_TIMEOUT_MS
+  const seconds = Math.round(ms / 1000)
+  // 120 秒是分界:再往上"秒"这个单位就不再帮助人建立时间感了
+  return seconds < 120 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`
+}
+
+/**
  * 写请求没拿到答案时的话术。**刻意不出现"请重试"这三个字。**
  *
  * 运营读到"请重试"就会去点重试,而这正是这一支要防的动作。给他的第一个
  * 动作必须是"先看一眼现在是什么状态" —— 那个动作没有任何代价,
  * 而且多数情况下它会直接给出答案(任务已经在跑、批次已经建了、导出已经有了)。
  */
-function unknownText(requestId: string, timedOut: boolean): string {
+function unknownText(requestId: string, timedOut: boolean, waited: string): string {
   const cause = timedOut
-    ? '后端 30 秒内没有回答'
+    ? `后端 ${waited}内没有回答`
     : '和后端的连接中断了'
   const tail = requestId ? `,并把请求编号 ${requestId} 一并提供` : ''
   // 注意:这段话会走 `message.error()` 与 <Typography.Text>,**不经过 markdown**。
@@ -376,12 +426,20 @@ function unknownText(requestId: string, timedOut: boolean): string {
 const HINTS = {
   server: '按请求编号在后端 JSON 日志里搜 request_id,可定位到这一次请求;错误体里不带异常原文是刻意的(需求第十九章)',
   network: '请求没到后端。确认后端在运行(docker compose ps),以及前端的 VITE_API_BASE_URL 指向它',
-  timeout: '后端 30 秒未响应。看 worker 是不是卡在 Provider 轮询上(FASHN 不支持取消),或数据库连接被占满',
   auth: '这是 local/dev 的免登录模式(后端三项浏览器登录配置全空),正常不该出现 401。先看后端是不是换了 APP_ENV 或补了 ADMIN_PASSWORD —— 补了任意一项,本机也会真的走登录',
   session: '浏览器 Session 已失效或从未建立。签名 Cookie 是无状态的,换过 AUTH_SESSION_SECRET 会让全部已登录会话当场作废;多机部署各节点必须配同一把',
   forbidden: '当前账号是 operator,身份是有效的;该接口挂的是 require_admin,要用 admin 账号登录。设置页里那两把 ADMIN_TOKEN / OPERATOR_TOKENS 是给 CLI 和脚本的机器凭据,改它们不影响谁能登录',
   rate: '被限流。看 Provider 配额与当前并发',
 } as const
+
+/**
+ * 超时的技术层提示。**和运营那句话读同一个 `timeoutPhrase`**,
+ * 所以两层永远不会各说一个数 —— 它原来是 `HINTS` 里一条写死"30 秒"的常量,
+ * 而管理员正是拿这个数去判断"worker 是不是卡住了"的。
+ */
+function timeoutHint(waited: string): string {
+  return `后端 ${waited}未响应。看 worker 是不是卡在 Provider 轮询上(FASHN 不支持取消),或数据库连接被占满`
+}
 
 /** 三样不在错误体里的东西去哪儿找。写出来,而不是留三个空字段。 */
 export const TECHNICAL_ELSEWHERE =
@@ -428,9 +486,12 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
   // 建了任务、导出了文件、批准了一版图,只是回答没能送回来
   if (status === null) {
     const timedOut = err.code === 'ECONNABORTED'
+    // 这次请求真实等了多久。三处话术(运营那句、管理员那句、读超时那句)
+    // 全部从它派生 —— 一个 300s 的长动作就该说"5 分钟",不是"30 秒"
+    const waited = timeoutPhrase(err)
     if (kind === 'write') {
       return {
-        text: unknownText(requestId, timedOut),
+        text: unknownText(requestId, timedOut, waited),
         requestId,
         outcome: 'UNKNOWN',
         technical: {
@@ -440,13 +501,13 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
           // 不是"重试无意义",是"重试**不安全**"。页面据此把一键重做换成
           // 先刷新、再人工确认。技术层的措辞照实说,别让管理员以为是前者
           retriable: false,
-          hint: `${timedOut ? HINTS.timeout : HINTS.network};写请求超时不代表未执行,先按请求编号查后端日志与审计再决定要不要重做`,
+          hint: `${timedOut ? timeoutHint(waited) : HINTS.network};写请求超时不代表未执行,先按请求编号查后端日志与审计再决定要不要重做`,
         },
       }
     }
     return {
       text: timedOut
-        ? '这一步超时了,后端 30 秒内没有响应。请重试一次;若仍然失败,请联系管理员'
+        ? `这一步超时了,后端 ${waited}内没有响应。请重试一次;若仍然失败,请联系管理员`
         : '连不上服务。请稍后重试;若一直如此,请联系管理员 —— 这不是你操作错了',
       requestId,
       outcome: 'FAILED',
@@ -455,7 +516,7 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
         status,
         fields,
         retriable: true,
-        hint: timedOut ? HINTS.timeout : HINTS.network,
+        hint: timedOut ? timeoutHint(waited) : HINTS.network,
       },
     }
   }
@@ -548,19 +609,27 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
 
 /**
  * 一句话版本。**只是 `describeError` 的薄封装**,不许在这里另加判断 ——
- * 全站 28 处调用点靠它拿到运营层文案(17 处 `<Alert>`、5 处 toast、
- * 6 处其它:三个 `<Empty>`、一个 `<span>`、`BatchActionBar` 的局部 state、
- * `api/workbench.ts` 的透传),判定一旦分成两份,
- * toast 和面板会对同一次失败说两种话。
+ * 全站几十处调用点靠它拿到运营层文案(`<Alert>` 占多数,其余是 toast、
+ * 几个 `<Empty>`、`BatchActionBar` 的局部 state、`api/workbench.ts` 的透传)。
+ * 判定一旦分成两份,toast 和面板会对同一次失败说两种话。
  *
- * 本注释原写「全站 100 多处 toast 靠它」。实际 toast 调用点是 16 个
- * (其中 5 个套着 `readError`)—— 差了一个数量级,而那个数字撑着
- * `docs/STATUS.md` 里「toast 按设计不迁移」这个决定,决定的分量正取决于基数。
+ * ## 这里**刻意不写精确条数**(前端评审 P2-2)
  *
- * **重新数的时候注意**:直接 grep 会多数出几条,因为本仓库有几处注释
- * (包括这一段)在正文里提到了那个函数名。要真实调用点得先滤掉注释行:
+ * 这段注释的历史值得留着:先写「全站 100 多处」,被订正为「28 处(17 处
+ * Alert、5 处 toast、6 处其它)」,并附上重数的命令 —— 也就是说作者明知道
+ * 它会漂,还是把精确值写了回去。半年后实测 30 处。
+ *
+ * **一个没人守着的精确数字,每一次订正只是把下一次过期往后推。** 本仓
+ * 「会变的数字不写死」这条规矩一直只用在文档上,而 P1-1 那三处"30 秒"
+ * 证明了注释里的数字同样会漂,而且能漂进用户可见的文案。
+ *
+ * 所以改成量级描述。真要数就现数一遍(得先滤掉注释行,本仓有几处注释
+ * 在正文里提到了这个函数名):
  *
  *     grep -rn 'readError(' frontend/src | grep -vE ':\s*\*|//'
+ *
+ * 唯一还需要一个**基数**的地方是 `docs/STATUS.md` 里「toast 按设计不迁移」
+ * 那个决定 —— 它要的是"十几个还是一百多个"这个量级,而不是某一天的确值。
  */
 export function readError(err: unknown): string {
   return describeError(err).text
