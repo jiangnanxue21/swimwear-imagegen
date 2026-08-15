@@ -228,6 +228,13 @@ def test_the_budget_gate_counts_this_run_too():
     assert gp.budget_verdict(budget_cap="10", spent="9.5", estimated="0.5") is (
         gp.BudgetVerdict.ALLOWED
     )
+    # 0 是有效上限，不是“未设置”；但免费调用也不会穿透它。
+    assert gp.budget_verdict(budget_cap=0, spent=0, estimated=1) is (
+        gp.BudgetVerdict.EXCEEDED
+    )
+    assert gp.budget_verdict(budget_cap=0, spent=0, estimated=0) is (
+        gp.BudgetVerdict.ALLOWED
+    )
 
 
 # ================================================================ 二、幂等键

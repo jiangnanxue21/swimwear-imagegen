@@ -36,6 +36,7 @@ import uuid
 
 import pytest
 
+from app.core.config import settings
 from app.core.enums import (
     AuditAction,
     GenerationPlanStatus,
@@ -367,7 +368,7 @@ def test_override_and_plan_governed_are_two_different_tasks(session):
     assert bypassed.id != governed.id
 
 
-def test_override_still_pays_attention_to_the_budget(session):
+def test_override_still_pays_attention_to_the_budget(session, monkeypatch):
     """预算是花钱的闸,不是出图参数。
 
     绕过方案不等于绕过预算 —— 否则 override 会成为超预算出图的后门,
@@ -377,6 +378,14 @@ def test_override_still_pays_attention_to_the_budget(session):
     variant = _variant(session, spu, "BLU")
     product = _product(session, spu, variant)
     template = _model_template(session)
+    # Mock 未配价时按设计是 0 元，预算 0 不应拦住免费调用。
+    # 这条用例要验的是“override 绕不过预算”，所以必须先让
+    # 被测调用确实有正价格，否则它只是在断言 0 > 0。
+    monkeypatch.setattr(
+        settings,
+        "PROVIDER_PRICE_BOOK",
+        '{"mock":{"submit":{"micros":1000000,"currency":"USD"}}}',
+    )
     # 上限为 0:任何一次预估都会把它顶破(`gp.budget_verdict` 的 EXCEEDED)
     _active_plan(session, spu, model_template_id=template.id, budget_cap=0)
 
