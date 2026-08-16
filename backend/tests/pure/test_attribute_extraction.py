@@ -90,6 +90,33 @@ def test_prompt_contains_no_anchoring_source():
     assert "不要猜" in prompt
 
 
+def test_prompt_spells_out_the_json_object_envelope_and_array_shapes():
+    """json_object 只保证 JSON 合法,不替我们执行 Schema。
+
+    千问 VL 的一次真实返回把属性全部平铺在顶层,并把单个 missing 写成
+    ``{"back_style": "NOT_VISUALLY_DETERMINABLE"}``。解析器正确地拒绝了它,
+    但提示词当时从未告诉模型 fields/missing 的完整信封长什么样 ——
+    原样重试只会再买一次同形坏响应。
+    """
+    prompt = build_extraction_prompt(("garment_type", "back_style"))
+
+    assert '"fields":[' in prompt
+    assert '"unreadable_fields":[]' in prompt
+    assert '"missing":[' in prompt
+    assert '"name":"字段名"' in prompt
+    assert '"confidence":0.95' in prompt
+    assert "missing 即使只有一项也必须是数组" in prompt
+    assert "属性名直接放在 JSON 顶层" in prompt
+    assert "禁止把 missing 写成字段到原因的对象" in prompt
+
+
+def test_prompt_change_has_its_own_version_for_calibration_and_idempotency():
+    """提示词变了必须换版本,不能继续借用旧提示词的校准证据。"""
+    from app.extractors.vision import EXTRACTION_PROMPT_VERSION
+
+    assert EXTRACTION_PROMPT_VERSION == "vision-2.1"
+
+
 # ---------------------------------------------------------------- 归一化
 
 

@@ -33,6 +33,7 @@ import json
 import locale
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +43,10 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.log_events import (  # noqa: E402 - 必须先把 backend 放进 sys.path
     DOMAINS,
-    is_routine,
+    EVENTS,
+    folds_away,
     label_of,
+    level_at_least,
     resolve_domain,
 )
 
@@ -52,8 +55,6 @@ DEFAULT_LOG = BACKEND_ROOT / ".api-stdout.log"
 #: 不带参数时的默认过滤。**向后兼容 `watch_ai_logs.py` 今天的用途** ——
 #: 那个脚本存在的理由就是"盯着模型调用",默认换成全量会让老用法变成刷屏。
 DEFAULT_DOMAINS = ("llm",)
-
-_LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
 #: 展开显示的载荷字段。它们只在 `LLM_LOG_PAYLOADS=true` 时存在 ——
 #: 默认关,而**默认关是对的**(归档面不该躺着商品数据)。想看原文走
@@ -93,7 +94,7 @@ class Filter:
     ) -> None:
         self.domains = tuple(d for d in domains if d)
         self.events = tuple(events)
-        self.min_level = _LEVEL_ORDER.get(min_level.upper(), 0)
+        self.min_level = min_level.upper()
         self.show_routine = show_routine
         self.text = text.lower()
 
@@ -106,12 +107,14 @@ class Filter:
             return False
         if self.events and event not in self.events:
             return False
-        if _LEVEL_ORDER.get(level, 20) < self.min_level:
+        # 级别与折叠都走注册表里那一份判定 —— Web 页调的是同两个函数。
+        # 上一版这里自己存了一张级别序表,而 API 那边是精确匹配;
+        # 同一个词在两个入口两种意思,正是这套设计要消灭的东西。
+        if not level_at_least(level, self.min_level):
             return False
-        # 例行事件默认收起,但 **ERROR 永不折叠** —— routine 标记对 ERROR 级
-        # 不生效。少了这一条,一个被标成例行的事件在真的出错时也会被藏起来,
-        # 而那正是最不该藏的一次。
-        if not self.show_routine and is_routine(event) and _LEVEL_ORDER.get(level, 20) < 40:
+        # 例行事件默认收起,但 **ERROR / CRITICAL 永不折叠**。少了这一条,
+        # 一个被标成例行的事件在真的出错时也会被藏起来,而那正是最不该藏的一次。
+        if not self.show_routine and folds_away(event, level):
             return False
         if self.text and self.text not in json.dumps(row, ensure_ascii=False).lower():
             return False
@@ -184,7 +187,12 @@ def _follow_ring(flt: Filter, *, interval: float = 2.0) -> None:
     from app.core.log_ring import read_ring
 
     print(f"运行日志:Redis 环形缓冲(cap={settings.OPS_LOG_RING_CAP})")
-    seen: set[str] = set()
+    # 去重表**有界**:环形本身最多 cap 条,一条滚出窗口之后就再也不会回来,
+    # 所以记忆只需要覆盖一个窗口。上一版是个只增不减的 set —— 一个挂着跑几天
+    # 的查看器会把每一条见过的日志永远留在内存里,而这个脚本的用法恰恰是
+    # "开着不管"。
+    seen: deque[str] = deque(maxlen=max(1, settings.OPS_LOG_RING_CAP * 2))
+    seen_index: set[str] = set()
     while True:
         rows, error = read_ring(settings.REDIS_URL, limit=settings.OPS_LOG_RING_CAP)
         if error:
@@ -193,9 +201,12 @@ def _follow_ring(flt: Filter, *, interval: float = 2.0) -> None:
             continue
         for row in reversed(rows):
             marker = str(row.get("seq") or f"{row.get('ts')}|{row.get('message')}")
-            if marker in seen:
+            if marker in seen_index:
                 continue
-            seen.add(marker)
+            if len(seen) == seen.maxlen:
+                seen_index.discard(seen[0])
+            seen.append(marker)
+            seen_index.add(marker)
             _print_event(row, flt)
         time.sleep(interval)
 
@@ -209,7 +220,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"逗号分隔,取值:{','.join(DOMAINS)};写 all 表示不筛",
     )
     parser.add_argument("--event", default="", help="逗号分隔的事件码,精筛用")
-    parser.add_argument("--level", default="DEBUG", help="最低级别 debug/info/warning/error")
+    parser.add_argument(
+        "--level", default="DEBUG", help="最低级别(含它自己以上)debug/info/warning/error"
+    )
     parser.add_argument("--routine", action="store_true", help="展开例行事件(默认收起)")
     parser.add_argument("-q", "--query", default="", help="子串搜索")
     parser.add_argument("--ring", action="store_true", help="读 Redis 环形缓冲而不是日志文件")
@@ -230,9 +243,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         domains = tuple(raw_domains)
 
+    events = tuple(e.strip() for e in args.event.split(",") if e.strip())
+    unknown_events = [e for e in events if e not in EVENTS]
+    if unknown_events:
+        # 与未知域同一个口径:打错一个码不该表现成"这段时间没有日志"。
+        # 上一版只校验了域,事件码打错会安静地筛出零条。
+        print(f"未知的事件码:{','.join(unknown_events)}", file=sys.stderr)
+        return 2
+
     flt = Filter(
         domains=domains,
-        events=tuple(e.strip() for e in args.event.split(",") if e.strip()),
+        events=events,
         min_level=args.level,
         show_routine=args.routine,
         text=args.query,

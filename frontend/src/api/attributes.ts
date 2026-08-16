@@ -33,6 +33,8 @@ export interface AttributeFieldSpec {
   multi_value: boolean
   /** 枚举字段的合法取值;非枚举字段是空数组 */
   options: string[]
+  /** 稳定英文编码 -> 中文界面文案；存储和提交仍使用英文编码。 */
+  option_labels?: Record<string, string>
 }
 
 /**
@@ -59,6 +61,8 @@ export interface AttributeValue {
   source: string
   /** CONFIRMED / CANDIDATE / CONFLICT / REJECTED */
   status: string
+  /** 注册表中存在、但事实表尚无值；页面仍应提供人工填写入口。 */
+  is_placeholder?: boolean
   model_confidence: number | null
   system_confidence: number | null
   /** 因子分解:回答「0.71 是因为只有一张图,还是因为图太糊」 */
@@ -142,6 +146,8 @@ export interface Extraction {
   status: ExtractionRunStatus
   cancel_requested: boolean
   can_cancel: boolean
+  /** 这次 POST 是新建、复用在途任务，还是直接复用已完成结果；GET 时为空。 */
+  request_disposition: 'NEW_RUN' | 'RETURN_EXISTING' | 'REUSE_RESULT' | null
   duration_ms: number | null
   created_at: string | null
 }
@@ -201,6 +207,12 @@ export interface Evidence {
   model_name: string
 }
 
+/** 后端按整次识别派生：所有图片都没有给出有效值的字段。 */
+export interface UnresolvedMissingEvidence {
+  field_name: string
+  reason: string
+}
+
 /**
  * 「没有值」的三个原因,各指向一个**不同的动作**(后端 `MissingReason` 的原话)。
  *
@@ -224,6 +236,8 @@ export const MISSING_REASON_ACTION: Record<string, { label: string; action: stri
 
 export interface ExtractionDetail extends Extraction {
   evidence: Evidence[]
+  /** 状态判定在后端；前端不从逐图 evidence 再推一遍。 */
+  unresolved_missing: UnresolvedMissingEvidence[]
 }
 
 export const attributesApi = {
@@ -245,6 +259,7 @@ export const attributesApi = {
     fields?: string[],
     colorVariantIds?: string[],
     spuId?: string | null,
+    forceRerun = false,
   ) =>
     (
       await apiClient.post<Extraction>(
@@ -254,6 +269,7 @@ export const attributesApi = {
         fields: fields ?? null,
         media_asset_ids: null,
         color_variant_ids: colorVariantIds ?? null,
+        force_rerun: forceRerun,
       })
     ).data,
 

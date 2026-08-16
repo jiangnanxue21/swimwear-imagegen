@@ -617,7 +617,7 @@ logger.warning("could not write the in-flight marker", extra={"key": ..., "error
 `test_every_logger_call_wraps_its_fields_in_extra_fields`),配一条把
 formatter 真的跑一遍的用例钉住理由 —— 免得下一个人把守卫读成风格洁癖。
 
-## 十一、这一轮**没有**做的
+## 十一、a53 那一轮**没有**做的
 
 - **浏览器里一次都没实测。** 前端门禁(typecheck / lint / Vitest / build)全绿,
   Playwright 用例没写(任务 24)。
@@ -629,3 +629,95 @@ formatter 真的跑一遍的用例钉住理由 —— 免得下一个人把守�
   与它们无关(全是 GET),但这句话本身也**只是推理,不是验证**。
 - **迁移到 event 码的是全部 210 个调用点**,但"迁完了"只等于"码写上了、
   注册了、双向对得上",不等于每条码的**中文标签**都被人读过一遍。
+
+## 十二、落地记录(a54):走查捡到的十件事
+
+a53 的守卫全绿、门禁全绿,而下面这十件事**一件都没有被它们看见**。共同形状:
+不报错、不变红,只在某个具体时刻让控制台少说一句真话。全部补了守卫,并用
+`tools/mutate_a54.py` 逐条变异验红(11/11)。
+
+### 1. worker 的日志一条都没进过环形(P0)
+
+`setup_logging()` 只在 `app/main.py` 顶层调过,而 worker 的入口不 import 它。
+于是页面上 `gen` / `batch` / `publish` 三个域基本空着,**看起来像"这段时间
+没跑任务"**。取舍与钩子的选择记在 `DECISIONS.md` §3.81。
+
+第九章那条自检顺序(先看 `held` 涨不涨)恰好发现不了它 —— API 进程自己在写,
+那个数一直在涨。**自检第一步改成:跑一个生成任务,看 `gen` / `batch` 域
+出不出条目。**
+
+### 2. 打开这一页的动作在冲刷诊断窗口(P0)
+
+见 §3.81 第二条。修法是 `core/log_ring.SelfTrafficFilter`。
+
+### 3. 级别筛选:API 精确匹配,CLI 是「及以上」
+
+同一个词在两个入口两种意思,而 §5.3 写的是「一个人在终端学会的过滤,换到
+页面上不用重学」。更糟的是精确匹配把 §1.4 那个病放了回来:运营选 WARNING
+想找问题,**ERROR 被过滤掉了**。
+
+级别序、`level_at_least()`、`folds_away()` 三样并进 `core/log_events.py`,
+API 与 CLI 都调它。顺带修掉 CRITICAL:上一版 API 写 `level != "ERROR"`、
+CLI 写 `< 40`,同一条 CRITICAL 的例行事件页面折起来、终端展开着。
+
+### 4. 环形被关掉时,界面画的正是一张空列表
+
+`OPS_LOG_RING_ENABLED=false` 时 handler 不挂,但 `/logs` 照样去读 Redis,
+读到空 —— 而前端那条提示只在有 `unavailable_reason` 时才渲染,
+`!ring.enabled` 那半句嵌在它里面,**永远到不了**。现在直接返回
+`unavailable_reason="ring_disabled"`。
+
+### 5. 字节预算砍掉的字段不显形
+
+顺序是 `truncated_paths()` 在前、`_fit()` 在后,于是 256KB 那一档砍掉的东西
+一条都没进 `truncated`,而它恰恰砍得最狠。§6.2 第三条边界写的是**截断必须显形**。
+
+### 6. 连接自检往旁挂库写垃圾键
+
+`evaluators/vision.py` 的 `test_connection` 直接调 `_send_once`,绕过
+`_send_with_retries`,contextvar 还是默认值 `"-"`。上一版只挡空串,于是每点
+一次「测试连接」就往 `ops:llm:-` 覆盖写一次,还顺手续 TTL。`"-"` 不是 id,
+是「这条路径没有 id」。
+
+### 7. 旁挂库写失败一条都不记
+
+`except` 直接 `return`:不记数、不进冷却期。环形那边的口径是「不赌,但也不瞎」,
+旁挂库这边是纯瞎 —— `/api/ops/llm/{id}` 报 404 时分不清"过期了"还是"从来
+没写进去过",而这两者的下一步完全相反。计数现在随 `/meta` 的 `payload_capture` 出来。
+
+### 8. `duration_ms` 永远是 null
+
+`_send_once` 没测时长,`capture_attempt` 传的是写死的 `None`。而 §6.4 样例里
+两次尝试的耗时对照(775ms / 7244ms)正是载荷面板并排摆两个页签的理由。
+顺带给 `llm.retrying` 补上 `llm_call_id` —— 少了它,「为什么这一次等了 8 秒」
+在链路模式里会从这条调用的时间线上掉队。
+
+### 9. 前端:三件设计写了而没落地的,加两件坏掉的
+
+    没落地   链路按 round 分段(§5.2 的签名交互)、折叠条点开全展(§3.5)、
+             事件精筛的入口(后端/类型/URL 都支持,唯独没有界面)
+    没落地   载荷面板的图片 chip、headers、展开全文、output_text 解析块、
+             整包下载(§6.5 逐条)
+    坏掉的   「滚动即暂停跟随」监听的是一个**不滚动的 div**(没有 overflow、
+             没有高度),`scrollTop` 恒为 0,这个功能一次都没触发过
+    坏掉的   域计数按已经筛过的那一屏算,点进一个域之后其余十四格全是 0
+
+另外 `expanded` 这个 URL 参数**声明了却全页零引用**,展开态刷新即丢
+(GAP-033 的教训没兑现);`<a href="/audit">` 在 SPA 里是整页刷新;
+§5.1 的互链只做了一半,审计页那边现在补上了 `request_id -> 运行日志`。
+
+哪条事件当链路段头由后端给一个布尔(`round_summary`),前端不认事件码 ——
+硬规则第 4 条在这一处的形状。
+
+### 10. `/logs` 先成形再筛
+
+`_shape` 里有一次 `json.dumps`,上一版对全窗 5000 条每条都做一遍,而绝大多数
+会被随后的筛选丢掉;跟随模式 3 秒一拍,这笔开销是常驻的。现在先在原始 dict
+上判,只有入选的那 `limit` 条才成形。
+
+---
+
+**这一轮仍然没有做的:** 真 Redis 一次都没连过、浏览器一次都没打开过、
+`pytest` / `make test-nodb` / 前端 `tsc` 与 Vitest 都没跑(这台机器没有
+fastapi / sqlalchemy,也没有 `node_modules`)。也就是说:**前端那八项修复
+一行都没有被执行过**,它们只过了源码级的守卫与人工复读。

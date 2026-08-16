@@ -32,7 +32,7 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from app.core.enums import MediaStatus
+from app.core.enums import AttributeStatus, MediaStatus
 from app.core.errors import ValidationError
 from app.extractors.base import FieldMissing, FieldObservation, ImageExtractionResult
 from app.models.attribute import AttributeEvidence, ProductAttributeExtraction
@@ -171,6 +171,32 @@ def test_a_missing_row_never_produces_an_attribute_value(session, product):
         session, product=product, extraction=row, actor="tester"
     )
     assert written == [], "模型说看不清,却写出了一个属性值"
+
+
+def test_uncalibrated_valid_evidence_lands_as_a_candidate(session, product):
+    """未校准不自动确认，但模型给出的合法值必须进入人工确认队列。"""
+    from app.attributes import service as attr_service
+
+    _asset(session, product, 0)
+    _asset(session, product, 1)
+    row = _run(
+        session,
+        product,
+        _Scripted([
+            _reply(fields=[("back_style", "TIE_BACK", 0.95)]),
+            _reply(fields=[("back_style", "TIE_BACK", 0.95)]),
+        ]),
+        fields=("back_style",),
+    )
+
+    written = attr_service.apply_evidence(
+        session, product=product, extraction=row, actor="tester"
+    )
+
+    assert len(written) == 1
+    assert written[0].normalized_value == "TIE_BACK"
+    assert written[0].system_confidence is None
+    assert written[0].status == AttributeStatus.CANDIDATE.value
 
 
 def test_the_old_unreadable_channel_lands_in_the_same_column(session, product):

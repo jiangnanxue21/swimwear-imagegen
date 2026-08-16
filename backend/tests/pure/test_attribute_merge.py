@@ -161,14 +161,32 @@ def test_small_dissent_still_resolves():
     assert result.agreeing_votes == 3 and result.total_votes == 4
 
 
-def test_zero_weight_evidence_produces_no_value():
-    """全部权重为零(未校准)时不硬凑一个值出来。
-
-    这是 fail closed 在合并层的落点:未校准 -> system_confidence 为 None
-    -> 权重 0 -> INSUFFICIENT。
-    """
+def test_explicit_zero_weight_evidence_produces_no_value():
+    """已经校准、且权重明确为零时不硬凑一个值出来。"""
     result = merge_field("neckline_type", [_ev("V_NECK", weight=0.0)])
     assert result.outcome is MergeOutcome.INSUFFICIENT
+
+
+def test_uncalibrated_evidence_still_selects_a_candidate_value():
+    """未校准只禁止自动确认，不能把模型已经识别到的值吞掉。"""
+    result = merge_field("back_style", [
+        _ev("TIE_BACK", weight=None, eid="front"),
+        _ev("TIE_BACK", weight=None, eid="back"),
+    ])
+    assert result.outcome is MergeOutcome.RESOLVED
+    assert result.value == "TIE_BACK"
+    assert "不会自动确认" in " ".join(result.reasons)
+
+
+def test_uncalibrated_votes_do_not_outweigh_calibrated_evidence():
+    """混合状态只让已校准证据计权，不能临时给未校准证据更高权重。"""
+    result = merge_field("neckline_type", [
+        _ev("V_NECK", weight=0.7, eid="calibrated"),
+        _ev("HALTER", weight=None, eid="unknown-a"),
+        _ev("HALTER", weight=None, eid="unknown-b"),
+    ])
+    assert result.outcome is MergeOutcome.RESOLVED
+    assert result.value == "V_NECK"
 
 
 def test_unnormalized_evidence_is_ignored():
@@ -319,3 +337,16 @@ def test_breakdown_is_keyed_by_the_winning_value():
         "因子分解没有按胜出值取"
     )
     assert "per_field_breakdown" not in body, "又退回按字段存了"
+
+
+def test_uncalibrated_confidence_reaches_merge_as_none_not_zero():
+    """服务接缝必须保留 None；否则纯合并层的新语义永远走不到。"""
+    source = (APP_DIR / "attributes" / "service.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "apply_evidence"
+    )
+    body = ast.unparse(fn)
+    assert "weight=breakdown.value" in body
+    assert "weight=breakdown.value or 0.0" not in body

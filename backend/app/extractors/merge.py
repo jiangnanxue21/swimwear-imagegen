@@ -86,8 +86,10 @@ class EvidenceItem:
 
     field_name: str
     normalized_value: str | None
-    #: 权重。用 system_confidence,不用模型自报的 confidence
-    weight: float = 1.0
+    #: 已校准权重。None 表示「尚未校准」，不是 0 分：当同层证据全部为 None
+    #: 时只用等权投票选一个 CANDIDATE；是否采信仍由 decision 层按
+    #: system_confidence=None 判定。显式 0.0 仍表示这条证据没有证明力。
+    weight: float | None = 1.0
     source: str = AttributeSource.EXTRACTED.value
     #: 素材来源。AI 生成图会被降层
     media_source: str = MediaSource.MANUAL_UPLOAD.value
@@ -167,17 +169,26 @@ def merge_field(
             ),
         )
 
-    # 同层按权重投票
+    # 同层按权重投票。校准回答「模型自报置信度对应多少真实准确率」，缺席时
+    # 不能自动确认，但也不能把模型已经看见的值从候选表里抹掉。只有在**同层
+    # 全部未校准**时退回等权；选出的值随后仍带 system_confidence=None，
+    # decision 层只能把它写成 CANDIDATE。
+    #
+    # 混合状态不退回：只让已有校准权重的证据参与。否则一条未校准证据会被
+    # 临时赋成 1.0，反而压过一条真实校准为 0.7 的证据。
+    all_uncalibrated = all(item.weight is None for item in tier_items)
     scores: Counter[str] = Counter()
     for item in tier_items:
-        scores[item.normalized_value] += max(0.0, item.weight)  # type: ignore[index]
+        vote_weight = 1.0 if all_uncalibrated else (item.weight or 0.0)
+        scores[item.normalized_value] += max(0.0, vote_weight)  # type: ignore[index]
     if not scores or all(v <= 0 for v in scores.values()):
-        # 全部权重为零 —— 通常是因为一条都没校准。不猜一个值出来
+        # 明确算出的权重全部为零。不猜一个值出来。未校准不是这一档，
+        # 它由上面的 all_uncalibrated 等权分支处理。
         return MergeResult(
             field_name=field_name,
             outcome=MergeOutcome.INSUFFICIENT,
             total_votes=len(tier_items),
-            reasons=("全部证据的权重为零(多半是未校准),不据此定值",),
+            reasons=("全部已校准证据的权重为零,不据此定值",),
         )
 
     ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -210,6 +221,8 @@ def merge_field(
     divergent = bool(ai_values) and winner not in ai_values
 
     reasons = [f"最高优先级层(第 {top_tier} 层)中 {agreeing}/{len(tier_items)} 条证据支持 {winner}"]
+    if all_uncalibrated:
+        reasons.append("本字段尚未校准,仅按等权选择候选值;不会自动确认")
     if divergent:
         reasons.append(
             f"AI 生成图给出的是 {'、'.join(sorted(ai_values))},与原始素材不一致 —— "

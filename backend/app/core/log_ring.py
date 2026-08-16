@@ -43,6 +43,8 @@ import threading
 import time
 from typing import Any
 
+from app.core.log_events import ACCESS_EVENT
+
 #: 环形列表的键。单键,不按域分片 —— 分片之后"最近 200 条"要跨 15 个键归并,
 #: 而归并需要一个全局序,那正是 Redis 列表已经免费给的东西。
 RING_KEY = "ops:log_ring"
@@ -52,6 +54,43 @@ _FAILURE_COOLDOWN_SECONDS = 5.0
 
 #: 连接与读写超时。两个都要设:只设 connect 的话,连上之后卡在读上一样会挂住。
 _SOCKET_TIMEOUT_SECONDS = 0.2
+
+#: 控制台自己那几个端点的前缀。`API_PREFIX` 可配,所以真正的值由
+#: `setup_logging` 传进来;这里只是"没人告诉我时的默认"。
+OPS_API_PREFIX = "/api/ops/"
+
+
+class SelfTrafficFilter(logging.Filter):
+    """**看日志的动作不许冲刷诊断窗口。**(a54 修)
+
+    上一版没有这个过滤器,于是:`app/main.py` 的中间件对每个请求写一条
+    `http.request_completed`,**包括 `/api/ops/logs` 自己**;而运行日志页的
+    跟随模式是 3 秒一拍。一个开着的标签页 = 20 条/分钟 = 1200 条/小时,
+    cap 5000 —— **约四小时后环形里 100% 是"某人在看运行日志"**。
+
+    最难受的是它不可见:这些行标了 routine,在流视角里折进计数条;
+    而 `held/cap` 显示 5000/5000,看起来非常健康。于是排障的人一边盯着页面,
+    一边把自己要找的证据顶出窗口。
+
+    两条边界:
+
+    - **只挡 2xx/3xx。** `/api/ops/logs` 自己 500 了是要看见的,那不是噪音。
+    - **只挡环形,不挡 stdout。** 归档面一个字节没动 —— 采集端仍然收到
+      全部访问日志,这里去掉的只是"诊断窗口里的自指部分"。
+    """
+
+    def __init__(self, prefix: str = OPS_API_PREFIX) -> None:
+        super().__init__()
+        self.prefix = prefix
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - 覆盖标准库
+        fields = getattr(record, "extra_fields", None)
+        if not isinstance(fields, dict) or fields.get("event") != ACCESS_EVENT:
+            return True
+        status = fields.get("status")
+        if isinstance(status, int) and status >= 400:
+            return True
+        return not str(fields.get("path") or "").startswith(self.prefix)
 
 
 class RingStats:
@@ -147,6 +186,21 @@ class _ClientHolder:
 
 
 _HOLDER = _ClientHolder()
+
+
+def get_client(url: str) -> Any | None:
+    """带冷却期的共享 Redis 客户端。拿不到返回 None,**不抛**。
+
+    公开它是为了让 `llm/payload_store.py` 不必去 import `_HOLDER`:
+    旁挂库和环形要的是同一件东西(0.2 秒放弃、失败进冷却、不复用 Celery 的池),
+    而跨模块拿一个私有名意味着这层共享关系没有任何东西钉着。
+    """
+    return _HOLDER.get(url)
+
+
+def note_failure(exc: BaseException | None = None) -> None:
+    """把一次写失败记在账上并进冷却期。给旁挂库用 —— 它以前一条都不记。"""
+    _HOLDER.fail(exc)
 
 
 def reset_client_for_tests() -> None:

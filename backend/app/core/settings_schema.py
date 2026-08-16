@@ -586,7 +586,19 @@ SETTING_GROUPS: tuple[Group, ...] = (
                 type=TYPE_INTEGER,
                 minimum=1,
                 maximum=64,
-                help="超了直接拒绝,不会悄悄压缩后发出去。",
+                help="原始输入安全上限;超了直接拒绝,不会先解码巨图。",
+                advanced=True,
+            ),
+            Field(
+                key="EXTRACTOR_MODEL_MAX_REQUEST_MB",
+                label="识别请求总上限(MB)",
+                type=TYPE_INTEGER,
+                minimum=2,
+                maximum=64,
+                help=(
+                    "限制图片、提示词和 Schema 组成的整份 JSON。"
+                    "内联图片会按总预算自动压缩;千问兼容端点建议保持默认 5MB。"
+                ),
                 advanced=True,
             ),
             Field(

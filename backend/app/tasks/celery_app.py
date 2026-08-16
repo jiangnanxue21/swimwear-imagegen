@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import beat_init, worker_process_init
 
 from app.core.config import settings
 
@@ -139,3 +139,50 @@ def _reset_db_pool_after_fork(**_kwargs: object) -> None:
     from app.db.session import engine
 
     engine.dispose()
+
+
+# ---------------------------------------------------------------- worker 的日志(a54 修)
+#
+# ## 上一版:worker 的日志既不是 JSON,也一条都进不了环形
+#
+# `setup_logging()` 只在 `app/main.py` 的模块顶层调用过一次,而 worker 的
+# 入口是 `celery -A app.tasks.celery_app.celery_app worker` —— 它不 import
+# `app.main`,全仓也没有任何模块 import 它。于是:
+#
+#     API 进程    JsonFormatter + RingHandler,日志进环形
+#     worker      Celery 自己的默认格式,**环形里一条都没有**
+#
+# 而"为什么是 Redis 而不是进程内环形"的**全部理由**就是这件事:
+# `log_ring.py` 的模块文档和 `docs/LOG-CONSOLE.md` §4.1 都写着「Celery worker
+# 与 API 是不同进程,进程内环形会漏掉最有价值的那部分日志(tasks 域 59 个
+# 调用点全在 worker 里)」。跨进程的存储上齐了,产日志的那个进程没接上。
+#
+# 症状是**沉默**的:打开运行日志页,`gen` / `batch` / `publish` 三个域基本空着,
+# 而页面不会说"这里少了一个进程的日志",它只会看起来像"这段时间没跑任务"。
+# a53 交接里那条自检顺序(先看 `held` 涨不涨)恰好也发现不了 —— API 进程
+# 自己在写,`held` 一直在涨。
+#
+# ## 为什么是 `worker_process_init` 而不是 `setup_logging` 信号
+#
+# prefork 下每个子进程各自持有一份 logging 配置,而 `RingHandler` 里的 `seq`
+# 是**进程内**计数 + 进程标识:在父进程挂一次再 fork,几个子进程会共享同一个
+# 进程标识,跟随模式的去重会把不同 worker 的同序号日志当成同一条丢掉。
+# 每个子进程自己挂一次,`os.getpid()` 才是各自的。
+#
+# `celery.signals.setup_logging` 是另一回事:接上它等于告诉 Celery
+# "日志我全包了",连它自己的启动横幅和任务生命周期行都要自己接管。这里只要
+# root handler 是我们的,不需要接管 Celery 的那一套。
+@worker_process_init.connect
+def _install_json_logging_in_worker(**_kwargs: object) -> None:
+    """worker 子进程自己装一次日志(JsonFormatter + 环形)。"""
+    from app.core.logging import setup_logging
+
+    setup_logging(settings.LOG_LEVEL)
+
+
+@beat_init.connect
+def _install_json_logging_in_beat(**_kwargs: object) -> None:
+    """beat 同理。它产出的是节拍与投递日志,归 `ops` 域。"""
+    from app.core.logging import setup_logging
+
+    setup_logging(settings.LOG_LEVEL)

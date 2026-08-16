@@ -177,6 +177,22 @@ def build_extraction_prompt(
         "不要输出等级、评分、是否合格之类的结论 —— 那些由后端决定。",
         "4. 枚举字段只能取下面列出的值,不要自造。"
         "也不要输出字段清单之外的任何字段 —— 清单外的输出一律作废并被记录。",
+        "5. JSON 顶层必须且只能有 fields、unreadable_fields、missing 三个键。"
+        "识别到的属性逐项放进 fields 数组,绝对不要把 garment_type、"
+        "primary_color 等属性名直接放在 JSON 顶层。",
+        "6. fields 的每一项必须是 "
+        '{"name":"字段名","value":"取值","confidence":0到1的数字,'
+        '"evidence":"图片中的可见依据"}。confidence 和 evidence 都不能省略。',
+        "7. missing 即使只有一项也必须是数组,每一项必须是 "
+        '{"name":"字段名","reason":"INSUFFICIENT_EVIDENCE 或 '
+        'NOT_VISUALLY_DETERMINABLE"}。禁止把 missing 写成字段到原因的对象。',
+        "",
+        "输出结构示例(中文占位文字只说明位置,不得原样输出):",
+        '{"fields":[{"name":"字段名","value":"取值","confidence":0.95,'
+        '"evidence":"图片中的可见依据"}],"unreadable_fields":[],'
+        '"missing":[{"name":"字段名","reason":"NOT_VISUALLY_DETERMINABLE"}]}',
+        "如果没有识别到任何值且没有缺失项,也必须输出完整结构:",
+        '{"fields":[],"unreadable_fields":[],"missing":[]}',
         "",
         "需要判断的字段:",
     ]

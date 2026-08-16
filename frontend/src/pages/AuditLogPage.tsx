@@ -22,6 +22,7 @@ import { Button, Card, Empty, Input, Select, Space, Switch, Table, Tag, Tooltip 
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { readError } from '../api/client'
 import {
   AUDIT_ACTION_LABEL,
@@ -154,6 +155,32 @@ export default function AuditLogPage() {
             <span className="mono" style={{ fontSize: fontScale.meta }}>
               {row.entity_id.slice(0, 8)}
             </span>
+          </Tooltip>
+        ) : (
+          <span style={{ color: brandVars.textFaint }}>—</span>
+        ),
+    },
+    {
+      /*
+       * 到运行日志的互链(`docs/LOG-CONSOLE.md` §5.1)。
+       *
+       * 两页的分工是「谁改了什么」对「系统怎么跑的」,而排一件事经常要
+       * 来回看:这里批了一次,那边才看得到批完之后跑了什么、有没有报错。
+       * `request_id` 是两边唯一共有的键,所以互链只能挂在它上面。
+       *
+       * 设计里这条是双向的,a53 只做了运行日志 -> 审计那一半。
+       */
+      title: '这次请求',
+      key: 'request_id',
+      width: 96,
+      render: (_, row) =>
+        row.request_id ? (
+          <Tooltip title="在运行日志里按这次请求收束成一条链路">
+            <Link to={`/ops-logs?trace_kind=request&trace_id=${row.request_id}`}>
+              <span className="mono" style={{ fontSize: fontScale.meta }}>
+                运行日志
+              </span>
+            </Link>
           </Tooltip>
         ) : (
           <span style={{ color: brandVars.textFaint }}>—</span>

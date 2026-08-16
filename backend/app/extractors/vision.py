@@ -36,6 +36,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -54,10 +55,11 @@ from app.extractors.schema import (
     redact_for_log,
 )
 from app.llm import endpoint_trust
-from app.llm.images import ImageResolver, PreparedImage
+from app.llm.images import ImageResolver, PreparedImage, compact_prepared_image
 from app.llm.transport import (
     LLMRequest,
     MultimodalClient,
+    canonical_json_bytes,
     extract_chat_text,
     extract_responses_text,
     find_finish_reason,
@@ -90,7 +92,10 @@ EXTRACTION_FORMAT_NAME = f"attribute_extraction_v{EXTRACTION_SCHEMA_VERSION}"
 #: 识别提示词版本。校准分箱按 (字段 × 模型 × Prompt) 查(§6.3:未校准的组合
 #: 一律不自动确认),所以**改一次提示词必须 bump 一次** —— 不 bump 的话,
 #: 新提示词下的置信度会被旧提示词攒出来的分箱校准,数字看着有依据,依据是错的。
-EXTRACTION_PROMPT_VERSION = f"vision-{EXTRACTION_SCHEMA_VERSION}"
+# v2.1 把 json_object / prompt_only 档位缺失的输出信封与数组形状写进提示词。
+# 只改 Schema 文件里的文字而不 bump 的话,新提示词会继续使用 v2 的校准分箱,
+# 也会让幂等身份无法回答“这次调用到底用了哪版提示词”。
+EXTRACTION_PROMPT_VERSION = f"vision-{EXTRACTION_SCHEMA_VERSION}.1"
 
 #: 传进 `extract(options=...)` 的受众键。识别目标已按受众过滤(§18.3),
 #: 这个键让 Schema 与提示词里的**枚举取值**也按受众收窄 —— 泳裤的请求体里
@@ -112,6 +117,12 @@ IDEMPOTENCY_KEY = "_idempotency_key"
 #: 而"被忽略"和"生效了"在我们这一侧看起来一模一样。
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 
+#: 识别虽然一次只发一张图,但端点限制的是图片、提示词与 Schema 组成的整份
+#: JSON。与评分链路相同:占位请求先扣真实非图片开销,再给 data URI 留转换余量。
+REQUEST_BODY_SAFETY_MARGIN_BYTES = 16 * 1024
+ENCODED_TO_RAW_BUDGET_RATIO = 0.74
+MAX_REQUEST_FIT_PASSES = 3
+
 
 @dataclass(frozen=True)
 class ExtractorModelConfig:
@@ -124,6 +135,7 @@ class ExtractorModelConfig:
     response_format: str = FORMAT_JSON_SCHEMA
     timeout_seconds: float = 60.0
     max_image_bytes: int = 8 * 1024 * 1024
+    max_request_bytes: int = 5 * 1024 * 1024
     max_output_tokens: int = 1500
     max_retries: int = 2
     retry_base_seconds: float = 0.5
@@ -155,6 +167,9 @@ class ExtractorModelConfig:
             response_format=fmt if fmt in RESPONSE_FORMATS else FORMAT_JSON_SCHEMA,
             timeout_seconds=provider_float("EXTRACTOR_MODEL_TIMEOUT_SECONDS", 60.0),
             max_image_bytes=provider_int("EXTRACTOR_MODEL_MAX_IMAGE_MB", 8) * 1024 * 1024,
+            max_request_bytes=(
+                provider_int("EXTRACTOR_MODEL_MAX_REQUEST_MB", 5) * 1024 * 1024
+            ),
             max_output_tokens=provider_int("EXTRACTOR_MODEL_MAX_OUTPUT_TOKENS", 1500),
             max_retries=provider_int("EXTRACTOR_MODEL_MAX_RETRIES", 2),
             retry_base_seconds=provider_float("EXTRACTOR_MODEL_RETRY_BASE_SECONDS", 0.5),
@@ -531,7 +546,7 @@ class VisionAttributeExtractor:
         prompt = build_extraction_prompt(tuple(target_fields), audience=audience)
 
         prepared = await self._prepare_image(image)
-        request = self._adapter.build(
+        request = await self._fit_request_to_budget(
             prompt=prompt,
             image=prepared,
             schema=schema,
@@ -612,6 +627,133 @@ class VisionAttributeExtractor:
             reference,
             role="PRODUCT_IMAGE",
             prefer_public_url=self.config.send_public_urls,
+        )
+
+    # ---------------- 整份请求预算 ----------------
+
+    @staticmethod
+    def _request_body_bytes(request: LLMRequest) -> int:
+        """和传输层发送时使用同一串 JSON 字节,不做近似估算。"""
+        return len(canonical_json_bytes(request.body))
+
+    @staticmethod
+    def _placeholder(image: PreparedImage) -> PreparedImage:
+        if not image.inline:
+            return image
+        return PreparedImage(
+            role=image.role,
+            mime_type=image.mime_type,
+            byte_size=0,
+            data_url=f"data:{image.mime_type};base64,",
+            source_byte_size=image.source_byte_size,
+        )
+
+    def _build_request(
+        self,
+        *,
+        prompt: str,
+        image: PreparedImage,
+        schema: dict[str, Any],
+        idempotency_key: str | None,
+    ) -> LLMRequest:
+        return self._adapter.build(
+            prompt=prompt,
+            image=image,
+            schema=schema,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _fit_request_to_budget(
+        self,
+        *,
+        prompt: str,
+        image: PreparedImage,
+        schema: dict[str, Any],
+        idempotency_key: str | None,
+    ) -> LLMRequest:
+        """超出整包预算时压缩发送副本;原始素材与合规小图保持不变。"""
+        build_kwargs = {
+            "prompt": prompt,
+            "schema": schema,
+            "idempotency_key": idempotency_key,
+        }
+        request = self._build_request(**build_kwargs, image=image)
+        original_size = self._request_body_bytes(request)
+        if original_size <= self.config.max_request_bytes:
+            return request
+        if not image.inline:
+            self._ensure_request_fits(request)
+            return request
+
+        placeholder_request = self._build_request(
+            **build_kwargs,
+            image=self._placeholder(image),
+        )
+        encoded_budget = (
+            self.config.max_request_bytes
+            - self._request_body_bytes(placeholder_request)
+            - REQUEST_BODY_SAFETY_MARGIN_BYTES
+        )
+        if encoded_budget <= 0:
+            raise ProviderInputError(
+                "EXTRACTOR_MODEL_MAX_REQUEST_MB 太小,不足以容纳识别提示词和响应 Schema",
+                provider=self.name,
+                detail={"limit_bytes": self.config.max_request_bytes},
+            )
+        raw_budget = max(1, int(encoded_budget * ENCODED_TO_RAW_BUDGET_RATIO))
+
+        fitted_request = request
+        for _attempt in range(MAX_REQUEST_FIT_PASSES):
+            compacted = await asyncio.to_thread(
+                compact_prepared_image,
+                image,
+                max_bytes=raw_budget,
+            )
+            fitted_request = self._build_request(**build_kwargs, image=compacted)
+            fitted_size = self._request_body_bytes(fitted_request)
+            if fitted_size <= self.config.max_request_bytes:
+                logger.info(
+                    "attribute extraction request fitted to endpoint body budget",
+                    extra={
+                        "extra_fields": {
+                            "event": "llm.request_fitted",
+                            "original_body_bytes": original_size,
+                            "fitted_body_bytes": fitted_size,
+                            "limit_bytes": self.config.max_request_bytes,
+                            "inline_count": 1,
+                        }
+                    },
+                )
+                return fitted_request
+            # 每轮都从原始 PreparedImage 重编码,避免反复压上一轮 JPEG。
+            raw_budget = max(
+                1,
+                int(
+                    raw_budget
+                    * self.config.max_request_bytes
+                    / fitted_size
+                    * 0.97
+                ),
+            )
+
+        self._ensure_request_fits(fitted_request)
+        return fitted_request  # pragma: no cover - 上一行只在符合预算时返回
+
+    def _ensure_request_fits(self, request: LLMRequest) -> None:
+        body_bytes = self._request_body_bytes(request)
+        if body_bytes <= self.config.max_request_bytes:
+            return
+        raise ProviderInputError(
+            f"属性识别请求体 {body_bytes // 1024} KB,超过配置总上限 "
+            f"{self.config.max_request_bytes // 1024} KB;"
+            "请压缩素材或启用 EXTRACTOR_MODEL_SEND_PUBLIC_URLS",
+            provider=self.name,
+            detail={
+                "request_body_bytes": body_bytes,
+                "limit_bytes": self.config.max_request_bytes,
+                "image_count": len(request.images),
+                "inline_count": sum(1 for one in request.images if one.inline),
+            },
         )
 
     # ---------------- HTTP(转发到传输层,策略只有一份)----------------

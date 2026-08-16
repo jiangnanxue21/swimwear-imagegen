@@ -18,10 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
-from app.attributes import run_state
+from app.attributes import missing_summary, run_state
 from app.attributes import service as attr_service
-from app.attributes.registry import field_spec_out
+from app.attributes.registry import field_spec_out, fields_for
 from app.attributes.validation import AttributeValueError
+from app.core import audience as audience_rules
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.extractors.registry import get_extractor
 from app.models.product import Product
@@ -33,6 +34,7 @@ from app.schemas.attribute import (
     ExtractionOut,
     ExtractRequest,
     FieldSpecOut,
+    UnresolvedMissingOut,
 )
 from app.services import dispatch_service, spu_service
 
@@ -74,7 +76,20 @@ def _product(session: Session, product_id: UUID) -> Product:
 def _extraction_out(row) -> ExtractionOut:
     out = ExtractionOut.model_validate(row)
     out.can_cancel = run_state.can_cancel(row.status)
+    out.request_disposition = getattr(row, "_request_disposition", None)
     return out
+
+
+def _placeholder_out(field_name: str) -> AttributeValueOut:
+    """注册表字段尚无事实行时，仍给属性页一个可人工填写的入口。"""
+    return AttributeValueOut(
+        field_name=field_name,
+        source="NONE",
+        status="MISSING",
+        is_placeholder=True,
+        spec=FieldSpecOut(**field_spec_out(field_name)),
+        facts_stale=False,
+    )
 
 
 def _dispatch_if_queued(row) -> None:
@@ -107,6 +122,7 @@ def extract_attributes(
         # 而调用方没有任何入参能表达它 —— 只能人工挑图 id,而挑漏一张的
         # 表现是那个颜色重试完仍然缺证据,于是再付一次钱重试一次
         only_variant_ids=payload.color_variant_ids,
+        force_rerun=payload.force_rerun,
         actor=current_actor(request),
     )
     session.commit()
@@ -145,6 +161,7 @@ def create_spu_extraction_run(
         only_media_ids=payload.media_asset_ids,
         only_variant_ids=payload.color_variant_ids,
         spu_scope_id=spu_id,
+        force_rerun=payload.force_rerun,
         actor=current_actor(request),
     )
     session.commit()
@@ -166,10 +183,20 @@ def list_attributes(
     # "库里这一行的指纹对不对得上",而工作台问的是"该不该催人" ——
     # 后者才需要只看已确认的那一档,理由在 `stale_fields` 的文档里
     stale = attr_service.stale_fields(session, product, values, settled_only=False)
-    return [
-        _out(v, stale=stale)
-        for v in sorted(values.values(), key=lambda r: r.field_name)
+    # 注册表的 `fields_for()` 明确是属性页的列清单。旧实现只遍历 values，
+    # 结果恰好把最需要人工填写的字段（material 等 visual=False 字段）藏掉：
+    # 没值 -> 没行 -> 没输入框，而阻断提示却仍叫人“人工填写”。
+    ordered = fields_for(audience_rules.coerce(product.audience))
+    result = [
+        _out(values[name], stale=stale) if name in values else _placeholder_out(name)
+        for name in ordered
     ]
+    # 受众变更前留下的历史事实不能静默消失；不再适用的行排在适用字段之后。
+    result.extend(
+        _out(values[name], stale=stale)
+        for name in sorted(set(values) - set(ordered))
+    )
+    return result
 
 
 @router.post(
@@ -245,9 +272,17 @@ def get_extraction(
     row = attr_service.get_extraction(session, extraction_id)
     detail = ExtractionDetailOut.model_validate(row)
     detail.can_cancel = run_state.can_cancel(row.status)
-    detail.evidence = [
-        EvidenceOut.model_validate(e) for e in attr_service.list_evidence(session, row.id)
-    ]
+    evidence = attr_service.list_evidence(session, row.id)
+    detail.evidence = [EvidenceOut.model_validate(e) for e in evidence]
+    # RUNNING 时后续图片还可能给出值,不能把中间快照宣布成最终缺失。
+    detail.unresolved_missing = (
+        []
+        if detail.can_cancel
+        else [
+            UnresolvedMissingOut(**item.as_dict())
+            for item in missing_summary.unresolved_missing(evidence)
+        ]
+    )
     return detail
 
 

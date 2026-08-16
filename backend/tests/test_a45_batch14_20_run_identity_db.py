@@ -556,6 +556,7 @@ def test_queueing_is_idempotent_and_does_not_call_the_extractor(
         extractor=extractor_spy,
         actor="tester",
     )
+    first_disposition = first._request_disposition
     second = attr_service.queue_extraction(
         session,
         product=product_with_spu,
@@ -565,8 +566,52 @@ def test_queueing_is_idempotent_and_does_not_call_the_extractor(
 
     assert first.status == S.QUEUED.value
     assert second.id == first.id
+    # 同一 Session 会返回同一个 ORM 对象，第二次请求会更新它的瞬时处置标记；
+    # 所以第一份响应语义要在第二次调用前截下来。
+    assert first_disposition == "NEW_RUN"
+    assert second._request_disposition == "RETURN_EXISTING"
     assert first.input_asset_ids
     assert first.requested_by == "tester"
+    assert extractor_spy.calls == 0
+
+
+def test_an_explicit_rerun_replaces_a_completed_result_without_bypassing_inflight_dedupe(
+    session, product_with_spu, extractor_spy
+):
+    from app.attributes import service as attr_service
+
+    first = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        actor="tester",
+    )
+    original_key = first.idempotency_key
+    first.status = S.COMPLETED.value
+    session.flush()
+
+    rerun = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        force_rerun=True,
+        actor="tester",
+    )
+    rerun_disposition = rerun._request_disposition
+    duplicate = attr_service.queue_extraction(
+        session,
+        product=product_with_spu,
+        extractor=extractor_spy,
+        force_rerun=True,
+        actor="tester",
+    )
+
+    assert rerun.id != first.id
+    assert first.idempotency_key is None
+    assert rerun.idempotency_key == original_key
+    assert rerun_disposition == "NEW_RUN"
+    assert duplicate.id == rerun.id
+    assert duplicate._request_disposition == "RETURN_EXISTING"
     assert extractor_spy.calls == 0
 
 

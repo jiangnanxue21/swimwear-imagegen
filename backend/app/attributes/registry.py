@@ -347,6 +347,79 @@ _FIELDS: tuple[AttributeField, ...] = (
 
 REGISTRY: Mapping[str, AttributeField] = {f.name: f for f in _FIELDS}
 
+#: 枚举值的运营界面文案。数据库与渠道映射继续使用稳定英文编码；接口同时
+#: 下发这张中文词表，前端只负责显示，不能自己再维护一份翻译。
+#:
+#: 这里按值而不是按字段存：重复编码（UNKNOWN / BUTTON / VELCRO）在各字段
+#: 中语义相同。`test_attribute_field_spec` 会逐个枚举值检查，新增取值漏翻译
+#: 会当场变红，而不是在页面上悄悄退回英文。
+_OPTION_LABELS: Mapping[str, str] = {
+    "ONE_PIECE": "连体泳衣",
+    "BIKINI_TOP": "比基尼上衣",
+    "BIKINI_BOTTOM": "比基尼下装",
+    "BIKINI_SET": "比基尼套装",
+    "TANKINI": "坦基尼",
+    "COVER_UP": "罩衫/沙滩外搭",
+    "DRESS": "泳裙",
+    "TOP": "上衣",
+    "SWIM_SHORTS": "平角泳裤/沙滩裤",
+    "BOARDSHORTS": "冲浪裤",
+    "SWIM_BRIEFS": "三角泳裤",
+    "JAMMERS": "及膝竞速泳裤",
+    "SWIM_TRUNKS_SET": "泳裤套装",
+    "RASH_GUARD": "防晒衣/水母衣",
+    "OTHER": "其他",
+    "SOLID": "纯色",
+    "STRIPE": "条纹",
+    "FLORAL": "花卉",
+    "ANIMAL": "动物纹",
+    "GEOMETRIC": "几何图案",
+    "TIE_DYE": "扎染",
+    "COLOR_BLOCK": "拼色",
+    "PRINT_LOGO": "标志印花",
+    "HALTER": "挂脖",
+    "SPAGHETTI": "细肩带",
+    "WIDE": "宽肩带",
+    "STRAPLESS": "无肩带",
+    "ONE_SHOULDER": "单肩",
+    "CRISS_CROSS": "交叉肩带",
+    "V_NECK": "V 形领",
+    "SCOOP": "圆弧领",
+    "SQUARE": "方领",
+    "SWEETHEART": "心形领",
+    "HIGH_NECK": "高领",
+    "PLUNGE": "深 V 领",
+    "BANDEAU": "抹胸",
+    "OPEN_BACK": "露背",
+    "RACER_BACK": "工字背",
+    "CROSS_BACK": "交叉背",
+    "TIE_BACK": "系带背",
+    "FULL_BACK": "全包背",
+    "LACE_UP": "绑带背",
+    "ELASTIC": "松紧腰",
+    "DRAWSTRING": "抽绳腰",
+    "ELASTIC_DRAWSTRING": "松紧抽绳腰",
+    "BUTTON": "纽扣",
+    "VELCRO": "魔术贴",
+    "SHORT": "短款",
+    "MID": "中长款",
+    "LONG": "长款",
+    "KNEE_LENGTH": "及膝",
+    "MESH_LINER": "网眼内衬",
+    "BRIEF_LINER": "三角内衬",
+    "NO_LINER": "无内衬",
+    "NO_POCKETS": "无口袋",
+    "SIDE": "侧袋",
+    "BACK": "后袋",
+    "SIDE_AND_BACK": "侧袋和后袋",
+    "SLIM": "修身",
+    "REGULAR": "常规",
+    "LOOSE": "宽松",
+    "NONE": "无",
+    "ZIPPER": "拉链",
+    "UNKNOWN": "未知",
+}
+
 
 def get_field(name: str) -> AttributeField:
     """按名取字段。未注册的字段一律拒绝 —— 属性名不是随便写的字符串。"""
@@ -462,10 +535,13 @@ def field_spec_out(name: str) -> dict[str, object]:
             "value_type": ValueType.TEXT.value,
             "multi_value": False,
             "options": [],
+            "option_labels": {},
         }
+    options = [v.value for v in spec.enum] if spec.enum is not None else []
     return {
         "label": spec.label,
         "value_type": spec.value_type.value,
         "multi_value": spec.multi_value,
-        "options": [v.value for v in spec.enum] if spec.enum is not None else [],
+        "options": options,
+        "option_labels": {value: _OPTION_LABELS[value] for value in options},
     }

@@ -327,6 +327,9 @@ class Settings(BaseSettings):
     EXTRACTOR_MODEL_RESPONSE_FORMAT: str = "json_schema"
     EXTRACTOR_MODEL_TIMEOUT_SECONDS: float = 60.0
     EXTRACTOR_MODEL_MAX_IMAGE_MB: int = 8
+    #: 整份识别 JSON 请求体上限。默认低于部分兼容端点的 6 MiB 硬限制;
+    #: 内联图片超限时按实际提示词与 Schema 开销自动压缩发送副本
+    EXTRACTOR_MODEL_MAX_REQUEST_MB: int = 5
     EXTRACTOR_MODEL_MAX_OUTPUT_TOKENS: int = 1500
     EXTRACTOR_MODEL_MAX_RETRIES: int = 2
     EXTRACTOR_MODEL_RETRY_BASE_SECONDS: float = 0.5

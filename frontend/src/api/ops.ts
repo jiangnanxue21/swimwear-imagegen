@@ -36,6 +36,13 @@ export interface LogEntry {
   routine: boolean
   /** 折叠计数条上那个中文分组名(「租约让位」「幂等复用」……) */
   routine_group: string | null
+  /**
+   * 这条事件是不是一轮的里程碑 —— 链路模式拿它当段头。
+   *
+   * 是个布尔而不是让前端认事件码:哪条事件算里程碑属于分类法,
+   * 而这一页不持有分类表(硬规则第 4 条)。
+   */
+  round_summary: boolean
   message: string | null
   request_id: string | null
   fields: Record<string, unknown>
@@ -59,11 +66,25 @@ export interface RingMeta {
   unavailable_reason?: string
 }
 
+/** 一个域在当前窗口里的条数。**不吃 domain 筛选** —— 见 LogPage.domain_counts */
+export interface DomainCount {
+  total: number
+  warn: number
+  error: number
+}
+
 export interface LogPage {
   items: LogEntry[]
   ring: RingMeta
   /** 全窗最老的一条的时间,与当前筛选无关 */
   oldest_ts: string | null
+  /**
+   * 域 -> 计数。**服务端按全窗算,不受当前选中的域影响。**
+   *
+   * 上一版是前端按已经筛过的那一屏算的,于是点进一个域之后其余十四格
+   * 全变 0 —— 恰好在最需要"别处还有没有事"的时候把这个信息拿掉了。
+   */
+  domain_counts: Record<string, DomainCount>
 }
 
 export interface LogMeta {
@@ -76,9 +97,16 @@ export interface LogMeta {
     routine_group: string | null
   }>
   routine_groups: Array<{ key: string; label: string }>
+  /** 按严重度升序。级别筛选是「及以上」,乱序就没法读 */
   levels: string[]
   ring: RingMeta
-  payload_capture: { enabled: boolean; ttl_seconds: number }
+  payload_capture: {
+    enabled: boolean
+    ttl_seconds: number
+    /** 旁挂库掉了多少条。404 时用来区分「过期了」和「从来没写进去过」 */
+    dropped_since_boot: number
+    last_error: string | null
+  }
 }
 
 /** 一次尝试收回来的东西。多次尝试各存各的 —— 覆盖会让第一次的现场消失 */
@@ -92,6 +120,15 @@ export interface LlmAttempt {
   body: unknown
 }
 
+/** 一张图在旁挂库里剩下的全部东西。**正文永不留存** */
+export interface LlmImageChip {
+  tag?: string
+  mime_type?: string
+  base64_chars?: number
+  sha256_16?: string
+  [key: string]: unknown
+}
+
 export interface LlmPayload {
   llm_call_id: string
   provider: string | null
@@ -100,7 +137,7 @@ export interface LlmPayload {
     endpoint: string
     headers: Record<string, unknown>
     body: unknown
-    images: Array<Record<string, unknown>>
+    images: LlmImageChip[]
     /** 发出去的**原始字节**的摘要。脱敏视图对不上它是正常的,见界面上那行小字 */
     sha256_16: string
     body_bytes: number
@@ -114,6 +151,7 @@ export interface LlmPayload {
 export interface LogQuery {
   domain?: string
   event?: string
+  /** **最低级别**,不是精确值 —— 选 WARNING 的人要看得见 ERROR */
   level?: string
   request_id?: string
   task_id?: string

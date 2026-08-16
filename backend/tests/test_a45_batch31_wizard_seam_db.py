@@ -506,6 +506,30 @@ def test_running_a_paid_extraction_is_gated_on_the_material_step(client, session
     )
 
 
+def test_a_missing_material_has_an_editable_row_and_can_be_confirmed(client, session):
+    """阻断提示叫人手填 material 时，属性表必须真的给出填写入口。"""
+    _, _, _, product = _fixture(session)
+
+    before = client.get(f"/api/products/{product.id}/attributes")
+    assert before.status_code == 200, before.text
+    material = next(row for row in before.json() if row["field_name"] == "material")
+    assert material["is_placeholder"] is True
+    assert material["status"] == "MISSING"
+    assert material["spec"]["label"] == "材质成分"
+
+    written = client.post(
+        f"/api/products/{product.id}/attributes/confirm",
+        json={"items": [{"field_name": "material", "value": "80%锦纶，20%氨纶"}]},
+    )
+    assert written.status_code == 200, written.text
+    assert written.json()[0]["normalized_value"] == "80%锦纶，20%氨纶"
+
+    after = client.get(f"/api/products/{product.id}/attributes")
+    material = next(row for row in after.json() if row["field_name"] == "material")
+    assert material["is_placeholder"] is False
+    assert material["status"] == AttributeStatus.CONFIRMED.value
+
+
 def test_the_gate_lets_a_legitimate_action_through(client, session):
     """**反方向**:闸不能只会拒绝。
 

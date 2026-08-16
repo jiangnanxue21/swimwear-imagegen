@@ -408,6 +408,9 @@ def test_the_missing_reason_is_typed_on_the_frontend():
     assert re.search(r"^\s*missing_reason: string \| null$", src, re.M), (
         "frontend 的 Evidence 类型缺 missing_reason —— 后端 EvidenceOut 有这一列"
     )
+    assert re.search(
+        r"^\s*unresolved_missing: UnresolvedMissingEvidence\[\]$", src, re.M
+    ), "frontend 没接后端派生的整批未解决字段"
 
 
 def test_every_missing_reason_maps_to_a_distinct_action():
@@ -450,14 +453,13 @@ def test_the_missing_reason_is_rendered_not_just_typed():
     assert re.search(
         r"^\s*<MissingEvidenceNotice[\s>/]", src, re.M
     ), "组件没有作为独立元素挂进 JSX(或被条件死代码化了)"
-    # 组件内部两个决定也要钉住:早退必须只在"没有无值证据"时发生,
-    # 分组必须只收带 reason 的条目。少了这两条,把 `if (true) return null`
-    # 写进去也能全绿
+    # 组件内部只做展示:早退按后端给的 unresolved_missing,不再从逐图 evidence
+    # 推测“另一张图是否已经解决”。少了前一条,这次正背面误报会回来。
     assert "if (!byReason.length) return null" in src, (
         "早退不是按'有没有无值证据'判的 —— 组件可能恒不渲染"
     )
-    assert "if (!item.missing_reason) continue" in src, (
-        "分组没有按 missing_reason 过滤 —— 带值证据会被当成'没有值'报出来"
+    assert "missing={lastExtraction.data?.unresolved_missing ?? []}" in src, (
+        "组件没有读取后端派生的 unresolved_missing,可能又在前端按逐图证据猜状态"
     )
     assert "attributesApi.extraction(" in src, (
         "没有人拉逐图证据 —— `missing_reason` 只在 /extractions/{id} 的出参里,"

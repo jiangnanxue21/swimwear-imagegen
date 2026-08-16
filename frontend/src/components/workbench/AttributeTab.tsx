@@ -32,7 +32,8 @@ import {
   factsStale,
   type AttributeFieldSpec,
   type AttributeValue,
-  type Evidence,
+  type Extraction,
+  type UnresolvedMissingEvidence,
 } from '../../api/attributes'
 import { useWriteError } from '../../hooks/useWriteError'
 import ErrorNotice from '../ErrorNotice'
@@ -44,12 +45,14 @@ import { brandVars, fontScale } from '../../theme'
 import { formatDateTime } from '../../utils/datetime'
 
 function displayValue(row: AttributeValue): string {
-  if (row.normalized_value) return row.normalized_value
+  const labels = specOf(row).option_labels ?? {}
+  const localized = (value: unknown) => labels[String(value)] ?? String(value)
+  if (row.normalized_value) return localized(row.normalized_value)
   const raw = row.value_json
   if (raw === null || raw === undefined) return ''
-  if (Array.isArray(raw)) return raw.join(' / ')
+  if (Array.isArray(raw)) return raw.map(localized).join(' / ')
   if (typeof raw === 'object') return JSON.stringify(raw)
-  return String(raw)
+  return localized(raw)
 }
 
 /**
@@ -63,10 +66,16 @@ const FALLBACK_SPEC: AttributeFieldSpec = {
   value_type: 'TEXT',
   multi_value: false,
   options: [],
+  option_labels: {},
 }
 
 function specOf(row: AttributeValue): AttributeFieldSpec {
   return row.spec ?? FALLBACK_SPEC
+}
+
+/** 数据库存英文稳定编码，所有界面文案统一走后端注册表下发的中文词表。 */
+export function attributeOptionLabel(spec: AttributeFieldSpec, value: string): string {
+  return spec.option_labels?.[value] ?? value
 }
 
 /**
@@ -157,6 +166,7 @@ function isBlank(value: unknown): boolean {
 
 /** 置信度因子分解。回答「0.71 是因为只有一张图,还是因为图太糊」 */
 function ConfidenceCell({ row }: { row: AttributeValue }) {
+  if (row.is_placeholder) return <span style={{ color: brandVars.textFaint }}>—</span>
   const system = row.system_confidence
   const breakdown = row.confidence_breakdown
   const body = (
@@ -229,7 +239,7 @@ export default function AttributeTab({
     enabled: Boolean(productId),
   })
 
-  /** 逐图证据。只为拿 `missing_reason` —— 有 id 才拉,没有就不发请求 */
+  /** 识别详情含逐图证据和后端派生的整批未解决字段；有 id 才拉。 */
   const lastExtraction = useQuery({
     queryKey: ['extraction', lastExtractionId],
     queryFn: () => attributesApi.extraction(lastExtractionId as string),
@@ -262,6 +272,9 @@ export default function AttributeTab({
         ? lastExtraction.data.failed_scopes
         : undefined,
       product?.spu_id,
+      // 这是用户明确点击的付费动作。后端只替换已完成结果；若任务仍在途，
+      // 仍会复用原 run，避免双击产生两次并发调用。
+      true,
     ),
     onSuccess: (result) => {
       // 先记批次 id:下面三条分支都要它。**失败的那次也记** ——
@@ -272,8 +285,18 @@ export default function AttributeTab({
       // 三元判断,而它漏了「没跑完但一张都没失败」那一种,把跑了一半的
       // 识别显示成「识别完成」。判定现在在 `run_state.terminal_status_for`,
       // 前端只挑语气和下一句话
-      const notice = RUN_STATUS_NOTICE[result.status] ?? RUN_STATUS_NOTICE.FAILED
       const counts = `${result.image_count} 张图,成功 ${result.succeeded_count} 条,失败 ${result.failed_count} 条`
+      if (result.request_disposition === 'REUSE_RESULT') {
+        message.info(`素材、字段、模型和提示词均未变化,已复用上次结果,没有再次调用模型:${counts}`)
+        refresh()
+        return
+      }
+      if (result.request_disposition === 'RETURN_EXISTING') {
+        message.info('相同的识别任务已在排队或执行,未重复创建付费任务')
+        refresh()
+        return
+      }
+      const notice = RUN_STATUS_NOTICE[result.status] ?? RUN_STATUS_NOTICE.FAILED
       message[notice.tone](
         [`${RUN_STATUS_LABEL[result.status] ?? result.status}:${counts}`, notice.next]
           .filter(Boolean)
@@ -415,7 +438,11 @@ export default function AttributeTab({
           placeholder={unresolved ? '冲突,请先裁决' : '未填'}
           value={(pending as string) || undefined}
           onChange={(v) => setEdit(row.field_name, v ?? '')}
-          options={spec.options.map((o) => ({ value: o, label: o }))}
+          options={spec.options.map((o) => ({
+            value: o,
+            label: attributeOptionLabel(spec, o),
+            title: o,
+          }))}
         />
       )
     }
@@ -431,7 +458,11 @@ export default function AttributeTab({
           placeholder={unresolved ? '冲突,请先裁决' : '未填(留空 = 确认为无)'}
           value={(pending as string[]) ?? []}
           onChange={(v) => setEdit(row.field_name, v)}
-          options={spec.options.map((o) => ({ value: o, label: o }))}
+          options={spec.options.map((o) => ({
+            value: o,
+            label: attributeOptionLabel(spec, o),
+            title: o,
+          }))}
         />
       )
     }
@@ -496,13 +527,16 @@ export default function AttributeTab({
       title: '来源',
       dataIndex: 'source',
       width: 90,
-      render: (v: string) => <Tag>{ATTRIBUTE_SOURCE_LABEL[v] ?? v}</Tag>,
+      render: (v: string, row) => row.is_placeholder
+        ? <span style={{ color: brandVars.textFaint }}>—</span>
+        : <Tag>{ATTRIBUTE_SOURCE_LABEL[v] ?? v}</Tag>,
     },
     {
       title: '状态',
       key: 'status',
       width: 150,
       render: (_, row) => {
+        if (row.is_placeholder) return <Tag>待填写</Tag>
         const meta = ATTRIBUTE_STATUS_LABEL[row.status]
         // 「样品已变」和状态是**两件正交的事**,所以是第二个 Tag 而不是
         // 第五档状态:一条 CONFIRMED 的事实过期之后,它仍然是 CONFIRMED
@@ -551,7 +585,7 @@ export default function AttributeTab({
               disabled={value === undefined || confirm.isPending}
               onClick={() => confirm.mutate([{ field_name: row.field_name, value }])}
             >
-              {row.status === 'CONFLICT' ? '裁决' : '确认'}
+              {row.is_placeholder ? '填写并确认' : row.status === 'CONFLICT' ? '裁决' : '确认'}
             </Button>
             {/*
               * 「未知」原来无条件提交字符串 `'UNKNOWN'`(BLOCK-11 的另一半)。
@@ -708,9 +742,11 @@ export default function AttributeTab({
         />
       )}
 
+      <ActiveExtractionNotice run={lastExtraction.data} />
+
       {/* 排在冲突之后、结果表之前:它解释的是表里那几行**为什么是空的** */}
       <MissingEvidenceNotice
-        evidence={lastExtraction.data?.evidence ?? []}
+        missing={lastExtraction.data?.unresolved_missing ?? []}
         labelOf={labelOf}
       />
 
@@ -791,34 +827,50 @@ export default function AttributeTab({
   )
 }
 
+/** 异步逐图识别可能持续数分钟；toast 消失后仍要有一个稳定的进度落点。 */
+export function ActiveExtractionNotice({ run }: { run?: Extraction }) {
+  if (!run?.can_cancel) return null
+  const processed = run.succeeded_count + run.failed_count
+  const label = RUN_STATUS_LABEL[run.status] ?? run.status
+  return (
+    <Alert
+      type="info"
+      showIcon
+      message={`${label}:已处理 ${processed}/${run.image_count} 张图`}
+      description="属性识别会逐张调用模型，期间可继续处理其他商品；本页每 2 秒自动更新。"
+    />
+  )
+}
+
 /**
- * 「模型说这些字段没有值」(§4.5,A45-batch14-2 / F2)。
+ * 「整次识别后仍没有可用值的字段」(§4.5,A45-batch14-2 / F2)。
  *
  * 后端从 batch14 起就在落 `missing_reason`,一路铺到了接口出参 —— 但界面上
  * 一个字都没有。运营看到的是那几个字段**空着**,和"还没识别到"长得一模一样,
  * 于是唯一能想到的动作是再点一次识别;而三个原因里只有第一个重跑有意义,
  * 第三个(材质克重一类)重跑一万次也不会有值。
  *
- * 按原因分组而不是按字段列:动作是跟着原因走的,同一个动作说一遍就够。
+ * “是否仍缺”由后端按整次 run 派生；这里按原因分组展示，不从逐图证据
+ * 再猜一次。动作是跟着原因走的，同一个动作说一遍就够。
  * 不做成 error —— 它不是缺陷,是模型如实报告的一次"我不知道",
  * 而"如实说不知道"正是 §4.5 想要的行为;报成红色会训练运营忽略它。
  */
-function MissingEvidenceNotice({
-  evidence,
+export function MissingEvidenceNotice({
+  missing,
   labelOf,
 }: {
-  evidence: Evidence[]
+  /** 后端已经按整次 run 排除了被其他角度有效值解决的字段。 */
+  missing: UnresolvedMissingEvidence[]
   /** 字段名 -> 中文名。证据行上没有 `spec`,所以词表由属性表那边递进来 */
   labelOf: (fieldName: string) => string
 }) {
   const byReason = useMemo(() => {
     const groups = new Map<string, Set<string>>()
-    for (const item of evidence) {
-      if (!item.missing_reason) continue
-      const fields = groups.get(item.missing_reason) ?? new Set<string>()
-      // 用 Set:同一个字段在多张图上都"看不清"是常态,列九遍没有信息量
+    for (const item of missing) {
+      const fields = groups.get(item.reason) ?? new Set<string>()
+      // 后端已经去重；Set 再守住接口回放或旧缓存里的重复项。
       fields.add(item.field_name)
-      groups.set(item.missing_reason, fields)
+      groups.set(item.reason, fields)
     }
     return [...groups.entries()].map(([reason, fields]) => ({
       reason,
@@ -826,7 +878,7 @@ function MissingEvidenceNotice({
       // 可能换一次序,看起来像有东西变了
       fields: [...fields].sort().map(labelOf),
     }))
-  }, [evidence, labelOf])
+  }, [missing, labelOf])
 
   if (!byReason.length) return null
 
@@ -834,7 +886,7 @@ function MissingEvidenceNotice({
     <Alert
       type="warning"
       showIcon
-      message="模型对这些字段明确报告了「没有值」——不是漏识别"
+      message="本次识别后这些字段仍没有可用值"
       description={
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           {byReason.map(({ reason, fields }) => {
@@ -849,7 +901,8 @@ function MissingEvidenceNotice({
             )
           })}
           <span style={{ color: brandVars.slate }}>
-            这几项不会自动变成值,也不会参与合并投票 —— 要么按上面的动作补素材,要么在下表里人工填。
+            后端已综合本次识别的全部角度；某张图说看不到、但另一张图给出有效值的字段不会出现在这里。
+            剩余项要么按上面的动作补素材,要么在下表里人工填。
           </span>
         </Space>
       }

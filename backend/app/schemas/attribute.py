@@ -42,6 +42,9 @@ class ExtractionOut(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime | None = None
+    #: 仅描述这一次 POST 的处置，不落库。NEW_RUN=新建；RETURN_EXISTING=已有任务
+    #: 仍在排队/执行；REUSE_RESULT=直接复用已完成结果。GET 与取消响应为 None。
+    request_disposition: str | None = None
 
 
 class EvidenceOut(BaseModel):
@@ -60,6 +63,13 @@ class EvidenceOut(BaseModel):
     #: normalized_value 都是 None,少了这一列它们长得一模一样
     missing_reason: str | None = None
     model_name: str = ""
+
+
+class UnresolvedMissingOut(BaseModel):
+    """整次识别后仍没有可用值的字段；不是单张图的判断。"""
+
+    field_name: str
+    reason: str
 
 
 class FieldSpecOut(BaseModel):
@@ -92,6 +102,8 @@ class FieldSpecOut(BaseModel):
                       等于把注册表的 `__post_init__` 抄一份到前端
         options       枚举字段的合法取值。非枚举字段是空列表,不是 null:
                       "没有约束"和"约束读不到"在界面上是两种控件
+        option_labels 英文稳定编码 -> 中文界面文案。存储仍使用编码,
+                      前端不另建翻译表
     """
 
     #: 默认空串而不是必填:`spec` 整体可能是 None(老数据),
@@ -100,6 +112,7 @@ class FieldSpecOut(BaseModel):
     value_type: str
     multi_value: bool = False
     options: list[str] = []
+    option_labels: dict[str, str] = {}
 
 
 class AttributeValueOut(BaseModel):
@@ -110,6 +123,9 @@ class AttributeValueOut(BaseModel):
     normalized_value: str | None = None
     source: str
     status: str
+    #: True 表示注册表里有这个字段、但事实表尚无值。它仍是一条可编辑的
+    #: 页面行，不是假装已经存在一条 ProductAttributeValue。
+    is_placeholder: bool = False
     #: 字段类型元数据。接口层用 `spec_for()` 填,ORM 上没有这个属性
     spec: FieldSpecOut | None = None
     model_confidence: float | None = None
@@ -133,6 +149,9 @@ class AttributeValueOut(BaseModel):
 
 class ExtractionDetailOut(ExtractionOut):
     evidence: list[EvidenceOut] = []
+    #: 后端按整次 run 派生。某张正面图说看不到 back_style、但背面图给了值时,
+    #: 逐图 evidence 两条都保留,这里不再报告 back_style
+    unresolved_missing: list[UnresolvedMissingOut] = []
 
 
 class ExtractRequest(BaseModel):
@@ -172,6 +191,8 @@ class ExtractRequest(BaseModel):
     color_variant_ids: list[UUID] | None = Field(
         default=None, max_length=MAX_VARIANTS_PER_SPU
     )
+    #: 明确要求重新调用模型。只允许替换 COMPLETED；在途任务仍然复用以防双击付费。
+    force_rerun: bool = False
 
 
 class ConfirmItem(BaseModel):

@@ -102,6 +102,7 @@ def run_extraction(
     prepare_only: bool = False,
     existing_run: ProductAttributeExtraction | None = None,
     cooperative: bool = False,
+    force_rerun: bool = False,
     actor: str = "system",
 ) -> ProductAttributeExtraction:
     """逐图识别,落证据。**不写任何属性值。**
@@ -250,6 +251,33 @@ def run_extraction(
         verdict = run_state.reuse_verdict(
             existing.status if existing is not None else None
         )
+        if (
+            existing is not None
+            and verdict == run_state.ReuseVerdict.REUSE_RESULT
+            and force_rerun
+        ):
+            # `idempotency_key` 在这里是一把「相同输入当前由哪次 run 占用」的锁，
+            # 不是历史证据本体；输入指纹、作用域、模型与提示词版本仍完整留在旧行。
+            # 明确重跑时把锁转交给新 run，之后普通重复请求就会复用**新**结果。
+            #
+            # 不能给新 run 塞一个随机键：那样它跑完后，普通请求仍会命中旧的
+            # base key，界面会永远回到重跑前的结果。也不能对 QUEUED/RUNNING
+            # 做这件事 —— 那会让双击产生两个并发的付费任务。
+            existing.idempotency_key = None
+            session.flush()
+            logger.info(
+                "completed attribute extraction explicitly superseded for rerun",
+                extra={
+                    "extra_fields": {
+                        "event": "attr.force_rerun",
+                        "product_id": str(product.id),
+                        "superseded_extraction_id": str(existing.id),
+                        "idempotency_key": identity.key,
+                    }
+                },
+            )
+            existing = None
+            verdict = run_state.ReuseVerdict.NEW_RUN
         if existing is not None and verdict != run_state.ReuseVerdict.NEW_RUN:
             # 两档都是「不再付一次钱」,但落点不同,所以日志分得开:
             # RETURN_EXISTING 是那一次还在跑,REUSE_RESULT 是那一次跑完了。
@@ -266,6 +294,7 @@ def run_extraction(
                     }
                 },
             )
+            existing._request_disposition = verdict
             return existing
     elif existing_run is None and identity.no_key_reason:
         # **如实说为什么没有键。**不说的话,「双击产生了两个 run」这件事
@@ -339,6 +368,7 @@ def run_extraction(
                     }
                 },
             )
+            winner._request_disposition = run_state.ReuseVerdict.RETURN_EXISTING
             return winner
     else:
         row = existing_run
@@ -348,6 +378,7 @@ def run_extraction(
             )
 
     if prepare_only:
+        row._request_disposition = run_state.ReuseVerdict.NEW_RUN
         return row
 
     enum_defs = {name: enum_hint_for(name) for name in targets}
@@ -624,12 +655,17 @@ def queue_extraction(
     only_media_ids: list[UUID] | None = None,
     only_variant_ids: list[UUID] | None = None,
     spu_scope_id: UUID | None = None,
+    force_rerun: bool = False,
     actor: str,
 ) -> ProductAttributeExtraction:
     """只做付费调用前的校验、幂等裁决与 QUEUED 建行。
 
     调用方必须提交后再投递 Celery。这样 worker 永远不会读到一条尚未提交的
     run，HTTP 超时也不会把已经受理的请求和后续费用证据一起回滚。
+
+    `force_rerun` 只替换已经 COMPLETED 的同身份 run；QUEUED / RUNNING 仍复用，
+    防止双击产生并发付费调用。普通 API 客户端默认 False，只有界面上明确的
+    「启动 / 重新识别」动作传 True。
     """
     return run_extraction(
         session,
@@ -640,6 +676,7 @@ def queue_extraction(
         only_variant_ids=only_variant_ids,
         spu_scope_id=spu_scope_id,
         prepare_only=True,
+        force_rerun=force_rerun,
         actor=actor,
     )
 
@@ -1210,9 +1247,10 @@ def apply_evidence(
     合并规则本身是纯函数(`extractors/merge.py`):来源优先级、加权投票、
     冲突判定、AI 分歧。这里只负责把库里的证据喂进去、把结论写回来。
 
-    权重用的是 `system_confidence` 而**不是模型自报的 confidence** ——
-    未校准时前者是 None(权重 0),于是整组证据的权重和为零,
-    合并结论是 `INSUFFICIENT`,不会硬凑出一个值来。
+    权重用的是 `system_confidence` 而**不是模型自报的 confidence**。未校准时
+    前者是 None：整组都未校准时，合并层只用等权投票选择候选值；这里仍把
+    `system_confidence=None` 交给 `decide_status`，因此只能落 CANDIDATE，
+    绝不会因为模型自报 0.99 就自动确认。
     """
     from app.extractors.merge import EvidenceItem, MergeOutcome, merge_all
 
@@ -1272,9 +1310,9 @@ def apply_evidence(
             EvidenceItem(
                 field_name=ev.field_name,
                 normalized_value=ev.normalized_value,
-                # 未校准 -> None -> 权重 0 -> 合并判 INSUFFICIENT。
-                # 这是 fail closed 在合并层的落点
-                weight=breakdown.value or 0.0,
+                # None 必须原样传。把它压成 0.0 会把「没校准过」误写成
+                # 「已证明权重为零」，导致有效识别连 CANDIDATE 都落不下来。
+                weight=breakdown.value,
                 source=AttributeSource.EXTRACTED.value,
                 media_source=asset.source,
                 media_asset_id=str(asset.id),

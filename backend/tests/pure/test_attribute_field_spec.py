@@ -23,6 +23,7 @@ def test_every_registered_field_reports_a_spec():
         assert spec["value_type"], name
         assert isinstance(spec["multi_value"], bool), name
         assert isinstance(spec["options"], list), name
+        assert isinstance(spec["option_labels"], dict), name
 
 
 def test_multi_value_matches_the_registry_not_a_hand_kept_list():
@@ -80,6 +81,7 @@ def test_unregistered_field_degrades_to_plain_text_instead_of_raising():
         "value_type": "TEXT",
         "multi_value": False,
         "options": [],
+        "option_labels": {},
     }
 
 
@@ -126,3 +128,15 @@ def test_the_spec_out_carries_the_label_so_the_frontend_need_not_keep_a_table():
     """
     for name, field in REGISTRY.items():
         assert field_spec_out(name)["label"] == field.label, name
+
+
+def test_every_enum_option_has_a_chinese_interface_label():
+    """英文编码可以存库，但运营下拉框必须有完整中文词表。"""
+    for name, field in REGISTRY.items():
+        if field.enum is None:
+            continue
+        spec = field_spec_out(name)
+        assert set(spec["option_labels"]) == set(spec["options"]), name
+        for value, label in spec["option_labels"].items():
+            assert label, f"{name}.{value}: 中文文案为空"
+            assert not label.isascii(), f"{name}.{value}: 仍显示英文编码"
