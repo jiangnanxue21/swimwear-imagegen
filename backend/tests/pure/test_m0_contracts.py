@@ -277,6 +277,7 @@ def test_registry_rejects_self_inconsistent_fields():
         ValueError,
         AttributeField,
         name="bad",
+        label="占位",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
     )
@@ -285,6 +286,7 @@ def test_registry_rejects_self_inconsistent_fields():
         ValueError,
         AttributeField,
         name="bad2",
+        label="占位",
         owner_type=OwnerType.SPU,
         value_type=ValueType.TEXT,
         visual=False,
@@ -295,6 +297,7 @@ def test_registry_rejects_self_inconsistent_fields():
         ValueError,
         AttributeField,
         name="bad3",
+        label="占位",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=NecklineType,

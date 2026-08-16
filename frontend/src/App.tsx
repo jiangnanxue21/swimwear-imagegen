@@ -157,7 +157,7 @@ export const NAV: NavGroup[] = [
       { key: '/dashboard', label: '指标仪表盘', icon: <DashboardOutlined /> },
       { key: '/spend', label: '付费调用花费', icon: <WalletOutlined /> },
       { key: '/model-templates', label: '模特模板', icon: <TeamOutlined /> },
-      { key: '/providers', label: 'Provider', icon: <ApiOutlined /> },
+      { key: '/providers', label: '出图服务商', icon: <ApiOutlined /> },
       { key: '/prompts', label: '提示词', icon: <FileTextOutlined /> },
       { key: '/settings', label: '设置', icon: <SettingOutlined /> },
       { key: '/audit', label: '操作审计', icon: <HistoryOutlined /> },

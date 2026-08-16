@@ -21,7 +21,7 @@ interface ScoringStatusProps {
   onRetryAttempts: () => void
 }
 
-/** 任务详情里的评分总览；成功评分和失败调用刻意分成两份事实。 */
+/** 任务详情里的评分总览;成功评分和失败调用刻意分成两份事实。 */
 export function ScoringStatusCard(props: ScoringStatusProps) {
   const empty = !props.evaluationsLoading && !props.attemptsLoading
     && props.evaluationCount === 0 && props.attemptCount === 0
@@ -33,7 +33,7 @@ export function ScoringStatusCard(props: ScoringStatusProps) {
       title={`大模型评分 · 成功 ${props.evaluationCount} 条 / 调用 ${props.attemptCount} 次`}
     >
       <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        <span>图片下载完成后评分会自动执行；成功分数与失败调用分开留痕，下面两类记录都能排查。</span>
+        <span>图片下载完成后评分会自动执行;成功分数与失败调用分开留痕,下面两类记录都能排查。</span>
         {Boolean(props.evaluationsError) && (
           <ErrorNotice
             title="拉不到成功评分记录"
@@ -54,10 +54,10 @@ export function ScoringStatusCard(props: ScoringStatusProps) {
           <Alert
             type={props.taskStatus === 'SCORING' ? 'info' : 'warning'}
             showIcon
-            message={props.taskStatus === 'SCORING' ? '评分正在执行，暂时还没有落库记录' : '这个任务没有评分记录'}
+            message={props.taskStatus === 'SCORING' ? '评分正在执行,暂时还没有落库记录' : '这个任务没有评分记录'}
             description={props.taskStatus === 'SCORING'
               ? '本页会自动刷新。'
-              : '系统既没有返回成功评分，也没有返回评分调用留痕；请结合任务状态和 worker 日志判断是否尚未走到评分。'}
+              : '系统既没有返回成功评分,也没有返回评分调用留痕;请结合任务状态与后台执行进程的日志,判断是不是还没走到评分这一步。'}
           />
         )}
       </Space>
@@ -102,12 +102,12 @@ const columns: ColumnsType<EvaluationAttempt> = [
     ),
   },
   {
-    title: '耗时 / Token', key: 'usage', width: 130,
+    title: '耗时 / Token 用量', key: 'usage', width: 130,
     render: (_, row) => (
       <Space direction="vertical" size={0}>
         <span>{row.duration_ms === null ? '—' : `${(row.duration_ms / 1000).toFixed(1)}s`}</span>
         <span style={{ color: brandVars.textMuted, fontSize: fontScale.meta }}>
-          {row.total_tokens === null ? 'Token —' : `${row.total_tokens} Token`}
+          {row.total_tokens === null ? 'Token 未记录' : `${row.total_tokens} Token`}
         </span>
       </Space>
     ),
@@ -118,7 +118,7 @@ const columns: ColumnsType<EvaluationAttempt> = [
       <Space direction="vertical" size={0}>
         <span>{row.http_status === null ? 'HTTP —' : `HTTP ${row.http_status}`}</span>
         <span className="mono" style={{ color: brandVars.textMuted, fontSize: fontScale.meta }}>
-          {row.response_id || 'response id —'}
+          {row.response_id || '无响应编号'}
         </span>
       </Space>
     ),

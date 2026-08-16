@@ -87,7 +87,7 @@ export default function TasksTab({ productId }: { productId: string }) {
         <Tag color={TASK_STATUS_LABEL[s]?.color}>{TASK_STATUS_LABEL[s]?.text ?? s}</Tag>
       ),
     },
-    { title: 'Provider', dataIndex: 'provider', width: 100 },
+    { title: '服务商', dataIndex: 'provider', width: 100 },
     {
       title: '轮次',
       key: 'progress',

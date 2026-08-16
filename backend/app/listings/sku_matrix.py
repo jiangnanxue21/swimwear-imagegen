@@ -144,9 +144,27 @@ class PlannedSku:
 
 
 def normalize_code(
-    value: str | None, *, field: str, max_length: int, allow_separator: bool = False
+    value: str | None,
+    *,
+    field: str,
+    label: str | None = None,
+    max_length: int,
+    allow_separator: bool = False,
 ) -> str:
     """把一段编码归一化成规范形式,不合法就抛。
+
+    ## `field` 与 `label` 是两样东西(A52)
+
+        field   机器用的定位符,进 `SkuPlanError.field`,由
+                `spu_service._api_loc()` 翻成表单认得的 `loc`
+        label   人看的那个名字,拼进消息正文
+
+    上一版只有 `field`,而消息是 `f"{field} 不能为空"` —— 于是运营看到的是
+    「variant_codes[0] 含不允许的字符」:一个他在界面上根本找不到的词。
+    位置这件事已经由 `loc` 表达了(而且表达得更准:它能直接高亮到那一行),
+    消息正文再重复一遍内部形参名,只是把噪音塞给了唯一读它的人。
+
+    `label` 默认取 `field`,所以没跟上的调用点行为不变 —— 但新调用点应当给。
 
     `allow_separator` 只对 SPU 编码开(见模块文档)。默认关掉,所以新写的
     调用点得**显式**说"我这一段允许横线" —— 反过来(默认允许、需要时收紧)
@@ -156,18 +174,19 @@ def normalize_code(
     悄悄把 `BLK-1` 变成 `BLK1` 之后,运营看到的 SKU 和他填的不一样,
     而他不会收到任何提示 —— 那比直接报错难查得多。
     """
+    name = label or field
     text = (value or "").strip().upper()
     if not text:
-        raise SkuPlanError(field, f"{field} 不能为空")
+        raise SkuPlanError(field, f"{name}不能为空")
     if len(text) > max_length:
-        raise SkuPlanError(field, f"{field} 最长 {max_length} 个字符,当前 {len(text)}")
+        raise SkuPlanError(field, f"{name}最长 {max_length} 个字符,当前 {len(text)}")
     if SEPARATOR in text and not allow_separator:
         # 单独报这一条,不和"非法字符"合并:分隔符是**最可能**被填进来的那个,
         # 而且原因不显然(见模块文档)。合并之后运营只会看到"含非法字符",
         # 然后把 `SPU-SW-001` 里的横线也一起删掉。
         raise SkuPlanError(
             field,
-            f"{field} 里不能含 {SEPARATOR!r} —— 它是 SKU 编码的分段分隔符。"
+            f"{name}里不能含 {SEPARATOR!r} —— 它是 SKU 编码的分段分隔符。"
             f"只有 SPU 编码那一段允许含它(那一段在拼出来的 SKU 里排最前,"
             f"从右边数得出边界);颜色与尺码含它会让两个不同的商品拼出同一个 SKU",
         )
@@ -176,7 +195,7 @@ def normalize_code(
         # 仍然切得开。它挡的是手滑:多打一个横线不会有任何下游报错,
         # 只会让每一行 SKU 都长一个双横线,而那时已经建了九行
         raise SkuPlanError(
-            field, f"{field} 不能以 {SEPARATOR!r} 开头或结尾(多半是多打了一个)"
+            field, f"{name}不能以 {SEPARATOR!r} 开头或结尾(多半是多打了一个)"
         )
     allowed = _ALLOWED_IN_SPU_CODE if allow_separator else _ALLOWED
     illegal = sorted(set(text) - allowed)
@@ -184,7 +203,7 @@ def normalize_code(
         extra = f" {SEPARATOR}" if allow_separator else ""
         raise SkuPlanError(
             field,
-            f"{field} 含不允许的字符 {''.join(illegal)!r}(只允许 A-Z 0-9 _{extra})",
+            f"{name}含不允许的字符 {''.join(illegal)!r}(只允许 A-Z 0-9 _{extra})",
         )
     return text
 
@@ -197,7 +216,11 @@ def normalize_spu_code(value: str | None) -> str:
     NameError,不是"某个入口悄悄比别的严一点"。
     """
     return normalize_code(
-        value, field="spu_code", max_length=MAX_SPU_CODE, allow_separator=True
+        value,
+        field="spu_code",
+        label="SPU 编码",
+        max_length=MAX_SPU_CODE,
+        allow_separator=True,
     )
 
 
@@ -255,7 +278,13 @@ def normalize_variant_codes(
     normalized: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(variant_codes):
-        code = normalize_code(raw, field=f"variant_codes[{index}]", max_length=MAX_VARIANT_CODE)
+        code = normalize_code(
+            raw,
+            field=f"variant_codes[{index}]",
+            # 行号从 1 数:表单上那一行的序号是 1,不是 0
+            label=f"第 {index + 1} 行的颜色编码",
+            max_length=MAX_VARIANT_CODE,
+        )
         if code in seen:
             raise SkuPlanError(
                 f"variant_codes[{index}]",

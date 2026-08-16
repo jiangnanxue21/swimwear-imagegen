@@ -96,6 +96,11 @@ class ChannelFieldSpec:
         review_checks             本受众的重点检查区域(§14/§19)。审阅页的
                                   `review_focus` 从这里下发,**前端不许自己
                                   维护一份受众到检查项的映射**
+        review_check_labels       上面那些键的中文名。和键放同一个文件,
+                                  是为了让"加一个检查项忘了给中文名"在**同一屏**
+                                  上看得见 —— 分到 Python 里的话,漏掉的表现是
+                                  审阅页上冒出一个 `waistband_type`,而没有任何
+                                  东西会叫一声(`spec_loader` 的加载期校验会)
     """
 
     channel: str
@@ -109,6 +114,15 @@ class ChannelFieldSpec:
     audience: str | None = None
     enabled_hard_fail_codes: tuple[str, ...] = ()
     review_checks: tuple[str, ...] = ()
+    review_check_labels: Mapping[str, str] = field(default_factory=dict)
+
+    def review_focus(self) -> tuple[str, ...]:
+        """重点检查区域的**中文名**,按 spec 里的顺序。
+
+        查不到中文名时回落成键本身:少一条翻译的表现应该是界面上出现一个
+        英文词(看得见、查得出),而不是那一项凭空消失。
+        """
+        return tuple(self.review_check_labels.get(c, c) for c in self.review_checks)
 
     def todos(self) -> tuple[FieldSpec, ...]:
         return tuple(f for f in (*self.header_fields, *self.row_fields) if f.is_todo)

@@ -255,7 +255,27 @@ def load_spec_dict(
         audience=audience,
         enabled_hard_fail_codes=enabled_codes,
         review_checks=tuple(str(c) for c in (data.get("review_checks") or ())),
+        review_check_labels={
+            str(k): str(v) for k, v in (data.get("review_check_labels") or {}).items()
+        },
     )
+
+    # 重点检查项没有中文名 -> **加载期直接拒**,不留到运行期。
+    #
+    # 运行期的表现是审阅页上冒出一个 `waistband_type`,而那正是这一条要防的
+    # 东西;它还不会报错,所以没有人会发现。这与本模块顶部那句"解析不了的
+    # source 在运行期只是'这个字段是空的'"是同一条理由。
+    #
+    # 只对**声明了 review_checks 的包**生效:legacy 的 swimwear.yaml 一条都没有,
+    # 空集合天然满足。
+    untranslated = [c for c in spec.review_checks if c not in spec.review_check_labels]
+    if untranslated:
+        raise ChannelSpecError(
+            "spec 的 review_checks 有条目没给中文名,拒绝加载",
+            code=ErrorCode.CHANNEL_SPEC_INCOMPLETE,
+            channel=channel,
+            untranslated_checks=untranslated[:10],
+        )
 
     todos = spec.todos()
     if todos and not allow_todo:

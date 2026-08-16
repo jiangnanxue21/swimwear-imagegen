@@ -49,7 +49,7 @@ const DAY_VALUES = DAY_OPTIONS.map((o) => o.value)
  * `page_size: int = Query(default=50, ge=1, le=200)`,守卫盯着「≤ 后端 le=」。
  */
 const PAGE_SIZES = [20, 50, 100, 200] as const
-/** codec 与分页回调共用同一份白名单和默认值，不能在调用点再抄一份。 */
+/** codec 与分页回调共用同一份白名单和默认值,不能在调用点再抄一份。 */
 const pageSizeParam = oneOfParam(50, PAGE_SIZES)
 
 export default function AuditLogPage() {
@@ -254,7 +254,7 @@ export default function AuditLogPage() {
           showSizeChanger: true,
           pageSizeOptions: PAGE_SIZES.map(String),
           showTotal: (total) => `共 ${total} 条`,
-          // antd 回传裸 number；运行期收窄由持有白名单的 codec 负责。
+          // antd 回传裸 number;运行期收窄由持有白名单的 codec 负责。
           onChange: (nextPage, nextSize) =>
             filters.patch({
               page: nextPage,

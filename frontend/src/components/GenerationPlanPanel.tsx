@@ -191,7 +191,7 @@ export default function GenerationPlanPanel({
         dataIndex: 'color_variant_id',
         render: (value: string | null) => scopeLabel(value),
       },
-      { title: 'Provider', dataIndex: 'provider' },
+      { title: '出图服务商', dataIndex: 'provider' },
       {
         title: '角度',
         dataIndex: 'angles_json',
@@ -335,8 +335,8 @@ export default function GenerationPlanPanel({
                 // 两者相反 —— a28 的 FE-GLOBAL-03 说的就是这一档。
                 `模特列表没有拉到(${readError(templates.error)}),下面是空的不代表没有模特`
               : productAudience
-                ? `候选集已按商品受众(${AUDIENCE_LABEL[productAudience]})收窄`
-                : '商品受众未确认,候选集没有收窄 —— 选出来的模特可能不匹配'
+                ? `候选模特已按商品受众(${AUDIENCE_LABEL[productAudience]})筛过`
+                : '商品受众未确认,候选模特没有按受众筛过 —— 选出来的可能不匹配'
           }
         >
           <Select
@@ -362,12 +362,12 @@ export default function GenerationPlanPanel({
         </Form.Item>
         <Form.Item
           name="provider"
-          label="Provider"
+          label="出图服务商"
           rules={[{ required: true }]}
           extra={
             providers.isError
               ? // 拉失败与"一个都不可用"必须分开说 —— 同上面模特那一处
-                `Provider 列表没拉到(${readError(providers.error)}),下面是空的不代表没有可用的`
+                `服务商列表没拉到(${readError(providers.error)}),下面是空的不代表没有可用的`
               : undefined
           }
         >

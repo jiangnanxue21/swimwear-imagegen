@@ -27,6 +27,7 @@ import {
   MISSING_REASON_ACTION,
   RUN_STATUS_LABEL,
   RUN_STATUS_NOTICE,
+  attributeLabel,
   attributesApi,
   factsStale,
   type AttributeFieldSpec,
@@ -141,7 +142,7 @@ function unknownValueFor(
     }
   }
   if (spec.options.length && !spec.options.includes('UNKNOWN')) {
-    return { allowed: false, why: '这个枚举没有 UNKNOWN 取值,提交会被后端拒绝' }
+    return { allowed: false, why: '这个字段的取值表里没有「未知」这一档,提交会被后端拒绝' }
   }
   return { allowed: true, value: 'UNKNOWN' }
 }
@@ -233,7 +234,7 @@ export default function AttributeTab({
     queryKey: ['extraction', lastExtractionId],
     queryFn: () => attributesApi.extraction(lastExtractionId as string),
     enabled: Boolean(lastExtractionId),
-    // 是否还会变化由后端 `can_cancel` 给，不在前端维护第二份终态表。
+    // 是否还会变化由后端 `can_cancel` 给,不在前端维护第二份终态表。
     refetchInterval: (query) => query.state.data?.can_cancel ? 2000 : false,
   })
 
@@ -286,7 +287,7 @@ export default function AttributeTab({
   const cancelExtraction = useMutation({
     mutationFn: () => attributesApi.cancel(lastExtractionId as string),
     onSuccess: (result) => {
-      message.warning('已请求中止；正在执行的单张调用完成后会停下')
+      message.warning('已请求中止;正在执行的单张调用完成后会停下')
       queryClient.setQueryData(['extraction', result.id], result)
     },
     onError: onWriteError,
@@ -334,6 +335,21 @@ export default function AttributeTab({
    * 本批加了第三个消费点(`stale`),把这条一起收掉。
    */
   const rows = useMemo(() => values.data ?? [], [values.data])
+  /*
+   * 字段名 -> 中文名。词表的唯一来源是后端注册表(每行的 `spec.label`),
+   * 前端不另存一张表 —— 存一张的下场是它和注册表分叉,而分叉的表现是
+   * 同一个字段在属性表里叫「主色」、在缺证据提示里叫 `primary_color`。
+   *
+   * 证据行(`Evidence`)上没有 `spec`,所以由这里按属性表建一次词表递下去。
+   * 查不到就回落成字段名本身。
+   */
+  const labelOf = useCallback(
+    (fieldName: string) => {
+      const hit = rows.find((r) => r.field_name === fieldName)
+      return hit ? attributeLabel(hit) : fieldName
+    },
+    [rows],
+  )
   const conflicts = useMemo(() => rows.filter((r) => r.status === 'CONFLICT'), [rows])
   /**
    * 样品已变的事实(§5.3 / AC-21)。**判定整个在后端**(硬规则 4)——
@@ -451,7 +467,24 @@ export default function AttributeTab({
   }
 
   const columns: ColumnsType<AttributeValue> = [
-    { title: '属性', dataIndex: 'field_name', width: 150, render: (v: string) => <span className="mono">{v}</span> },
+    {
+      // 中文名在主位,字段名压成第二行的小字。
+      //
+      // **两个都要**:运营读的是「主色」,而报障、搜后端日志、对 spec
+      // 用的是 `primary_color` —— 只留中文那一半的话,他描述得出问题
+      // 却指不出是哪个字段
+      title: '属性',
+      dataIndex: 'field_name',
+      width: 170,
+      render: (_: string, row) => (
+        <Space direction="vertical" size={0}>
+          <span>{attributeLabel(row)}</span>
+          <span className="mono" style={{ color: brandVars.textMuted, fontSize: fontScale.meta }}>
+            {row.field_name}
+          </span>
+        </Space>
+      ),
+    },
     {
       title: '当前值 / AI 建议',
       key: 'value',
@@ -676,14 +709,17 @@ export default function AttributeTab({
       )}
 
       {/* 排在冲突之后、结果表之前:它解释的是表里那几行**为什么是空的** */}
-      <MissingEvidenceNotice evidence={lastExtraction.data?.evidence ?? []} />
+      <MissingEvidenceNotice
+        evidence={lastExtraction.data?.evidence ?? []}
+        labelOf={labelOf}
+      />
 
       {Boolean(lastExtraction.data?.failed_scopes.length) && (
         <Alert
           type="warning"
           showIcon
           message={`${lastExtraction.data?.failed_scopes.length} 个颜色本轮全部失败`}
-          description="再次识别只会重跑这些颜色，不会为已经成功的颜色重复付费。"
+          description="再次识别只会重跑这些颜色,不会为已经成功的颜色重复付费。"
         />
       )}
 
@@ -767,7 +803,14 @@ export default function AttributeTab({
  * 不做成 error —— 它不是缺陷,是模型如实报告的一次"我不知道",
  * 而"如实说不知道"正是 §4.5 想要的行为;报成红色会训练运营忽略它。
  */
-function MissingEvidenceNotice({ evidence }: { evidence: Evidence[] }) {
+function MissingEvidenceNotice({
+  evidence,
+  labelOf,
+}: {
+  evidence: Evidence[]
+  /** 字段名 -> 中文名。证据行上没有 `spec`,所以词表由属性表那边递进来 */
+  labelOf: (fieldName: string) => string
+}) {
   const byReason = useMemo(() => {
     const groups = new Map<string, Set<string>>()
     for (const item of evidence) {
@@ -779,9 +822,11 @@ function MissingEvidenceNotice({ evidence }: { evidence: Evidence[] }) {
     }
     return [...groups.entries()].map(([reason, fields]) => ({
       reason,
-      fields: [...fields].sort(),
+      // 按**字段名**排序再翻译:排中文名的话,同一组字段在两次识别之间
+      // 可能换一次序,看起来像有东西变了
+      fields: [...fields].sort().map(labelOf),
     }))
-  }, [evidence])
+  }, [evidence, labelOf])
 
   if (!byReason.length) return null
 
@@ -826,7 +871,7 @@ function EvidenceModal({ row, onClose }: { row: AttributeValue | null; onClose: 
   return (
     <Modal
       open={Boolean(row)}
-      title={row ? `证据 · ${row.field_name}` : '证据'}
+      title={row ? `证据 · ${attributeLabel(row)}` : '证据'}
       footer={null}
       width={640}
       onCancel={onClose}

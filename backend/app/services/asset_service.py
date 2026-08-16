@@ -61,6 +61,30 @@ def _find_same(
     )
 
 
+def _shadow(
+    session: Session,
+    product: Product,
+    asset: ProductAsset,
+    *,
+    color_variant_id: UUID | None,
+) -> None:
+    """影子写(迁移 A,§4.4)。**同事务,不自己 commit。**
+
+    分两个事务写的话,业务提交成功而影子写失败时两边会永久不一致,而且没有
+    任何东西会发现 —— 对账要到迁移 B 才上线。所以它失败就让整笔上传失败:
+    迁移期的正确性比可用性重要,一个静默失败的影子写会产出一个"看起来成功"
+    的迁移,而它要到切换读路径那天才暴露。
+
+    抽成函数是因为**两条路径都要走它**:新建那条,和去重命中那条。
+    命中那条以前直接 return,理由见 `upload_asset` 里那段注释。
+    """
+    from app.media import service as media_service
+
+    media_service.shadow_from_product_asset(
+        session, product, asset, color_variant_id=color_variant_id
+    )
+
+
 def upload_asset(
     session: Session,
     *,
@@ -94,7 +118,18 @@ def upload_asset(
 
     existing = _find_same(session, product.id, file_hash, asset_type)
     if existing is not None:
-        # 同一商品、同一文件、**同一角色**重复上传:返回已有记录,不新增、不覆盖
+        # 同一商品、同一文件、**同一角色**重复上传:返回已有记录,不新增、不覆盖。
+        #
+        # **但影子写照跑一遍。** 这里原来直接 return,于是"删掉再传回来"是一个
+        # 死胡同:`ProductAsset` 这条老记录从来不软删,所以第二次上传永远命中
+        # 这一支;而素材侧那条 `MediaAsset` 是 DELETED 的,谁也不会去动它。
+        # 运营看到「已存在,沿用已有素材」,素材列表里一张图都不多,
+        # 而同一张图从此再也传不上来 —— 提示说的是成功,发生的是什么都没发生。
+        #
+        # `shadow_from_product_asset` 在正常重复上传下是幂等的(`ingest` 命中
+        # 去重、不覆盖任何字段),所以这一跳的代价只有一次查询;
+        # 而它换来的是那条已删除素材被这次上传复活。
+        _shadow(session, product, existing, color_variant_id=color_variant_id)
         return existing, True
 
     stored = storage.save(
@@ -143,11 +178,7 @@ def upload_asset(
     # 而且没有任何东西会发现 —— 对账要到迁移 B 才上线。所以它失败就让
     # 整笔上传失败:迁移期的正确性比可用性重要,一个静默失败的影子写
     # 会产出一个"看起来成功"的迁移,而它要到切换读路径那天才暴露。
-    from app.media import service as media_service
-
-    media_service.shadow_from_product_asset(
-        session, product, asset, color_variant_id=color_variant_id
-    )
+    _shadow(session, product, asset, color_variant_id=color_variant_id)
 
     product_service.refresh_status_after_asset_change(session, product)
 

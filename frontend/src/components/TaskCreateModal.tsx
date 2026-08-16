@@ -245,7 +245,7 @@ export default function TaskCreateModal({
           message="下拉选项没有取全,先不要提交"
           description={
             <>
-              {providers.isError && <div>Provider 列表没拉到 —— 选项里缺哪几家现在不知道。</div>}
+              {providers.isError && <div>服务商列表没拉到 —— 选项里缺哪几家现在不知道。</div>}
               {templates.isError && <div>模特模板没拉到 —— 不代表没有模板。</div>}
               {products.isError && <div>商品列表没拉到。</div>}
               {/*
@@ -261,7 +261,7 @@ export default function TaskCreateModal({
               {effectivePlan.isError && (
                 <div>
                   出图方案没解析出来 —— <b>不知道这次会按什么参数出图</b>。
-                  有方案时 Provider、模特与角度由方案决定,现在这几项显示的不是最终值。
+                  有方案时,服务商、模特与角度由方案决定,现在这几项显示的不是最终值。
                 </div>
               )}
               <div>建任务会调用付费接口,请刷新后再提交。</div>
@@ -318,7 +318,7 @@ export default function TaskCreateModal({
                   },
                   {
                     key: 'provider',
-                    label: 'Provider',
+                    label: '出图服务商',
                     children: <span className="mono">{plan.provider || '未指定'}</span>,
                   },
                   {
@@ -374,7 +374,7 @@ export default function TaskCreateModal({
             showIcon
             style={{ marginBottom: 12 }}
             message="这件商品的受众还没确认"
-            description="模特候选集因此没有按受众收窄。先去商品资料确认受众,选出来的模特才是对的。"
+            description="模特候选因此没有按受众筛过。先去商品资料确认受众,选出来的模特才是对的。"
           />
         )}
 
@@ -394,7 +394,7 @@ export default function TaskCreateModal({
             planGoverns && plan?.model_template_id
               ? '方案已经指定了模特 —— 这一项由方案决定,选了不算数'
               : productAudience
-                ? `候选集已按商品受众(${AUDIENCE_LABEL[productAudience]})收窄:受众不匹配的模特不会出现在这里`
+                ? `候选模特已按商品受众(${AUDIENCE_LABEL[productAudience]})筛过:受众不匹配的不会出现在这里`
                 : '虚拟试穿必须选一个模特模板。商品自带的「模特参考图」不能直接用 —— 那张图没有受众、年龄与授权记录,合规检查无从执行'
           }
         >
@@ -482,12 +482,12 @@ export default function TaskCreateModal({
 
                     <Form.Item
                       name="provider"
-                      label="Provider"
+                      label="出图服务商"
                       extra={
                         planGoverns
-                          ? '方案指定了 Provider —— 这里选什么都会按方案执行,并在审计里留痕'
+                          ? '方案已经指定了服务商 —— 这里选什么都会按方案执行,并在审计里留痕'
                           : usable.length < (providers.data?.length ?? 0)
-                            ? '未配置或尚未实现的 Provider 不可选'
+                            ? '未配置或尚未实现的服务商不可选'
                             : undefined
                       }
                     >
@@ -514,7 +514,7 @@ export default function TaskCreateModal({
                       <Form.Item name="max_rounds" label="最多轮次" style={{ width: '33%', marginRight: 8 }}>
                         <InputNumber min={1} max={10} style={{ width: '100%' }} />
                       </Form.Item>
-                      <Form.Item name="base_seed" label="基础 seed" style={{ width: '34%' }}>
+                      <Form.Item name="base_seed" label="基础随机种子" style={{ width: '34%' }}>
                         <InputNumber min={0} placeholder="留空随机" style={{ width: '100%' }} />
                       </Form.Item>
                     </Space.Compact>
@@ -524,7 +524,7 @@ export default function TaskCreateModal({
                       label="提示词"
                       extra={
                         planGoverns
-                          ? '方案的场景、姿势与角度会接在这句话后面一起发给 Provider'
+                          ? '方案的场景、姿势与角度会接在这句话后面,一起发给服务商'
                           : undefined
                       }
                     >
@@ -537,7 +537,7 @@ export default function TaskCreateModal({
                           name="mock_outcome"
                           label="模拟生成结果"
                           style={{ width: '50%', marginRight: 8 }}
-                          extra="演练 Provider 失败分支"
+                          extra="演练服务商的各种失败分支"
                         >
                           <Select options={MOCK_OUTCOMES} />
                         </Form.Item>

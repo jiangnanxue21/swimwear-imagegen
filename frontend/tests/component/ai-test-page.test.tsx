@@ -86,7 +86,7 @@ describe('AI 能力测试页', () => {
     expect(screen.getByRole('heading', { name: 'AI 能力测试' })).toBeInTheDocument()
     expect(screen.getByText('出图后大模型评分')).toBeInTheDocument()
     expect(screen.getByText('标题与描述生成')).toBeInTheDocument()
-    expect(screen.getByText(/评分会留下 diagnostic 调用记录/)).toBeInTheDocument()
+    expect(screen.getByText(/评分会留下一条标为「诊断」的调用记录/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /开始评分测试/ })).toBeDisabled()
     expect(screen.getByRole('button', { name: /开始文案测试/ })).toBeDisabled()
     await waitFor(() => expect(generationMocks.list).toHaveBeenCalled())
@@ -99,7 +99,7 @@ describe('AI 能力测试页', () => {
 
     expect(await screen.findByRole('img', { name: '第 1 轮候选图 1 缩略图' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('radio', { name: '第 1 轮候选图 1' }))
-    fireEvent.click(screen.getByText(/若当前评分器为真实模型/))
+    fireEvent.click(screen.getByText(/当前评分器如果是真实模型/))
     fireEvent.click(screen.getByRole('button', { name: /开始评分测试/ }))
 
     await waitFor(() => expect(evaluationMocks.testCandidate).toHaveBeenCalledWith(candidateId, true))
@@ -113,7 +113,7 @@ describe('AI 能力测试页', () => {
     fireEvent.mouseDown(await screen.findByRole('combobox', { name: '生成任务' }))
     fireEvent.click(await screen.findByText(/11111111 · mock · COMPLETED/))
     fireEvent.click(await screen.findByRole('radio', { name: '第 1 轮候选图 1' }))
-    fireEvent.click(screen.getByText(/若当前评分器为真实模型/))
+    fireEvent.click(screen.getByText(/当前评分器如果是真实模型/))
     fireEvent.click(screen.getByRole('button', { name: /开始评分测试/ }))
 
     expect(await screen.findByText(/评分模型正在处理 · 已等待/)).toBeInTheDocument()

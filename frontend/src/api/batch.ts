@@ -597,9 +597,19 @@ export interface SpuGroup {
    */
   blocked_steps: Record<string, number>
   variants: Record<string, string[]>
-  common: { field_name: string; value: string | null }[]
+  /**
+   * `field_label` 是界面主位显示的那个名字(后端注册表的中文名),
+   * `field_name` 留着是给报障与查日志用的 —— **两个都要**,
+   * 只留中文的话运营描述得出问题却指不出是哪个字段。
+   * 后端没升级时 `field_label` 缺席,按 `field_name` 兜底。
+   */
+  common: { field_name: string; field_label?: string; value: string | null }[]
   /** 本该一致却不一致的公共属性。**这是要人处理的那一列** */
-  inconsistent: { field_name: string; values: { value: string; skus: string[] }[] }[]
+  inconsistent: {
+    field_name: string
+    field_label?: string
+    values: { value: string; skus: string[] }[]
+  }[]
   skus: SpuSkuRow[]
 }
 

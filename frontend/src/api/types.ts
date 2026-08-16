@@ -99,6 +99,40 @@ export const GARMENT_TYPES = [
 ] as const
 
 /**
+ * 品类中文名。**下拉框和筛选器一律读这张表,不要直接把枚举值渲染出去** ——
+ * 运营看到的应该是「三角泳裤」,不是 `SWIM_BRIEFS`。
+ *
+ * 有几个品类没有稳定的中文行业词(坦基尼、冲浪裤这类音译或外来词),
+ * 保留英文原名并加中文限定语,而不是硬翻一个没人用的词:
+ * 「坦基尼(TANKINI)」找得到货,「分体背心式泳衣」找不到。
+ */
+export const GARMENT_TYPE_LABEL: Record<string, string> = {
+  // 女装(§2.2)
+  ONE_PIECE: '连体泳衣',
+  BIKINI_TOP: '比基尼上衣',
+  BIKINI_BOTTOM: '比基尼下装',
+  BIKINI_SET: '比基尼套装',
+  TANKINI: '坦基尼(TANKINI)',
+  COVER_UP: '罩衫 / 沙滩外搭',
+  DRESS: '泳裙',
+  TOP: '上衣',
+  // 男装(§2.2)
+  SWIM_SHORTS: '平角泳裤 / 沙滩裤',
+  BOARDSHORTS: '冲浪裤',
+  SWIM_BRIEFS: '三角泳裤',
+  JAMMERS: '及膝竞速裤',
+  SWIM_TRUNKS_SET: '泳裤套装',
+  // 中性(§2.2)
+  RASH_GUARD: '防晒衣 / 水母衣',
+  OTHER: '其它',
+}
+
+/** 品类下拉选项。带中文名,顺序与 `GARMENT_TYPES` 一致。 */
+export function garmentTypeOptions(values: readonly string[]) {
+  return values.map((v) => ({ value: v, label: GARMENT_TYPE_LABEL[v] ?? v }))
+}
+
+/**
  * 受众(PRD v2 §2.3)。**取值和文案都来自后端**,前端只展示。
  *
  * `null` = 待确认,不是 UNISEX(§3.4 规则 3)—— UNISEX 是一个明确的
@@ -173,7 +207,28 @@ export const PATTERN_TYPES = [
   'TIE_DYE', 'COLOR_BLOCK', 'PRINT_LOGO', 'OTHER',
 ] as const
 
+/** 图案类型中文名。与 `GARMENT_TYPE_LABEL` 同一条规矩:不要渲染枚举值。 */
+export const PATTERN_TYPE_LABEL: Record<string, string> = {
+  SOLID: '纯色',
+  STRIPE: '条纹',
+  FLORAL: '花卉',
+  ANIMAL: '动物纹',
+  GEOMETRIC: '几何图形',
+  TIE_DYE: '扎染',
+  COLOR_BLOCK: '撞色拼接',
+  PRINT_LOGO: '印花 / 标识',
+  OTHER: '其它',
+}
+
 export const COMPLEXITIES = ['SIMPLE', 'MEDIUM', 'COMPLEX', 'UNKNOWN'] as const
+
+/** 款式复杂度中文名。UNKNOWN 说「未评估」而不是「未知」—— 它是没人填过,不是查不到。 */
+export const COMPLEXITY_LABEL: Record<string, string> = {
+  SIMPLE: '简单',
+  MEDIUM: '中等',
+  COMPLEX: '复杂',
+  UNKNOWN: '未评估',
+}
 
 /**
  * 商品字段长度上限。与后端 `app/core/field_limits.py` 的 PRODUCT_FIELD_LIMITS
@@ -350,6 +405,21 @@ export interface Candidate {
   url: string
 }
 
+/**
+ * 候选图状态(后端 `CandidateStatus`)。
+ *
+ * `REJECTED` 说「已淘汰」不说「已拒绝」:淘汰它的多半是评分器,不是人 ——
+ * 「拒绝」会让运营以为某个同事按过退回,然后去找那个人。
+ */
+export const CANDIDATE_STATUS_LABEL: Record<string, string> = {
+  PENDING: '待下载',
+  DOWNLOADED: '已下载',
+  DOWNLOAD_FAILED: '下载失败',
+  SCORED: '已评分',
+  SELECTED: '已选用',
+  REJECTED: '已淘汰',
+}
+
 export interface TaskDetail extends Task {
   attempts: Attempt[]
   candidates: Candidate[]
@@ -451,6 +521,17 @@ export const MOCK_OUTCOMES = [
 ]
 
 export const POSES = ['STANDING_FRONT', 'STANDING_BACK', 'THREE_QUARTER', 'SITTING', 'WALKING', 'UNKNOWN'] as const
+
+/** 模特姿势中文名。UNKNOWN 在这里是「不限」——建模特时不填 = 由生成方案决定。 */
+export const POSE_LABEL: Record<string, string> = {
+  STANDING_FRONT: '正面站姿',
+  STANDING_BACK: '背面站姿',
+  THREE_QUARTER: '四分之三侧身',
+  SITTING: '坐姿',
+  WALKING: '行走',
+  UNKNOWN: '不限',
+}
+
 /**
  * 体型全集。**展示与筛选请用 `BODY_TYPES_BY_AUDIENCE`**(§10.4):
  * 这张全集表里 CURVY 只对女装有意义、REGULAR/MUSCULAR 只对男装有意义。
@@ -458,6 +539,21 @@ export const POSES = ['STANDING_FRONT', 'STANDING_BACK', 'THREE_QUARTER', 'SITTI
 export const BODY_TYPES = [
   'SLIM', 'STRAIGHT', 'CURVY', 'PLUS', 'ATHLETIC', 'REGULAR', 'MUSCULAR', 'UNKNOWN',
 ] as const
+
+/**
+ * 体型中文名。这张表是**全集**,受众收窄仍然走 `BODY_TYPES_BY_AUDIENCE` ——
+ * 这里给中文名不等于给男装模特开放「丰满」。
+ */
+export const BODY_TYPE_LABEL: Record<string, string> = {
+  SLIM: '纤瘦',
+  STRAIGHT: '直筒',
+  CURVY: '丰满',
+  PLUS: '大码',
+  ATHLETIC: '运动型',
+  REGULAR: '标准',
+  MUSCULAR: '健硕',
+  UNKNOWN: '不限',
+}
 
 // ===== 阶段 4:评分与人工审核 =====
 
@@ -643,8 +739,8 @@ export interface Evaluator {
 /** 分档展示。颜色语义固定:绿=可用,蓝=可修复,橙=需重生,红=淘汰。 */
 export const GRADE_LABEL: Record<Grade, { text: string; color: string; hint: string }> = {
   A: { text: 'A 自动通过', color: 'success', hint: '总分与四项底线全部达标,且无硬错误' },
-  B: { text: 'B 定向重生', color: 'blue', hint: '轻度问题,换 seed / 提示词后有机会达标' },
-  C: { text: 'C 淘汰重生', color: 'orange', hint: '问题明显,需换模特模板甚至换 Provider' },
+  B: { text: 'B 定向重生', color: 'blue', hint: '轻度问题,换随机种子或提示词后有机会达标' },
+  C: { text: 'C 淘汰重生', color: 'orange', hint: '问题明显,需换模特模板甚至换出图服务商' },
   D: { text: 'D 直接淘汰', color: 'error', hint: '低于 55 分或存在硬错误,不进人工审核' },
 }
 
@@ -706,7 +802,7 @@ export const SEVERITY_LABEL: Record<ProblemSeverity, { text: string; color: stri
 export const RECOMMENDED_ACTION_LABEL: Record<RecommendedAction, string> = {
   AUTO_APPROVE: '自动通过',
   REGENERATE_TUNED: '定向重生',
-  REGENERATE_RESEED: '换 seed 重生',
+  REGENERATE_RESEED: '换随机种子重生',
   REJECT: '淘汰该候选',
   MANUAL_REVIEW: '转人工审核',
 }
@@ -721,7 +817,7 @@ export const REVIEW_STATUS_LABEL: Record<ReviewStatus, { text: string; color: st
 
 export const REVIEW_REASON_LABEL: Record<ReviewReason, { text: string; hint: string }> = {
   ROUNDS_EXHAUSTED: { text: '轮次耗尽', hint: '跑满最大轮次仍没有 A 档候选' },
-  PROVIDER_EXHAUSTED: { text: 'Provider 耗尽', hint: '可用 Provider 都试过了' },
+  PROVIDER_EXHAUSTED: { text: '服务商已用尽', hint: '可用的出图服务商都试过了' },
   REQUIRES_HUMAN_ERROR: { text: '需人工处理的错误', hint: '鉴权或内容安全类错误,重试无意义' },
   SPOT_CHECK: { text: '随机抽检', hint: 'A 档抽检,任务已通过,只需事后复核' },
   MANUAL_REQUEST: { text: '人工发起', hint: '由运营主动挂起' },

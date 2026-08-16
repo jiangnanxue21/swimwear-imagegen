@@ -33,6 +33,34 @@ export const SPU_AUDIENCE_LABEL: Record<SpuAudience, string> = {
   UNISEX: '中性',
 }
 
+/**
+ * SPU 生命周期(后端 `SpuStatus`)。
+ *
+ * **和 SKU 的 `STATUS_LABEL` 不是一回事**:那边说的是这行 SKU 的内容生产
+ * 走到哪了,这里说的是这个款还在不在做。文案刻意不撞词 —— 两处都出现
+ * 「草稿」「已归档」的话,同屏看到两个不同含义的同名标签。
+ */
+export const SPU_STATUS_LABEL: Record<string, { text: string; color: string }> = {
+  DRAFT: { text: '建档中', color: 'default' },
+  ACTIVE: { text: '在做', color: 'green' },
+  DISABLED: { text: '已停做', color: 'default' },
+}
+
+/**
+ * 品类键 -> 中文名。**键本身要留在界面上**:它是 `spec/{category_id}.yaml`
+ * 的文件名,排查渠道字段问题时运营要照着它去问。所以是「中文(键)」,
+ * 不是只留中文 —— 只留中文的话,出事时没人说得清该看哪个文件。
+ */
+export const CATEGORY_LABEL: Record<string, string> = {
+  swimwear: '泳装',
+}
+
+/** 品类的展示名。认得的给「中文(键)」,不认得的原样回显。 */
+export function categoryLabel(value: string): string {
+  const zh = CATEGORY_LABEL[value]
+  return zh ? `${zh}(${value})` : value
+}
+
 export interface ColorVariant {
   id: string
   variant_code: string

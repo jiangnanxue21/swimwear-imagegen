@@ -34,18 +34,10 @@
  *
  * ## 这里没有视觉属性字段
  *
- * ## 这里没有视觉属性字段
- *
  * 阶段 1 的验收之一是「不填视觉属性即可建档」。后端的做法不是把那 8 个
  * 字段设成可选,而是让它们在这个接口上根本不存在 —— 可选字段会被前端填成
  * 空串,而空串和"还没识别"在下游是两件事:前者会被当成一个确定的事实。
  * 别在这一页加它们。
- *
- * ## 校验交给后端,不在这里抄一份
- *
- * 编码字符集、重复颜色、行数上限全部住在 `listings/sku_matrix`。抄一份到
- * 这里,它就有了两个版本,然后其中一个先过期 —— `schemas/spu.py` 顶部
- * 记着这类事故的原样。这一页只挡"必填项还空着"这种连请求都发不出去的情况。
  */
 import { useCallback, useMemo, useState } from 'react'
 import {
@@ -211,6 +203,26 @@ export default function SpuCreatePage() {
   const onWriteError = useWriteError(noRefresh, onFields)
 
   /**
+   * 让上一次试算结果作废。
+   *
+   * 试算的输入有三样:SPU 编码、颜色表、尺码模板。**改任何一样,上一份结果
+   * 就不再描述当前这张表了**,而它看起来完全正常 —— 一个不报错的错答案。
+   *
+   * 换模板那一处早就这么做了(理由写在它旁边),而改编码、改颜色行没有。
+   * 差出来的那一格最刺眼:回第一步把编码改掉之后,那条
+   * 「`SW-001` 已经建过了」的警告会挂着**上一个**编码不放 ——
+   * 运营照着它去改一个其实没问题的编码。
+   *
+   * 顺带清 `problems` / `failure`:它们和 `preview` 一样是上一次试算的产物,
+   * 留一半的话页面上会同时有"旧的红框"和"没有结果",而两者说的不是一件事。
+   */
+  const invalidatePreview = useCallback(() => {
+    setPreview(null)
+    setProblems([])
+    setFailure('')
+  }, [])
+
+  /**
    * 试算一次。**每一步的「下一步」都过它**,而不是等到提交。
    *
    * 返回是否通过 —— 调用方据此决定要不要往下走。失败时不抛:
@@ -223,11 +235,29 @@ export default function SpuCreatePage() {
       try {
         const result = await spusApi.preview({
           spu_code: basics.spu_code.trim(),
-          color_variants: colours.map((c) => ({
-            variant_code: c.variant_code.trim(),
-            working_name: c.working_name.trim(),
-            supplier_color_code: c.supplier_color_code?.trim() || null,
-          })),
+          /*
+           * **整行空白的颜色行不发。**
+           *
+           * 第一步的颜色表里躺着一行 `emptyColour()`(三个字段全空),它表达的是
+           * "还没填"。原样发上去的话:`ColorVariantCreate.variant_code` 带
+           * `min_length=1`,pydantic 先于服务层拒 —— 第一步的试算从来没跑通过,
+           * 而它唯一要提前回答的那件事(`code_taken`:这个编码是不是已经被占了)
+           * 因此一次都没回来过。报的错还是英文原文,前端认不出它的 `loc`,
+           * 于是运营在第二步一进去就先看见一条红字。
+           *
+           * 后端这一版也放宽了(`_preview_variants` 同样按"整行空白"跳过),
+           * 两边同口径 —— 前端这一跳是为了少发一次注定被拒的请求,不是唯一防线。
+           */
+          color_variants: colours
+            .filter((c) =>
+              [c.variant_code, c.working_name, c.supplier_color_code]
+                .some((v) => (v ?? '').trim()),
+            )
+            .map((c) => ({
+              variant_code: c.variant_code.trim(),
+              working_name: c.working_name.trim(),
+              supplier_color_code: c.supplier_color_code?.trim() || null,
+            })),
           size_template: withTemplate ? sizeTemplate : null,
         })
         setPreview(result)
@@ -335,13 +365,14 @@ export default function SpuCreatePage() {
               placeholder="例如 BLK"
               status={problem ? 'error' : undefined}
               maxLength={rules.data?.max_variant_code}
-              onChange={(e) =>
+              onChange={(e) => {
+                invalidatePreview()
                 setColours((prev) =>
                   prev.map((c, i) =>
                     i === row.index ? { ...c, variant_code: e.target.value } : c,
                   ),
                 )
-              }
+              }}
               onBlur={(e) =>
                 setColours((prev) =>
                   prev.map((c, i) =>
@@ -364,13 +395,14 @@ export default function SpuCreatePage() {
           value={row.working_name}
           placeholder="供应商口中的那个名字,内部用"
           maxLength={128}
-          onChange={(e) =>
+          onChange={(e) => {
+            invalidatePreview()
             setColours((prev) =>
               prev.map((c, i) =>
                 i === row.index ? { ...c, working_name: e.target.value } : c,
               ),
             )
-          }
+          }}
         />
       ),
     },
@@ -383,7 +415,8 @@ export default function SpuCreatePage() {
           value={row.supplier_color_code ?? ''}
           placeholder="选填"
           maxLength={64}
-          onChange={(e) =>
+          onChange={(e) => {
+            invalidatePreview()
             setColours((prev) =>
               prev.map((c, i) =>
                 i === row.index
@@ -391,7 +424,7 @@ export default function SpuCreatePage() {
                   : c,
               ),
             )
-          }
+          }}
         />
       ),
     },
@@ -412,8 +445,7 @@ export default function SpuCreatePage() {
             // **删一行会让后面所有行的下标左移一位**,而 `problems` 里的
             // `loc` 记的是删之前的下标 —— 不清掉的话红框会挂到隔壁那一行,
             // 而那一行是对的。清空比重算下标可靠:下一次「下一步」会重新试算
-            setProblems([])
-            setPreview(null)
+            invalidatePreview()
           }}
         />
       ),
@@ -427,7 +459,20 @@ export default function SpuCreatePage() {
         <Alert
           type="success"
           showIcon
-          message={`${created.spu_code} 已建档,${created.color_variants.length} 个颜色 × ${created.skus.length / Math.max(created.color_variants.length, 1)} 个尺码 = ${created.skus.length} 个 SKU`}
+          message={
+            /*
+             * 尺码数**数出来**,不是拿总数除以颜色数算出来的。
+             *
+             * 除法要成立得先假设"每个颜色的尺码一样多",而那是展开规则的
+             * 一条性质,不是这一页知道的事 —— 它哪天不再成立(按颜色定制
+             * 尺码段),这里会安静地显示一个小数。变异 F2 挡的"前端自己乘"
+             * 是同一族的另一半:那边是乘,这边是除,错法一样。
+             * `skus` 里每一行都带 `size`,去重数一下就是答案。
+             */
+            `${created.spu_code} 已建档,${created.color_variants.length} 个颜色 × ` +
+            `${new Set(created.skus.map((s) => s.size)).size} 个尺码 = ` +
+            `${created.skus.length} 个 SKU`
+          }
           description="下一步:到素材页按颜色上传样品图。通用图只进 SPU 作用域,证明不了某个颜色有正面照。"
         />
         <Card size="small" title="生成的 SKU">
@@ -523,7 +568,7 @@ export default function SpuCreatePage() {
       <UnsavedGuard dirty={dirty} what="建档表单" />
       <PageHeader
         title="新建商品款式"
-        subtitle="按三步建立 SPU、颜色和首批 SKU；视觉属性可以稍后识别补全"
+        subtitle="按三步建立 SPU、颜色和首批 SKU;视觉属性可以稍后识别补全"
       />
 
       <Steps
@@ -582,7 +627,12 @@ export default function SpuCreatePage() {
                 value={basics.spu_code}
                 placeholder="例如 SW-001"
                 maxLength={rules.data?.max_spu_code ?? 64}
-                onChange={(e) => setBasics((b) => ({ ...b, spu_code: e.target.value }))}
+                onChange={(e) => {
+                  // 改编码 = 上一次试算作废。不作废的话那条
+                  // 「XXX 已经建过了」会挂着上一个编码不放
+                  invalidatePreview()
+                  setBasics((b) => ({ ...b, spu_code: e.target.value }))
+                }}
                 onBlur={(e) =>
                   setBasics((b) => ({ ...b, spu_code: normalizeCode(e.target.value) }))
                 }
@@ -615,7 +665,10 @@ export default function SpuCreatePage() {
                 }))}
               />
             </Form.Item>
-            <Form.Item label="品类" extra="目前只有泳装有渠道字段 spec 与校准过的属性注册表">
+            <Form.Item
+              label="品类"
+              extra="填品类键(英文)。目前只有泳装(swimwear)配了渠道字段规格与校准过的属性注册表"
+            >
               <Input
                 value={basics.base_category}
                 style={{ maxWidth: 240 }}
@@ -645,9 +698,15 @@ export default function SpuCreatePage() {
             // "这个编码是不是已经被占了"。后者在此之前要等到提交才知道,
             // 而那时表单已经填完三步
             onClick={async () => {
+              // **不拦。** 这一步的试算只回答"编码本身合不合法"与
+              // "这个编码是不是已经被占了";颜色表还没填,那一段被跳过
+              // (整行空白的行不发,见 `runPreview`)。
+              //
+              // 这里原来的注释写着"试算必然报『至少要有一个颜色变体』" ——
+              // 那句话描述的是一个**当时并没有发生**的错:载荷先被 pydantic
+              // 的 `min_length=1` 拒掉了,报的是另一条,而且是英文原文。
+              // 现在两者都不再发生,这一跳真的会带回 `code_taken`。
               await runPreview(false)
-              // **不拦。** 第一步的颜色表还是空的,试算必然报"至少要有一个
-              // 颜色变体" —— 拿它挡住"下一步"的话,这一页永远走不到第二步
               setCurrent(1)
             }}
           >
@@ -672,8 +731,9 @@ export default function SpuCreatePage() {
         >
           {/*
             * 「正式颜色名称」(`display_name`)**不在这张表里**。
-            * 它是投影列,唯一写入点是属性服务在 VARIANT 层
-            * `standard_color_name` 被确认时(§4.3)。给它一个输入框的话,
+            * 它是投影列,唯一写入点是属性服务在 VARIANT 层的
+            * `primary_color` 被确认时(§4.3)——**不是 `standard_color_name`**,
+            * 那个名字全仓没有对应字段。给它一个输入框的话,
             * 建档时填进去的值会在第一次识别确认时被覆盖 —— 而运营不知道
             * 是自己填错了还是系统改了。
             */}
@@ -783,10 +843,13 @@ export default function SpuCreatePage() {
                   loading={templates.isLoading}
                   placeholder="选择尺码段"
                   // 换模板要重算。不重算的话下面显示的还是上一个模板展开出来的
-                  // 那份 SKU,而它看起来完全正常 —— 一个不报错的错答案
+                  // 那份 SKU,而它看起来完全正常 —— 一个不报错的错答案。
+                  // 同一条理由对改编码、改颜色行同样成立,所以三处共用
+                  // `invalidatePreview`(它还会一并清掉那条挂在旧编码上的
+                  // `code_taken` 警告)
                   onChange={(value) => {
                     setSizeTemplate(value)
-                    setPreview(null)
+                    invalidatePreview()
                   }}
                   options={(templates.data ?? []).map((t) => ({
                     value: t.name,

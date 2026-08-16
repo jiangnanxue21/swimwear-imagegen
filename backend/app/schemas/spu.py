@@ -63,6 +63,32 @@ class SpuCreate(BaseModel):
     size_template: str = Field(..., min_length=1, max_length=32)
 
 
+class ColorVariantPreview(BaseModel):
+    """试算时的一个颜色。**和 `ColorVariantCreate` 只差一条:编码可以是空的。**
+
+    ## 为什么必须分成两个类型
+
+    `ColorVariantCreate.variant_code` 带 `min_length=1`,于是**pydantic 先于
+    服务层拒**。表单第一步的颜色表是一行空编码,那份载荷根本进不到
+    `preview_spu` —— 于是第一步的试算永远 422,而它要提前回答的
+    「这个编码是不是已经被占了」(`code_taken`)一次都没回来过。
+
+    更糟的是它报的错:pydantic 的 `loc` 是 `body.color_variants.0.variant_code`
+    (点分、带 `body` 前缀),msg 是英文原文 `String should have at least 1
+    character`。前端认不出这种形状,于是它落进"通用问题"那一栏,
+    运营在第二步一进去就先看见一条英文红字,而他一个字都还没填。
+
+    **`SpuCreate` 那一份原样不动。** 建档提交时空编码仍然当场拒 ——
+    放宽的只有试算,而试算本来就允许"还没填完"。
+    """
+
+    #: 允许空串:试算容得下"还没填"。真正的空值判定在服务层
+    #: (`preview_spu` 把整行空白的行跳过),而不是在这里
+    variant_code: str = Field("", max_length=MAX_VARIANT_CODE)
+    working_name: str = Field("", max_length=128)
+    supplier_color_code: str | None = Field(None, max_length=64)
+
+
 class SpuPreviewIn(BaseModel):
     """建档试算的入参。**是 `SpuCreate` 的一个子集,不是它的兄弟。**
 
@@ -80,7 +106,9 @@ class SpuPreviewIn(BaseModel):
     """
 
     spu_code: str = Field(..., min_length=1, max_length=MAX_SPU_CODE)
-    color_variants: list[ColorVariantCreate] = Field(
+    #: 用 `ColorVariantPreview` 而不是 `ColorVariantCreate`,理由见那个类。
+    #: 一句话:第一步的颜色表是一行空编码,而它必须能试算得动
+    color_variants: list[ColorVariantPreview] = Field(
         default_factory=list, max_length=MAX_VARIANTS_PER_SPU
     )
     size_template: str | None = Field(None, min_length=1, max_length=32)
@@ -260,5 +288,17 @@ def code_rules_out() -> CodeRulesOut:
     而漏改的那一侧不报错 —— 它只会少报一条规则,然后前端少提示一句。
     多出来的键(`size_templates`)由 pydantic 默认忽略,那一份走
     `/spus/size-templates`,不在这个出参里重复一遍。
+
+    ## `model_validate` 挡不住"漏改一侧"—— 这一版把那句话改准了(A52)
+
+    上一版的说法是「抄的话……漏改的那一侧不报错」,暗示 `model_validate`
+    因此挡得住。**它挡的只有一个方向**:`CodeRulesOut` 多了一个字段而
+    `code_rules()` 没给 —— 那会 ValidationError。反过来
+    (`code_rules()` 新增一条规则、`CodeRulesOut` 没跟上)是 pydantic 的
+    **默认行为:静默忽略**,而那正是这段话说要避免的那件事本身。
+
+    真正盯着反方向的是
+    `test_a52_...::test_every_code_rule_reaches_the_frontend`:
+    它断言 `set(code_rules()) - {"size_templates"} == set(model_fields)`。
     """
     return CodeRulesOut.model_validate(code_rules())

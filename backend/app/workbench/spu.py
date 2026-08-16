@@ -29,12 +29,20 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from app.attributes import registry
+
 #: 变体维度。这两个字段**永远**按 SKU 展示,不参与公共/不一致判定。
 #:
 #: 尺码不参与图片识别(属性注册表里根本没有这个字段,见 product.py 注释),
 #: 颜色则是识别得出的 —— 但它在 SPU 下本来就该不同,不一致不是问题。
 VARIANT_FIELDS: tuple[str, ...] = ("primary_color", "size")
 
+#: 变体维度在这一页的叫法。
+#:
+#: **和注册表的 `label` 刻意不同**:注册表里 `primary_color` 叫「主色」
+#: (它是一条属性事实),而这一页的这一格列的是「这个 SPU 底下有哪几种颜色」
+#: —— 是维度不是属性。两处叫同一个名字反而会让人以为是同一件事。
+#: `size` 根本不在注册表里(尺码不参与图片识别),所以这张表不能删。
 VARIANT_FIELD_LABELS: Mapping[str, str] = {
     "primary_color": "颜色",
     "size": "尺码",
@@ -300,12 +308,22 @@ def serialize(groups: Iterable[SpuGroup]) -> list[dict[str, object]]:
             # 没有定义,编一个出来只会让运营照着它做错事
             "blocked_steps": dict(g.blocked_steps),
             "variants": {k: list(v) for k, v in g.variants.items()},
+            # `field_label` 与 `field_name` **并排给**,不二选一:界面主位显示
+            # 中文名(运营读得懂),而字段名要留着 —— 报障、搜后端日志、
+            # 对 spec 用的都是它。少了中文名这一页全是英文;
+            # 少了字段名,运营描述得出问题却指不出是哪个字段
             "common": [
-                {"field_name": c.field_name, "value": c.value} for c in g.common
+                {
+                    "field_name": c.field_name,
+                    "field_label": registry.field_label(c.field_name),
+                    "value": c.value,
+                }
+                for c in g.common
             ],
             "inconsistent": [
                 {
                     "field_name": c.field_name,
+                    "field_label": registry.field_label(c.field_name),
                     "values": [
                         {"value": value, "skus": list(skus)}
                         for value, skus in sorted(c.values.items())

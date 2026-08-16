@@ -38,7 +38,7 @@ from app.core.enums import MediaRole, MediaSource, MediaStatus, RoleSource
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.sorting import normalize_sort
-from app.media import evidence_rules, provenance_conflict
+from app.media import evidence_rules, provenance_conflict, revive
 from app.media.mapping import (
     LEGACY_CANDIDATE,
     LEGACY_PRODUCT_ASSET,
@@ -143,6 +143,7 @@ def ingest(
     )
 
     if existing is not None:
+        revived = revive.revive_if_deleted(existing, status=status)
         _fill_missing_role(existing, role=role, role_source=role_source,
                            role_confidence=role_confidence)
         _fill_missing_colour(existing, color_variant_id=color_variant_id)
@@ -162,6 +163,16 @@ def ingest(
                     "sha256": sha256,
                     "incoming_source": source.value,
                 },
+            )
+        if revived:
+            # 复活要留痕。它是一次**状态回退**(DELETED -> READY/QUARANTINED),
+            # 而删除那条审计还在 —— 两条一起读才说得清"删过、又传回来了"
+            _audit(
+                session,
+                "system",
+                existing,
+                "revive_by_reupload",
+                {"to_status": existing.status, "source": source.value},
             )
         return existing, True
 

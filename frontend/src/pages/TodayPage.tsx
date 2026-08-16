@@ -144,8 +144,8 @@ function CountCard({ spec, onOpen }: { spec: CardSpec; onOpen: (to: string) => v
 }
 
 function RunningTaskIcon({ count }: { count: number | undefined }) {
-  // LoadingOutlined 自带无限旋转。没有运行中任务时仍然用它，会让首页看起来像
-  // 一直没有加载完；只有后端明确报告有运行中任务时，旋转才表达真实状态。
+  // LoadingOutlined 自带无限旋转。没有运行中任务时仍然用它,会让首页看起来像
+  // 一直没有加载完;只有后端明确报告有运行中任务时,旋转才表达真实状态。
   return count !== undefined && count > 0 ? <LoadingOutlined /> : <ClockCircleOutlined />
 }
 
@@ -224,7 +224,7 @@ export default function TodayPage() {
         icon: <StopOutlined />,
         count: tasks.data?.tasks.failed,
         to: '/tasks?status=FAILED',
-        hint: '任务跑挂了。先看错误码再决定重试还是换 Provider',
+        hint: '任务跑挂了。先看错误码再决定重试还是换服务商',
         tone: 'act',
       },
       {
@@ -260,7 +260,7 @@ export default function TodayPage() {
         icon: <RunningTaskIcon count={tasks.data?.tasks.in_flight} />,
         count: tasks.data?.tasks.in_flight,
         to: '/tasks',
-        hint: '在等 Provider 出图,不用做什么。点开是全部任务列表',
+        hint: '在等服务商出图,不用做什么。点开是全部任务列表',
         tone: 'wait',
       },
     ],

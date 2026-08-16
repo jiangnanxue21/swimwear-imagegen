@@ -4,14 +4,14 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { providersApi } from '../api/generation'
 import { readError } from '../api/client'
-import type { Provider } from '../api/types'
+import { MODE_LABEL, type GenerationMode, type Provider } from '../api/types'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 export default function ProvidersPage() {
-  useDocumentTitle('Provider')
+  useDocumentTitle('出图服务商')
   const { message } = App.useApp()
   const query = useQuery({ queryKey: ['providers'], queryFn: providersApi.list })
 
@@ -57,7 +57,9 @@ export default function ProvidersPage() {
       width: 220,
       render: (_, row) => (
         <Space size={4} wrap>
-          {row.capabilities.supported_modes.map((m) => <Tag key={m}>{m}</Tag>)}
+          {row.capabilities.supported_modes.map((m) => (
+            <Tag key={m}>{MODE_LABEL[m as GenerationMode] ?? m}</Tag>
+          ))}
         </Space>
       ),
     },
@@ -68,9 +70,9 @@ export default function ProvidersPage() {
           {row.capabilities.supports_multiple_candidates && (
             <Tag>多候选 ≤{row.capabilities.max_candidates_per_call}</Tag>
           )}
-          {row.capabilities.supports_seed && <Tag>seed</Tag>}
+          {row.capabilities.supports_seed && <Tag>随机种子</Tag>}
           {row.capabilities.supports_cancel && <Tag>可取消</Tag>}
-          {row.capabilities.supports_webhook && <Tag>webhook</Tag>}
+          {row.capabilities.supports_webhook && <Tag>回调通知</Tag>}
         </Space>
       ),
     },
@@ -87,7 +89,7 @@ export default function ProvidersPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="Provider" subtitle="各家出图服务的能力与配置状态(只读)" />
+      <PageHeader title="出图服务商" subtitle="各家出图服务的能力与配置状态(只读)" />
       <Card size="small" styles={{ body: { padding: 12 } }}>
         这一页只读。密钥与模型在 <Link to="/settings">设置</Link> 页填写,
         或写进 <span className="mono">.env</span> 后重启后端。两处都不会显示密钥明文。
@@ -101,7 +103,7 @@ export default function ProvidersPage() {
         */}
       {query.isError ? (
         <ErrorNotice
-          title="拉不到 Provider 列表"
+          title="拉不到服务商列表"
           error={query.error}
           onRetry={() => query.refetch()}
           retrying={query.isFetching}

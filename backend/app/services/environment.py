@@ -88,7 +88,7 @@ def describe() -> dict[str, Any]:
             wanted=generic.CHANNEL,
             real_detail="真的在调平台接口。",
             simulated_detail=(
-                "上架走的是 Simulator。它会返回像模像样的平台单号,但平台上没有这个商品。"
+                "上架走的是渠道模拟器。它会返回像模像样的平台单号,但平台上没有这个商品。"
             ),
         ),
     ]

@@ -42,6 +42,10 @@ import {
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  PUBLISH_ATTEMPT_STATUS_LABEL,
+  PUBLISH_OPERATION_LABEL,
+  PUBLISH_OUTBOX_STATUS_LABEL,
+  PUBLISH_REJECTION_STATUS_LABEL,
   publishApi,
   type ChannelListingRow,
   type CleanupRow,
@@ -49,6 +53,7 @@ import {
   type PublishAction,
   type SubmitResult,
 } from '../api/publish'
+import { DRAFT_STATUS_LABEL, LOCATED_BY_LABEL, REJECTION_REASON_LABEL } from '../api/workbench'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
@@ -131,7 +136,7 @@ function NoticeAlert({ notice, dryRun }: { notice: EnqueueNotice; dryRun: boolea
   )
 }
 
-/** Simulator 标记。4.1 节 F 要求它在关键页面可见,而"可见"必须是一眼的 */
+/** 模拟器标记。4.1 节 F 要求它在关键页面可见,而"可见"必须是一眼的 */
 function RealityTag({ simulated }: { simulated: boolean }) {
   /*
    * 用 BrandTag 而不是 `<Tag color="purple">`:antd 的调色板预设色不受
@@ -142,7 +147,7 @@ function RealityTag({ simulated }: { simulated: boolean }) {
    * 一眼的信号。
    */
   return simulated ? (
-    <BrandTag tone="slate" title="外部 ID 由 Simulator 生成 —— 真实平台上并不存在这个商品">
+    <BrandTag tone="slate" title="外部 ID 由渠道模拟器生成 —— 真实平台上并不存在这个商品">
       模拟
     </BrandTag>
   ) : (
@@ -299,7 +304,7 @@ export default function PublishPage() {
    * 下架前确认一次。
    *
    * 它不是"危险操作都加个确认"的条件反射:下架在多数平台上**撤不回来**,
-   * 而这一页上真实渠道和 Simulator 的行混在一起长得几乎一样。确认框里
+   * 而这一页上真实渠道和模拟器的行混在一起长得几乎一样。确认框里
    * 复述的正是那两件分辨不出来的事 —— 是不是真实渠道、外部 ID 是哪个。
    */
   const confirmDelist = (row: ChannelListingRow) => {
@@ -316,7 +321,7 @@ export default function PublishPage() {
           <span className="mono">外部 ID:{row.external_spu_id ?? '—'}</span>
           <span>
             {row.simulated
-              ? '这是 Simulator 造的记录,平台上并不存在这个商品。'
+              ? '这是渠道模拟器造的记录,平台上并不存在这个商品。'
               : '这是真实渠道上的商品,下架之后通常撤不回来。'}
           </span>
         </Space>
@@ -689,7 +694,9 @@ export default function PublishPage() {
             <Card size="small" title="发布前:草稿">
               {detail.draft ? (
                 <Descriptions size="small" column={2}>
-                  <Descriptions.Item label="草稿状态">{detail.draft.status}</Descriptions.Item>
+                  <Descriptions.Item label="草稿状态">
+                    {DRAFT_STATUS_LABEL[detail.draft.status]?.text ?? detail.draft.status}
+                  </Descriptions.Item>
                   <Descriptions.Item label="版本">v{detail.draft.version}</Descriptions.Item>
                   <Descriptions.Item label="语言">
                     {detail.draft.locale ?? '—'}
@@ -715,10 +722,12 @@ export default function PublishPage() {
               {detail.latest_attempt ? (
                 <Descriptions size="small" column={2} bordered>
                   <Descriptions.Item label="动作">
-                    {detail.latest_attempt.operation}
+                    {PUBLISH_OPERATION_LABEL[detail.latest_attempt.operation]
+                      ?? detail.latest_attempt.operation}
                   </Descriptions.Item>
-                  <Descriptions.Item label="尝试状态">
-                    {detail.latest_attempt.status}
+                  <Descriptions.Item label="尝试结果">
+                    {PUBLISH_ATTEMPT_STATUS_LABEL[detail.latest_attempt.status]
+                      ?? detail.latest_attempt.status}
                   </Descriptions.Item>
                   <Descriptions.Item label="开始">
                     {formatDateTime(detail.latest_attempt.started_at)}
@@ -742,7 +751,10 @@ export default function PublishPage() {
                   <Descriptions.Item label="投递" span={2}>
                     {detail.outbox ? (
                       <Space size={8} wrap>
-                        <Tag>{detail.outbox.status}</Tag>
+                        <Tag>
+                          {PUBLISH_OUTBOX_STATUS_LABEL[detail.outbox.status]
+                            ?? detail.outbox.status}
+                        </Tag>
                         <span>已尝试 {detail.outbox.attempt_count} 次</span>
                         <span style={{ color: brandVars.slate }}>
                           下次:{formatDateTime(detail.outbox.next_attempt_at)}
@@ -791,12 +803,15 @@ export default function PublishPage() {
                       key={r.id}
                       type="warning"
                       showIcon
-                      message={`${r.reason_code}(${r.status})`}
+                      message={`${REJECTION_REASON_LABEL[r.reason_code] ?? r.reason_code}(${
+                        PUBLISH_REJECTION_STATUS_LABEL[r.status] ?? r.status
+                      })`}
                       description={
                         <Space direction="vertical" size={2}>
                           {r.platform_note && <span>{r.platform_note}</span>}
                           <span style={{ fontSize: fontScale.meta, color: brandVars.slate }}>
-                            发现于 {formatDateTime(r.created_at)} · 来源 {r.located_by ?? '—'}
+                            发现于 {formatDateTime(r.created_at)} · 定位依据{' '}
+                            {r.located_by ? LOCATED_BY_LABEL[r.located_by] ?? r.located_by : '—'}
                           </span>
                         </Space>
                       }
@@ -993,7 +1008,7 @@ function CleanupPanel() {
             value={includeSimulated ? 'all' : 'real'}
             onChange={(v) => setIncludeSimulated(v === 'all')}
             options={[
-              { value: 'all', label: '含 Simulator 记录' },
+              { value: 'all', label: '含模拟记录' },
               { value: 'real', label: '只看真实渠道' },
             ]}
           />
@@ -1034,7 +1049,7 @@ function CleanupPanel() {
             <Space size={32} wrap>
               <Statistic title="记录总数" value={report.total} />
               <Statistic title="真实渠道" value={report.real} />
-              <Statistic title="Simulator" value={report.simulated} />
+              <Statistic title="模拟记录" value={report.simulated} />
               <Statistic
                 title="仍占着平台位置"
                 value={report.occupying}
@@ -1060,7 +1075,7 @@ function CleanupPanel() {
             description={
               report.clean ? undefined : (
                 <span style={{ fontSize: fontScale.body }}>
-                  「排队下架」的行数含 Simulator 记录,和上面「仍占着平台位置」
+                  「排队下架」的行数含模拟记录,和上面「仍占着平台位置」
                   ({report.occupying})不是一个口径 —— 后者只数真实渠道。
                   逐行下架在「发布清单」里操作。
                 </span>

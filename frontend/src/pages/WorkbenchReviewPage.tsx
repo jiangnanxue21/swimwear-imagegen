@@ -86,6 +86,7 @@ import { mediaApi } from '../api/media'
 import { enumParam, useUrlFilters } from '../hooks/useUrlFilters'
 import { brandVars, fontScale, imageTile } from '../theme'
 import KeyboardHelp from '../components/KeyboardHelp'
+import { MEDIA_ROLE_LABEL } from '../components/workbench/materialUtils'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import BrandTag from '../components/BrandTag'
 import { AudienceTag, ReviewFocusLine } from '../components/AudienceBadge'
@@ -335,7 +336,9 @@ function ImageSetPane({ productId, imageSetId }: { productId: string; imageSetId
                 {url ? (
                   <Image
                     src={url}
-                    alt={`图片集第 ${i + 1} 张 · ${item.role}${item.is_primary ? ' · 主图' : ''}`}
+                    alt={`图片集第 ${i + 1} 张 · ${
+                      MEDIA_ROLE_LABEL[item.role] ?? item.role
+                    }${item.is_primary ? ' · 主图' : ''}`}
                     preview={{ mask: '看大图' }}
                   />
                 ) : (
@@ -354,7 +357,7 @@ function ImageSetPane({ productId, imageSetId }: { productId: string; imageSetId
                 )}
                 <figcaption>
                   {item.is_primary && <BrandTag tone="accent" style={{ marginInlineEnd: 4 }}>主图</BrandTag>}
-                  {item.role}
+                  {MEDIA_ROLE_LABEL[item.role] ?? item.role}
                   {!item.enabled && <Tag style={{ marginInlineStart: 4 }}>已停用</Tag>}
                 </figcaption>
               </figure>

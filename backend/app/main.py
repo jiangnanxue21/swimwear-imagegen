@@ -22,7 +22,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.errors import AppError, ErrorCode
+from app.core.errors import AppError, ErrorCode, normalize_pydantic_loc
 from app.core.logging import get_logger, request_id_var, setup_logging
 from app.core.paths import is_hidden_path
 from app.services.storage import PUBLIC_PREFIXES as _STORAGE_PUBLIC_PREFIXES
@@ -489,7 +489,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         problems = [
-            {"loc": ".".join(str(x) for x in e.get("loc", [])), "msg": e.get("msg", "")}
+            {"loc": normalize_pydantic_loc(e.get("loc", ())), "msg": e.get("msg", "")}
             for e in exc.errors()
         ]
         # 只记字段位置与校验结论,不记用户提交的值。值里可能含提示词、URL 或密钥。

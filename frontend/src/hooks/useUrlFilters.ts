@@ -63,8 +63,8 @@ export interface Codec<T> {
 /**
  * `oneOfParam` 给控件回调使用的运行期收窄。
  *
- * antd 的分页回调只给裸 `number`。若调用点用 `as` 强行通过类型检查，
- * 白名单外的值仍会写进 URL，刷新后又被 `read()` 弹回默认值，导致控件与
+ * antd 的分页回调只给裸 `number`。若调用点用 `as` 强行通过类型检查,
+ * 白名单外的值仍会写进 URL,刷新后又被 `read()` 弹回默认值,导致控件与
  * 实际查询各说各话。收窄必须由同时持有白名单与默认值的 codec 自己完成。
  */
 export interface OneOfNarrowing<T extends number> {
@@ -147,7 +147,7 @@ export function oneOfParam<T extends number>(
   values: readonly T[],
 ): Codec<T> & OneOfNarrowing<T> {
   const set = new Set<number>(values)
-  // URL 与控件回调共用同一条判定，避免两条入口的退回方向漂移。
+  // URL 与控件回调共用同一条判定,避免两条入口的退回方向漂移。
   const narrow = (raw: number): T => (set.has(raw) ? (raw as T) : fallback)
   return {
     read: (raw) => {

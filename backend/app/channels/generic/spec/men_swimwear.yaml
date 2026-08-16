@@ -49,6 +49,21 @@ review_checks:
   - hem
   - print_consistency
 
+# 上面那些键的中文名。审阅页显示的是这一列 —— 键是给 spec 与代码用的,
+# 运营那一侧看到 `cup_shape` 既读不懂也转述不出去。
+# **少一条会在加载期直接拒**(`spec_loader` 的 untranslated 检查),
+# 不会变成审阅页上一个静默冒出来的英文词。
+review_check_labels:
+  waistband_type: 腰头形制
+  drawstring: 抽绳
+  inseam_length: 裤长
+  fit_silhouette: 版型轮廓
+  pocket_position: 口袋位置
+  liner: 内衬
+  side_seam: 侧缝
+  hem: 裤脚
+  print_consistency: 印花一致性
+
 channel: GENERIC
 # 与 women_swimwear.yaml 同步起版。这两份的版本各自独立演进:
 # spec_version 进 listing_drafts.source_fingerprint,涨一边只重判那一边的草稿。

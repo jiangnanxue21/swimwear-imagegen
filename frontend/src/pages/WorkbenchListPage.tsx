@@ -164,7 +164,7 @@ function SummaryTiles({
  * 「前端最大档位 ≤ 后端 le=」——加一档比后端还大时它会红。
  */
 const PAGE_SIZES = [10, 20, 50, 100] as const
-/** codec 与分页回调共用同一份白名单和默认值，不能在调用点再抄一份。 */
+/** codec 与分页回调共用同一份白名单和默认值,不能在调用点再抄一份。 */
 const pageSizeParam = oneOfParam(20, PAGE_SIZES)
 
 /**
@@ -680,7 +680,7 @@ export default function WorkbenchListPage() {
                   ? {
                       key: 'restore',
                       icon: <UndoOutlined />,
-                      label: '恢复到生产动线',
+                      label: '恢复(重新回到工作台)',
                       onClick: () => void restore.mutateAsync(row.product.id),
                     }
                   : {
@@ -689,7 +689,7 @@ export default function WorkbenchListPage() {
                       danger: true,
                       // 不叫「删除」:它真正做的事是状态迁移,行与证据链都还在。
                       // 叫错名字会让运营按「删除」的预期去用它
-                      label: '归档(移出生产动线)',
+                      label: '归档(不再出现在工作台)',
                       onClick: () => confirmArchive(row),
                     },
               ],
@@ -1034,7 +1034,7 @@ export default function WorkbenchListPage() {
           pageSizeOptions: PAGE_SIZES.map(String),
           showTotal: (t) => `共 ${t} 件命中`,
           // 勾选由 signature 那条 effect 清,这里不再各写一遍
-          // antd 回传裸 number；运行期收窄由持有白名单的 codec 负责。
+          // antd 回传裸 number;运行期收窄由持有白名单的 codec 负责。
           onChange: (p, ps) =>
             filters.patch({ page: p, page_size: pageSizeParam.narrow(ps) }),
         }}

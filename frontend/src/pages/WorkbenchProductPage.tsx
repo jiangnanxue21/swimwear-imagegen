@@ -104,9 +104,9 @@ export default function WorkbenchProductPage() {
     if (!headerTarget || headerTarget !== tab) return
 
     const frame = window.requestAnimationFrame(() => {
-      // 顶部“下一步”原来只负责切标签。已经在目标标签时,点击不会产生任何
+      // 顶部「下一步」原来只负责切标签。已经在目标标签时,点击不会产生任何
       // 可见变化,看起来就是按钮坏了。素材步骤直接落到上传按钮,其余步骤落到
-      // 对应面板；聚焦同时让键盘用户能从真正的操作处继续。
+      // 对应面板;聚焦同时让键盘用户能从真正的操作处继续。
       const targetId =
         headerTarget === 'material'
           ? 'workbench-material-upload'

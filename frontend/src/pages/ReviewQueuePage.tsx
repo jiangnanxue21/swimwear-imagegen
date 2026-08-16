@@ -88,7 +88,7 @@ function RuleSetPanel() {
         <Descriptions.Item label="A 档抽检比例">
           {Math.round(num('spot_check_ratio', 0.1) * 100)}%
         </Descriptions.Item>
-        <Descriptions.Item label="允许切换 Provider">
+        <Descriptions.Item label="允许换服务商">
           {flag('allow_provider_switch', true) ? '是' : '否'}
         </Descriptions.Item>
         <Descriptions.Item label="评分器">
@@ -237,7 +237,7 @@ export default function ReviewQueuePage() {
         ),
     },
     {
-      title: 'Provider',
+      title: '服务商',
       dataIndex: 'provider',
       key: 'provider',
       width: 90,
@@ -251,7 +251,7 @@ export default function ReviewQueuePage() {
       sorter: true,
       sortOrder: sort.orderFor('round_count'),
       render: (rounds: number, row) => (
-        <Tooltip title={`${rounds} 轮 / ${row.attempt_count} 次 Provider 调用`}>
+        <Tooltip title={`${rounds} 轮 / ${row.attempt_count} 次出图调用`}>
           <span className="mono">{rounds} 轮 · {row.attempt_count} 次</span>
         </Tooltip>
       ),
@@ -296,7 +296,7 @@ export default function ReviewQueuePage() {
         type="info"
         showIcon
         message="审核对象是商品任务,不是每一张低分候选图"
-        description="低分与硬错误候选会被自动淘汰并重新生成;只有轮次(和可用 Provider)都耗尽仍拿不到 A 档的任务,才会出现在这里。"
+        description="低分与硬错误候选会被自动淘汰并重新生成;只有轮次(以及可用的服务商)都耗尽仍拿不到 A 档的任务,才会出现在这里。"
       />
 
       <Card

@@ -80,8 +80,12 @@ class FieldSpecOut(BaseModel):
     让前端按 `Array.isArray` 猜也不行,那是硬规则第 4 条禁止的:
     注册表是这件事的唯一事实源,再推一遍就是等着两边分叉。
 
-    ## 三个字段各回答一个问题
+    ## 四个字段各回答一个问题
 
+        label         界面上叫什么。来自注册表的 `AttributeField.label` ——
+                      前端自己维护一张 `primary_color -> 主色` 的表也能显示,
+                      但那张表会和注册表分叉,而分叉的表现是运营在属性页
+                      看到「主色」、在颜色维明细里看到 `primary_color`
         value_type    ENUM / ENUM_LIST / TEXT / TEXT_LIST / NUMBER / BOOL
         multi_value   要不要提交成数组。它与 value_type 冗余是**故意的** ——
                       前端最常问的就是这一句,让它去记哪几个类型算多值,
@@ -90,6 +94,9 @@ class FieldSpecOut(BaseModel):
                       "没有约束"和"约束读不到"在界面上是两种控件
     """
 
+    #: 默认空串而不是必填:`spec` 整体可能是 None(老数据),
+    #: 而前端那一侧一律 `spec?.label || field_name` 兜底
+    label: str = ""
     value_type: str
     multi_value: bool = False
     options: list[str] = []

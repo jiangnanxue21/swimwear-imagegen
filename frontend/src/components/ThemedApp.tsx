@@ -31,9 +31,9 @@ export default function ThemedApp({ children }: { children: ReactNode }) {
   })
 
   // 不用全局 `* { transition-duration: 0.01ms }`：rc-motion 的 prepare/active
-  // 两阶段会被压进同一帧，rc-trigger 还没完成定位就收到 transitionend，最终把
+  // 两阶段会被压进同一帧,rc-trigger 还没完成定位就收到 transitionend,最终把
   // Select / Dropdown / DatePicker 等浮层留在测量坐标 -1000vw/-1000vh。
-  // antd 自己的 motion 令牌能在不破坏定位生命周期的前提下尊重系统“减少动态效果”。
+  // antd 自己的 motion 令牌能在不破坏定位生命周期的前提下尊重系统的「减少动态效果」。
   theme.token = { ...theme.token, motion: !reducedMotion }
 
   return (

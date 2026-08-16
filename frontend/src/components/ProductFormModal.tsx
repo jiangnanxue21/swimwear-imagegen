@@ -1,9 +1,10 @@
 import { App, Form, Input, Modal, Select, Space } from 'antd'
 import { useEffect } from 'react'
 import {
-  AUDIENCES, AUDIENCE_LABEL, COMPLEXITIES, GARMENT_TYPES,
+  AUDIENCES, AUDIENCE_LABEL, COMPLEXITIES, COMPLEXITY_LABEL, GARMENT_TYPES,
   GARMENT_TYPES_BY_AUDIENCE, MAX_SECONDARY_COLORS, MAX_SECONDARY_COLOR_LENGTH,
-  PATTERN_TYPES, PRODUCT_FIELD_LIMITS, type Audience, type Product,
+  PATTERN_TYPES, PATTERN_TYPE_LABEL, PRODUCT_FIELD_LIMITS,
+  garmentTypeOptions, type Audience, type Product,
 } from '../api/types'
 
 interface Props {
@@ -182,11 +183,11 @@ export default function ProductFormModal({
                   name="garment_type"
                   label="服装类型"
                   style={{ width: '50%', marginRight: 8 }}
-                  extra={picked ? `已按${AUDIENCE_LABEL[picked]}收窄` : undefined}
+                  extra={picked ? `选项已按${AUDIENCE_LABEL[picked]}筛过` : undefined}
                 >
                   <Select
                     placeholder="选择类型"
-                    options={options.map((v) => ({ value: v, label: v }))}
+                    options={garmentTypeOptions(options)}
                   />
                 </Form.Item>
               )
@@ -195,17 +196,20 @@ export default function ProductFormModal({
           <Form.Item name="pattern_type" label="图案类型" style={{ width: '50%' }}>
             <Select
               placeholder="选择图案"
-              options={PATTERN_TYPES.map((v) => ({ value: v, label: v }))}
+              options={PATTERN_TYPES.map((v) => ({ value: v, label: PATTERN_TYPE_LABEL[v] }))}
             />
           </Form.Item>
         </Space.Compact>
 
         <Space.Compact block>
+          {/* 颜色词会原样拼进出图提示词,所以填英文 —— 这里的 extra 是唯一
+              说明这件事的地方,去掉它运营会填「黑色」然后不知道为什么颜色不对 */}
           <Form.Item
             name="primary_color" label="主颜色" style={{ width: '33%', marginRight: 8 }}
+            extra="填英文,会直接进出图提示词"
             rules={[{ max: PRODUCT_FIELD_LIMITS.primary_color, message: `最长 ${PRODUCT_FIELD_LIMITS.primary_color} 字符` }]}
           >
-            <Input placeholder="black" />
+            <Input placeholder="例如 black" />
           </Form.Item>
           <Form.Item
             name="secondary_colors" label="辅助颜色" style={{ width: '34%', marginRight: 8 }}
@@ -224,7 +228,7 @@ export default function ProductFormModal({
             <Select mode="tags" placeholder="回车添加" tokenSeparators={[',', '|']} />
           </Form.Item>
           <Form.Item name="complexity" label="复杂度" style={{ width: '33%' }}>
-            <Select options={COMPLEXITIES.map((v) => ({ value: v, label: v }))} />
+            <Select options={COMPLEXITIES.map((v) => ({ value: v, label: COMPLEXITY_LABEL[v] }))} />
           </Form.Item>
         </Space.Compact>
 

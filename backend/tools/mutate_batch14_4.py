@@ -105,8 +105,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "Q8",
         "首页自己抄一份运行中状态清单",
         TODAY,
-        "        hint: '在等 Provider 出图,不用做什么。点开是全部任务列表',",
-        "        hint: '在等 Provider 出图(PROVIDER_RUNNING 等),点开是全部任务列表',",
+        "        hint: '在等服务商出图,不用做什么。点开是全部任务列表',",
+        "        hint: '在等服务商出图(PROVIDER_RUNNING 等),点开是全部任务列表',",
     ),
     (
         "Q9",

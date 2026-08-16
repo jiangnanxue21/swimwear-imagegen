@@ -909,6 +909,11 @@ def review_focus_for(product: Product) -> tuple[str, ...]:
 
     规则包读不出来时返回空元组而不是一份兜底清单:界面显示"未配置检查项"
     是一个能被人看见、能被追查的状态;显示一份猜出来的清单不是。
+
+    返回的是 `review_focus()` 也就是**中文名**,不是 spec 里的键。
+    这一串直接显示在商品头部与审阅页("重点检查:罩杯形状 · 肩带 …"),
+    而键那一列是给 spec 与代码用的 —— 运营看到 `cup_shape` 既读不懂也
+    转述不出去。翻译在 spec 里(键与中文名同一屏),加载期缺一条就拒。
     """
     try:
         spec = generic.field_spec(category_id=generic.category_id_for(product))
@@ -916,7 +921,7 @@ def review_focus_for(product: Product) -> tuple[str, ...]:
         # 受众未确认(派生不出规则包)、spec 文件缺失或校验不过。
         # 审阅页少一行提示不该让整个详情接口 500
         return ()
-    return tuple(spec.review_checks)
+    return spec.review_focus()
 
 
 def serialize_flow(result: FlowResult) -> dict[str, Any]:

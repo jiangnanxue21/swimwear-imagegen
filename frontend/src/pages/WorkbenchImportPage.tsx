@@ -165,13 +165,13 @@ export default function WorkbenchImportPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="批量导入 SKU" subtitle="向已有款式追加 SKU；先预览逐行计划，再确认落库" />
+      <PageHeader title="批量导入 SKU" subtitle="向已有款式追加 SKU;先预览逐行计划,再确认落库" />
 
       <Alert
         type="info"
         showIcon
         message="这里不创建新款式"
-        description="新款请先建立 SPU、颜色和首批 SKU；本页只向已有 SPU/颜色批量追加 SKU。"
+        description="新款请先建立 SPU、颜色和首批 SKU;本页只向已有 SPU/颜色批量追加 SKU。"
         action={(
           <Button size="small" onClick={() => navigate('/spus/new')}>
             去新建商品款式

@@ -583,7 +583,7 @@ export default function ImageSetTab({
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <span>
                 你的改动<b>没有丢</b>,还在下面。但它是基于旧的那一版改的 ——
-                保存会以当前编排派生一个新版,别人在 v{supersededBy} 里做的改动
+                保存会用当前编排另存一个新版本,别人在 v{supersededBy} 里做的改动
                 不会自动合并进来。
               </span>
               <Space>
@@ -744,9 +744,9 @@ export default function ImageSetTab({
               onClick={() => {
                 if (current.data?.status === 'APPROVED') {
                   modal.confirm({
-                    title: '这一版已批准,保存会派生一个新版本',
+                    title: '这一版已批准,保存会另存成一个新版本',
                     content: '已批准的图片集不原地修改 —— 否则「平台驳回的是哪一版」就没法回答。新版从待批准开始。',
-                    okText: '派生新版',
+                    okText: '另存新版本',
                     onOk: () => save.mutate(items),
                   })
                 } else {

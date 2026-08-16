@@ -437,12 +437,18 @@ def test_the_missing_reason_is_rendered_not_just_typed():
     """
     src = ATTRIBUTE_TAB.read_text(encoding="utf-8")
     assert "function MissingEvidenceNotice(" in src, "没有渲染组件"
-    # **整行锚定**,不是子串匹配。子串匹配对
+    # **锚在行首**,不是子串匹配。子串匹配对
     # `{false && <MissingEvidenceNotice ... />}` 照样命中 —— 渲染死了、守卫还绿。
     # batch13-3 的 M11 第一版就栽在这里,而它栽的是**自己那一批**的守卫;
     # 抄那个教训比抄那段代码重要
+    #
+    # 锚点从"整行"放宽到"行首的标签":原来钉的是
+    # `<MissingEvidenceNotice evidence={...} />` 这一整行,于是**给组件多传一个
+    # prop 就会变红**,而多传一个 prop 不是回归。放宽之后它仍然挡得住死代码化
+    # ——`{false &&` 会出现在同一行的标签之前,行首锚定就不成立。
+    # 守的是"真的挂上去了",不是"参数表长什么样"。
     assert re.search(
-        r"^\s*<MissingEvidenceNotice evidence=\{[^}]*\} />$", src, re.M
+        r"^\s*<MissingEvidenceNotice[\s>/]", src, re.M
     ), "组件没有作为独立元素挂进 JSX(或被条件死代码化了)"
     # 组件内部两个决定也要钉住:早退必须只在"没有无值证据"时发生,
     # 分组必须只收带 reason 的条目。少了这两条,把 `if (true) return null`

@@ -9,7 +9,7 @@ import { generationApi } from '../api/generation'
 import { evaluationApi } from '../api/reviews'
 import { readWriteError } from '../api/client'
 import { workbenchApi } from '../api/workbench'
-import type { Evaluation } from '../api/types'
+import { CANDIDATE_STATUS_LABEL, type Evaluation } from '../api/types'
 import EvaluationDetail from '../components/EvaluationDetail'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
@@ -20,8 +20,8 @@ import { brandVars, fontScale, space } from '../theme'
 /**
  * 独立 AI 能力测试。
  *
- * 这里测试的是生产评分器与生产文案生成器，而不是重新跑完整业务流程。
- * 评分结果只写 diagnostic 调用留痕；文案结果只回显，不创建正式版本。
+ * 这里测试的是生产评分器与生产文案生成器,而不是重新跑完整业务流程。
+ * 评分结果只写 diagnostic 调用留痕;文案结果只回显,不创建正式版本。
  */
 export default function AITestPage() {
   useDocumentTitle('AI 能力测试')
@@ -64,7 +64,7 @@ export default function AITestPage() {
       setScoreElapsedSeconds(0)
     },
     onSuccess: (result) => {
-      if (result.success) message.success('评分能力测试完成，正式评分未被覆盖')
+      if (result.success) message.success('评分能力测试完成,正式评分未被覆盖')
       else message.warning(result.message)
     },
     onError: (error) => message.error(readWriteError(error)),
@@ -83,7 +83,7 @@ export default function AITestPage() {
   const copyTest = useMutation({
     mutationFn: () => workbenchApi.testCopy(productId, copyCostConfirmed),
     onSuccess: (result) => {
-      if (result.success) message.success('文案能力测试完成，结果未保存为正式版本')
+      if (result.success) message.success('文案能力测试完成,结果未保存为正式版本')
       else message.warning(result.message)
     },
     onError: (error) => message.error(readWriteError(error)),
@@ -106,14 +106,14 @@ export default function AITestPage() {
     <Space direction="vertical" size={space.lg} style={{ width: '100%' }}>
       <PageHeader
         title="AI 能力测试"
-        subtitle="单独验证出图后的大模型评分，以及标题、卖点和描述生成；测试结果不会覆盖正式业务数据。"
+        subtitle="单独验证出图后的大模型评分,以及标题、卖点和描述生成;测试结果不会覆盖正式业务数据。"
       />
 
       <Alert
         type="warning"
         showIcon
-        message="这是生产能力测试，不是 Mock 演示"
-        description="如果当前启用真实外部模型，点击测试可能产生费用。评分会留下 diagnostic 调用记录；文案只回显并执行合规校验，不保存版本。"
+        message="这是生产环境的能力测试,不是模拟演示"
+        description="如果当前启用的是真实外部模型,点击测试可能产生费用。评分会留下一条标为「诊断」的调用记录;文案只回显并做合规校验,不保存版本。"
       />
 
       <Row gutter={[space.lg, space.lg]} align="top">
@@ -207,7 +207,8 @@ export default function AITestPage() {
                                 第 {item.round_number} 轮 · 候选 #{item.candidate_index + 1}
                               </Typography.Text>
                               <Typography.Text type="secondary" style={{ fontSize: fontScale.meta }}>
-                                {item.status} · {item.width ?? '—'}×{item.height ?? '—'}
+                                {CANDIDATE_STATUS_LABEL[item.status] ?? item.status} ·{' '}
+                                {item.width ?? '—'}×{item.height ?? '—'}
                               </Typography.Text>
                             </Space>
                           </Radio.Button>
@@ -231,7 +232,7 @@ export default function AITestPage() {
                 <div style={{ display: 'flex', gap: space.md, alignItems: 'center' }}>
                   <Image
                     src={selectedCandidate.url}
-                    alt={`当前选择：第 ${selectedCandidate.round_number} 轮候选图 ${selectedCandidate.candidate_index + 1}`}
+                    alt={`当前选择:第 ${selectedCandidate.round_number} 轮候选图 ${selectedCandidate.candidate_index + 1}`}
                     width={112}
                     height={140}
                     style={{ objectFit: 'contain', background: brandVars.imageBg }}
@@ -245,7 +246,7 @@ export default function AITestPage() {
               )}
 
               <Checkbox checked={scoreCostConfirmed} onChange={(event) => setScoreCostConfirmed(event.target.checked)}>
-                我确认：若当前评分器为真实模型，本次测试可能产生费用
+                我确认:当前评分器如果是真实模型,这次测试可能产生费用
               </Checkbox>
               <Button
                 type="primary"
@@ -266,7 +267,7 @@ export default function AITestPage() {
                   description={
                     <Space direction="vertical" size={2}>
                       <span>图片准备、模型推理和瞬时错误重试可能需要 1–5 分钟。</span>
-                      <span>请保持页面打开，不要刷新或重复点击；按钮会在收到明确结果后恢复。</span>
+                      <span>请保持页面打开,不要刷新或重复点击;按钮会在收到明确结果后恢复。</span>
                     </Space>
                   }
                 />
@@ -337,10 +338,10 @@ export default function AITestPage() {
               </div>
 
               <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-                只使用该商品已确认的属性。若没有已确认属性，后端会拒绝生成，而不是让模型猜。
+                只使用该商品已确认的属性。若没有已确认属性,后端会拒绝生成,而不是让模型猜。
               </Typography.Text>
               <Checkbox checked={copyCostConfirmed} onChange={(event) => setCopyCostConfirmed(event.target.checked)}>
-                我确认：若当前文案生成器为真实模型，本次测试可能产生费用
+                我确认:若当前文案生成器为真实模型,本次测试可能产生费用
               </Checkbox>
               <Button
                 type="primary"
@@ -357,7 +358,7 @@ export default function AITestPage() {
                   type="info"
                   showIcon
                   message="文案模型正在处理"
-                  description="长模型调用最多等待约 5 分钟。请保持页面打开，不要重复点击。"
+                  description="长模型调用最多等待约 5 分钟。请保持页面打开,不要重复点击。"
                 />
               )}
 
@@ -375,14 +376,14 @@ export default function AITestPage() {
                     type={copyTest.data.violations.some((item) => item.blocking) ? 'warning' : 'success'}
                     showIcon
                     message={copyTest.data.violations.some((item) => item.blocking)
-                      ? '文案已生成，但合规校验未通过'
+                      ? '文案已生成,但合规校验未通过'
                       : '文案已生成并通过硬性校验'}
                     description={
                       <Space size={4} wrap>
                         <Tag>{copyTest.data.generator}</Tag>
                         {copyTest.data.trace.model && <Tag>{copyTest.data.trace.model}</Tag>}
                         {copyTest.data.trace.duration_ms != null && <Tag>{copyTest.data.trace.duration_ms} ms</Tag>}
-                        {copyTest.data.trace.total_tokens != null && <Tag>{copyTest.data.trace.total_tokens} tokens</Tag>}
+                        {copyTest.data.trace.total_tokens != null && <Tag>{copyTest.data.trace.total_tokens} Token</Tag>}
                       </Space>
                     }
                   />
@@ -418,7 +419,7 @@ export default function AITestPage() {
                   }
                 />
               ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择商品后运行一次测试，结果会显示在这里" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择商品后运行一次测试,结果会显示在这里" />
               )}
             </Space>
           </Card>

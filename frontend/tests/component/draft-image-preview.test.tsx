@@ -136,6 +136,10 @@ describe('草稿页的图片预览', () => {
   it('UNPROVEN 与 INCOMPATIBLE 分开显示,不合并成一句「没有图片信息」', () => {
     // 两者要运营做的事完全不同:前者重新生成草稿就好,
     // 后者是有人换过快照形状 —— 重新生成一百次也不会变好
+    //
+    // 断言看的是**中文那一句**而不是枚举值:界面上原来是「图片映射未算过」
+    // 后面再挂一个印着 UNPROVEN 的 Tag,同一件事说两遍、其中一遍是英文。
+    // 英文那一遍去掉了,这条用例要守的"两档分得开"由中文文案继续守。
     const unproven: Images = {
       status: 'UNPROVEN',
       note: '这份草稿建于颜色维快照之前,重新生成一次即可',
@@ -145,9 +149,9 @@ describe('草稿页的图片预览', () => {
     unmount()
 
     renderTab(unproven)
-    expect(screen.getByText('UNPROVEN')).toBeTruthy()
+    expect(screen.getByText('图片映射未算过')).toBeTruthy()
     expect(screen.getByText(/重新生成一次即可/)).toBeTruthy()
-    expect(screen.queryByText('INCOMPATIBLE')).toBeNull()
+    expect(screen.queryByText('图片映射形状不兼容')).toBeNull()
   })
 
   it('后端没带图片预览时给一句可执行的话,而不是空白', () => {

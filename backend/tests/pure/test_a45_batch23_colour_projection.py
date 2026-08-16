@@ -37,6 +37,13 @@ LAYER = BACKEND_ROOT / "app" / "attributes" / "colour_projection.py"
 SERVICE = BACKEND_ROOT / "app" / "attributes" / "service.py"
 MODEL = BACKEND_ROOT / "app" / "models" / "spu.py"
 LEDGER = BACKEND_ROOT / "tools" / "audit_column_writers.py"
+#: 前端那两页也写着同一句话。**守卫原来只扫四个后端路径**,于是
+#: A52 走查时在 `.tsx` 里发现了两处新写的 `standard_color_name` ——
+#: 那个幽灵字段名躲过这条守卫的方式,是搬到了它看不见的目录里。
+FRONTEND = [
+    BACKEND_ROOT.parent / "frontend" / "src" / "pages" / "SpuCreatePage.tsx",
+    BACKEND_ROOT.parent / "frontend" / "src" / "pages" / "SpuDetailPage.tsx",
+]
 
 
 # ---------------------------------------------------------------- 一、投影口径
@@ -134,7 +141,7 @@ def test_the_non_existent_field_name_is_gone_from_live_code():
     是 `primary_color`」。判据因此是**同一行里有没有驳斥**,
     而不是"这个词一次都不许出现" —— 后者会逼人删掉真话。
     """
-    for path in (MODEL, SERVICE, LAYER, LEDGER):
+    for path in (MODEL, SERVICE, LAYER, LEDGER, *FRONTEND):
         for line in path.read_text(encoding="utf-8").splitlines():
             if "standard_color_name" not in line:
                 continue

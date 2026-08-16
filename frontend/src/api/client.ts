@@ -427,9 +427,9 @@ const HINTS = {
   server: '按请求编号在后端 JSON 日志里搜 request_id,可定位到这一次请求;错误体里不带异常原文是刻意的(需求第十九章)',
   network: '请求没到后端。确认后端在运行(docker compose ps),以及前端的 VITE_API_BASE_URL 指向它',
   auth: '这是 local/dev 的免登录模式(后端三项浏览器登录配置全空),正常不该出现 401。先看后端是不是换了 APP_ENV 或补了 ADMIN_PASSWORD —— 补了任意一项,本机也会真的走登录',
-  session: '浏览器 Session 已失效或从未建立。签名 Cookie 是无状态的,换过 AUTH_SESSION_SECRET 会让全部已登录会话当场作废;多机部署各节点必须配同一把',
-  forbidden: '当前账号是 operator,身份是有效的;该接口挂的是 require_admin,要用 admin 账号登录。设置页里那两把 ADMIN_TOKEN / OPERATOR_TOKENS 是给 CLI 和脚本的机器凭据,改它们不影响谁能登录',
-  rate: '被限流。看 Provider 配额与当前并发',
+  session: '浏览器会话已失效或从未建立。签名 Cookie 是无状态的,换过 AUTH_SESSION_SECRET 会让全部已登录会话当场作废;多机部署各节点必须配同一把',
+  forbidden: '当前账号是运营(operator),身份是有效的;该接口挂的是 require_admin,要用管理员(admin)账号登录。设置页里那两把 ADMIN_TOKEN / OPERATOR_TOKENS 是给命令行和脚本用的机器凭据,改它们不影响谁能登录',
+  rate: '被限流。看服务商配额与当前并发',
 } as const
 
 /**
@@ -438,12 +438,12 @@ const HINTS = {
  * 而管理员正是拿这个数去判断"worker 是不是卡住了"的。
  */
 function timeoutHint(waited: string): string {
-  return `后端 ${waited}未响应。看 worker 是不是卡在 Provider 轮询上(FASHN 不支持取消),或数据库连接被占满`
+  return `后端 ${waited}未响应。看后台执行进程(worker)是不是卡在服务商轮询上(FASHN 不支持取消),或数据库连接被占满`
 }
 
 /** 三样不在错误体里的东西去哪儿找。写出来,而不是留三个空字段。 */
 export const TECHNICAL_ELSEWHERE =
-  'provider / model / 原始异常不在错误体里(后端从不外传),按请求编号查后端日志'
+  '服务商、模型与原始异常都不在错误体里(后端从不外传),按请求编号查后端日志'
 
 /** 从响应头里取后端的请求编号(main.py 的 request_context 中间件对每个响应都写)。 */
 function requestIdOf(err: unknown): string {

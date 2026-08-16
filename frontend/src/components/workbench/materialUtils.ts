@@ -14,14 +14,14 @@ export const MEDIA_ROLE_LABEL: Record<MediaRole, string> = {
   OTHER: '其它',
 }
 
-/** 「通用图」这一组的键。空串不做键 —— 它和“没选”在 Select 里长得一样 */
+/** 「通用图」这一组的键。空串不做键 —— 它和「没选」在 Select 里长得一样 */
 export const GENERIC = '__generic__'
 
 /**
  * 素材按颜色分组。
  *
- * `color_variant_id` 是已确认归属，`variant_hint` 只是模型猜测，不能拿来分组。
- * 键取素材实际归属与 SPU 声明颜色的并集，避免已下架颜色上的存量图凭空消失。
+ * `color_variant_id` 是已确认归属,`variant_hint` 只是模型猜测,不能拿来分组。
+ * 键取素材实际归属与 SPU 声明颜色的并集,避免已下架颜色上的存量图凭空消失。
  */
 export function groupByColour(
   assets: MediaAsset[],

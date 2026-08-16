@@ -348,12 +348,12 @@ export default function SettingsPage() {
   if (forbiddenByRole) {
     return (
       <>
-        <PageHeader title="设置" subtitle="密钥、模型、Provider 与系统参数" />
+        <PageHeader title="设置" subtitle="密钥、模型、服务商与系统参数" />
         <Alert
           type="error"
           showIcon
           message="当前账号没有管理员权限"
-          description="设置页只对 admin 账号开放。要改 Provider、密钥或系统参数,请用管理员账号登录 —— 侧栏里没有「系统管理」这一组入口也是同一个原因。"
+          description="设置页只对管理员账号开放。要改服务商、密钥或系统参数,请用管理员账号登录 —— 侧栏里没有「系统管理」这一组入口也是同一个原因。"
         />
       </>
     )
@@ -362,7 +362,7 @@ export default function SettingsPage() {
   return (
     <Space direction="vertical" size={12} style={{ width: '100%', maxWidth: 940 }}>
       <UnsavedGuard dirty={dirty} what="设置" />
-      <PageHeader title="设置" subtitle="密钥、模型、Provider 与系统参数" />
+      <PageHeader title="设置" subtitle="密钥、模型、服务商与系统参数" />
 
       {forbidden && (
         <Alert
@@ -370,7 +370,7 @@ export default function SettingsPage() {
           showIcon
           style={{ marginBottom: 12 }}
           message="当前账号没有管理员权限"
-          description={`${readError(query.error)}。设置页需要用 admin 账号登录;operator 看不到这一页的内容。`}
+          description={`${readError(query.error)}。设置页需要用管理员(admin)账号登录;运营(operator)看不到这一页的内容。`}
         />
       )}
       {query.isError && !forbidden && (
@@ -415,7 +415,7 @@ export default function SettingsPage() {
               放弃改动
             </Button>
             <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-              保存后台立即生效,生成 worker 最迟十几秒内跟上,不需要重启。
+              保存后台立即生效,出图的后台执行进程最迟十几秒内跟上,不需要重启。
             </Typography.Text>
           </Space>
         </Card>

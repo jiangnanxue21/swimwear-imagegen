@@ -66,7 +66,7 @@ export default function WorkbenchSpuPage() {
               {row.spu}
             </Link>
           ) : (
-            <Tooltip title="这个 SPU 是老建档路径建的,没有主键,配不了生成方案。走“新建商品款式”重新建一次即可">
+            <Tooltip title="这个 SPU 是老建档路径建的,没有主键,配不了生成方案。走「新建商品款式」重新建一次即可">
               <span className="mono">{row.spu}</span>
             </Tooltip>
           )}
@@ -129,8 +129,8 @@ export default function WorkbenchSpuPage() {
       render: (_, row) => (
         <Space size={4} wrap>
           {row.common.map((c) => (
-            <Tag key={c.field_name} color="default">
-              {c.field_name}={c.value}
+            <Tag key={c.field_name} color="default" title={c.field_name}>
+              {c.field_label || c.field_name}={c.value}
             </Tag>
           ))}
           {!row.common.length && <span style={{ color: brandVars.textFaint }}>还没有已确认的公共属性</span>}
@@ -147,10 +147,10 @@ export default function WorkbenchSpuPage() {
             {row.inconsistent.map((item) => (
               <Tooltip
                 key={item.field_name}
-                title="同一 SPU 下这个字段本该一致。属性识别是逐图跑的,各 SKU 的图不同就可能得出不同结论——需要人工统一"
+                title={`${item.field_name} —— 同一 SPU 下这个字段本该一致。属性识别是逐图跑的,各 SKU 的图不同就可能得出不同结论,需要人工统一`}
               >
                 <Tag color="error" icon={<WarningOutlined />}>
-                  {item.field_name}:
+                  {item.field_label || item.field_name}:
                   {item.values
                     .map((v) => `${v.value}(${v.skus.length} 件)`)
                     .join(' / ')}

@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -88,6 +88,14 @@ class AttributeField:
     """一个属性字段的完整声明。"""
 
     name: str
+    #: 界面上叫什么。**没有默认值是刻意的** —— 新注册一个字段时,
+    #: 忘了给中文名会在导入期直接 TypeError,而不是让 `waistband_type`
+    #: 这种词悄悄出现在运营的属性表、颜色维明细和缺失清单里。
+    #:
+    #: 放在注册表而不是前端:同一个字段名会在四个地方被显示(属性页表格、
+    #: 证据抽屉标题、颜色维的「缺:…」、批量结果里的字段清单),
+    #: 而前端各翻一次的下场是同一个字段有四种中文名。
+    label: str
     owner_type: OwnerType
     value_type: ValueType
     #: ENUM / ENUM_LIST 时指向 `core/enums.py` 里的枚举类
@@ -165,6 +173,7 @@ class AttributeField:
 _FIELDS: tuple[AttributeField, ...] = (
     AttributeField(
         name="garment_type",
+        label="品类",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=GarmentType,
@@ -175,6 +184,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="primary_color",
+        label="主色",
         owner_type=OwnerType.VARIANT,
         value_type=ValueType.TEXT,
         # 颜色不用枚举:平台的颜色词表各不相同,归一化交给渠道层的 dict 映射。
@@ -186,6 +196,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="secondary_colors",
+        label="辅助色",
         owner_type=OwnerType.VARIANT,
         # 和 primary_color 一样是自由文本:颜色不做枚举。
         # 上一版这里借用了 PatternType 当占位枚举 —— 那会让
@@ -199,6 +210,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="pattern_type",
+        label="图案",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=PatternType,
@@ -213,6 +225,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     # 水母衣上编一个"深 V 领"。
     AttributeField(
         name="strap_type",
+        label="肩带样式",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=StrapType,
@@ -223,6 +236,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="neckline_type",
+        label="领型",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=NecklineType,
@@ -233,6 +247,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="back_style",
+        label="背部样式",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=BackStyle,
@@ -243,6 +258,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="material",
+        label="材质成分",
         owner_type=OwnerType.SPU,
         value_type=ValueType.TEXT,
         # 看图看不出成分。这条 v1 就是对的,v2 把它从「提示词里叮嘱一句」
@@ -260,6 +276,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     # 投影列的存在理由是"旧查询还在读",而男装字段没有旧查询。
     AttributeField(
         name="waistband_type",
+        label="腰头形制",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=WaistbandType,
@@ -270,6 +287,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="inseam_length",
+        label="裤长(内缝)",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=InseamLength,
@@ -281,6 +299,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="liner_type",
+        label="内衬",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=LinerType,
@@ -293,6 +312,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="pocket_config",
+        label="口袋配置",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=PocketConfig,
@@ -302,6 +322,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="fit_type",
+        label="版型",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=FitType,
@@ -313,6 +334,7 @@ _FIELDS: tuple[AttributeField, ...] = (
     ),
     AttributeField(
         name="closure_type",
+        label="闭合方式",
         owner_type=OwnerType.SPU,
         value_type=ValueType.ENUM,
         enum=ClosureType,
@@ -336,6 +358,23 @@ def get_field(name: str) -> AttributeField:
 
 def field_names() -> tuple[str, ...]:
     return tuple(REGISTRY)
+
+
+def field_label(name: str) -> str:
+    """字段的中文名。**未注册的字段回落成字段名本身,不抛。**
+
+    调用点全是显示路径(颜色维的「缺:…」、缺失清单、批量结果),
+    而历史数据里可能留着注册表已经删掉的字段名 —— 那时候界面该做的事
+    是把这个名字原样说出来,不是整页读不出来(与 `field_spec_out`
+    的兜底同一条理由)。
+    """
+    spec = REGISTRY.get(name)
+    return spec.label if spec is not None else name
+
+
+def field_labels(names: Iterable[str]) -> tuple[str, ...]:
+    """一串字段名 -> 一串中文名。顺序保持不变。"""
+    return tuple(field_label(n) for n in names)
 
 
 def _applies(field: AttributeField, audience: Audience | None) -> bool:
@@ -416,8 +455,16 @@ def field_spec_out(name: str) -> dict[str, object]:
     """
     spec = REGISTRY.get(name)
     if spec is None:
-        return {"value_type": ValueType.TEXT.value, "multi_value": False, "options": []}
+        return {
+            # 认不出的字段用字段名当标题:显示 `legacy_thing` 比显示空白强,
+            # 后者会让人以为这一行坏了
+            "label": name,
+            "value_type": ValueType.TEXT.value,
+            "multi_value": False,
+            "options": [],
+        }
     return {
+        "label": spec.label,
         "value_type": spec.value_type.value,
         "multi_value": spec.multi_value,
         "options": [v.value for v in spec.enum] if spec.enum is not None else [],

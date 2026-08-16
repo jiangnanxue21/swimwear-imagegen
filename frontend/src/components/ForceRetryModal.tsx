@@ -71,7 +71,7 @@ export default function ForceRetryModal({
     >
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <Typography.Text style={{ fontSize: fontScale.body }}>
-          提交阶段网络超时,系统无法确认 Provider 是否已经受理这次生成。
+          提交阶段网络超时,系统无法确认服务商是否已经受理这次生成。
           <strong>直接重试可能再买一次。</strong>
         </Typography.Text>
 
@@ -89,7 +89,7 @@ export default function ForceRetryModal({
             type="info"
             showIcon
             message="没有外部任务 ID"
-            description="说明请求可能根本没发出去。仍然建议到 Provider 后台按 SKU 与时间确认一次 —— 没有 ID 不等于没有提交。"
+            description="说明请求可能根本没发出去。仍然建议到服务商后台按 SKU 与时间确认一次 —— 没有 ID 不等于没有提交。"
           />
         )}
 
@@ -98,7 +98,7 @@ export default function ForceRetryModal({
             对账结论(必填)
           </Typography.Text>
           <Typography.Paragraph type="secondary" style={{ fontSize: fontScale.meta, marginBottom: 6 }}>
-            写清楚你在 Provider 后台看到了什么。这句话会进审计,是日后追查重复计费时
+            写清楚你在服务商后台看到了什么。这句话会进审计,是日后追查重复计费时
             唯一能回答「谁依据什么放的行」的记录。
           </Typography.Paragraph>
           <Input.TextArea

@@ -18,7 +18,7 @@ import { brandVars, fontScale } from '../../theme'
 
 const COLUMNS: ColumnsType<CostLine> = [
   { title: '动作', dataIndex: 'label', width: 110 },
-  { title: 'Provider', dataIndex: 'provider', width: 110, className: 'mono' },
+  { title: '服务商', dataIndex: 'provider', width: 110, className: 'mono' },
   { title: '次数', dataIndex: 'units', width: 70 },
   {
     title: '预计金额',

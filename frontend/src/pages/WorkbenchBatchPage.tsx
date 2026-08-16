@@ -308,7 +308,7 @@ export default function WorkbenchBatchPage() {
         notification.info({
           message: '重试已提交后台执行',
           description:
-            '条目已重置为待处理,由 worker 领走执行。本页会自动刷新进度,不用重复点。',
+            '条目已重置为待处理,由后台执行进程领走执行。本页会自动刷新进度,不用重复点。',
           duration: null,
         })
       } else {
@@ -888,7 +888,7 @@ export default function WorkbenchBatchPage() {
                 showIcon
                 message={
                   job.status === 'QUEUED'
-                    ? '这个批次在排队,worker 还没开始执行'
+                    ? '这个批次在排队,后台执行进程还没开始执行'
                     : '这个批次正在后台执行'
                 }
                 description="下面的数字是当前进度,不是最终结果 —— 本页每 2 秒自动刷新一次。"
@@ -1000,7 +1000,7 @@ export default function WorkbenchBatchPage() {
             }
           />
           <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
-            需要管理员口令。理由会连同 旧sha → 新sha 一起写进审计。
+            需要管理员口令。理由会连同新旧两个 sha256 校验和一起写进审计。
           </Typography.Text>
           <Input.TextArea
             rows={3}

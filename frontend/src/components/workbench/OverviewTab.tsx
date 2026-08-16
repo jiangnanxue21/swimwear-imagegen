@@ -17,6 +17,7 @@ import { Button, Card, Empty, Space, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   COLOR_SUBSTATE_LABEL,
+  FLOW_STEP_LABEL,
   ISSUE_LEVEL_LABEL,
   STEP_TAB,
   type ColorFlowRow,
@@ -54,7 +55,11 @@ function ColorMatrix({ colors }: { colors: ColorRollup }) {
       ),
     },
     ...steps.map((step) => ({
-      title: step,
+      // 表头是**中文步骤名**。这里原来直接摆 `step`,于是颜色维表头是
+      // MATERIAL / ATTRIBUTE / PLAN / IMAGE_SET / COPY 五个英文枚举值,
+      // 而同一屏上方的步骤条写的是「素材 属性 方案 图片集 文案」——
+      // 同一组东西,同一个页面,两套名字
+      title: FLOW_STEP_LABEL[step] ?? step,
       dataIndex: step,
       render: (_: unknown, row: ColorFlowRow) => {
         const cell = row.steps.find((s) => s.step === step)

@@ -147,7 +147,7 @@ export default function LoginPage() {
               <Typography.Text style={{ fontSize: fontScale.body }}>
                 后端没有配置任何凭据,所以这里没有账号密码可填,也不需要登录 ——
                 直接<Link to="/today">回到工作台</Link>即可。要真的验证
-                admin / operator 的差异、退出登录与 403,由管理员在{' '}
+                管理员与运营的权限差异、退出登录与 403,由管理员在{' '}
                 <code>.env</code> 里配 <code>ADMIN_PASSWORD</code> /{' '}
                 <code>OPERATOR_PASSWORD</code> / <code>AUTH_SESSION_SECRET</code>{' '}
                 后重启后端。

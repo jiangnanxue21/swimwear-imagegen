@@ -24,7 +24,10 @@ import { useQuery } from '@tanstack/react-query'
 import { Card, Empty, Select, Space, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import ErrorNotice from '../ErrorNotice'
-import { workbenchApi, type ImpactRow } from '../../api/workbench'
+import {
+  COPY_STATUS_LABEL, DRAFT_STATUS_LABEL, IMAGE_SET_STATUS_LABEL,
+  workbenchApi, type ImpactRow,
+} from '../../api/workbench'
 import { brandVars, fontScale } from '../../theme'
 
 const COLUMNS: ColumnsType<ImpactRow> = [
@@ -135,14 +138,20 @@ export default function ImpactPreview({ productId }: { productId: string }) {
                   两者要做的事不同,而它们在一张只列对象的清单上长得一样 */}
               当前对象:
               {objects?.image_set
-                ? `图片集 v${objects.image_set.version}(${objects.image_set.status})`
+                ? `图片集 v${objects.image_set.version}(${
+                  IMAGE_SET_STATUS_LABEL[objects.image_set.status]?.text ?? objects.image_set.status
+                })`
                 : '图片集 尚未创建'}
               ·
               {objects?.copy
-                ? `文案 v${objects.copy.version}(${objects.copy.status})`
+                ? `文案 v${objects.copy.version}(${
+                  COPY_STATUS_LABEL[objects.copy.status]?.text ?? objects.copy.status
+                })`
                 : '文案 尚未创建'}
               ·
-              {objects?.draft ? `草稿(${objects.draft.status})` : '草稿 尚未创建'}
+              {objects?.draft
+                ? `草稿(${DRAFT_STATUS_LABEL[objects.draft.status]?.text ?? objects.draft.status})`
+                : '草稿 尚未创建'}
             </div>
           </>
         )}

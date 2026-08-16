@@ -37,6 +37,7 @@ import {
   AUDIENCE_LABEL,
   GARMENT_TYPES,
   GARMENT_TYPES_BY_AUDIENCE,
+  garmentTypeOptions,
   type Audience,
 } from '../../api/types'
 import { brandVars, fontScale } from '../../theme'
@@ -184,7 +185,7 @@ export default function AudienceConfirmCard({
             disabled={!picked}
             value={pickedType}
             onChange={setPickedType}
-            options={typeOptions.map((v) => ({ value: v, label: v }))}
+            options={garmentTypeOptions(typeOptions)}
           />
         </div>
         <Button

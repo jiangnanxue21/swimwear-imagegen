@@ -62,7 +62,7 @@ function CandidateTile({
           <GradeTag grade={candidate.grade} score={candidate.overall_score} compact />
           {hardFail && <Tag color="error">硬错误</Tag>}
         </Space>
-        <div className="mono" style={{ color: brandVars.textMuted }}>seed {candidate.seed ?? '—'}</div>
+        <div className="mono" style={{ color: brandVars.textMuted }}>种子 {candidate.seed ?? '—'}</div>
       </figcaption>
     </figure>
   )
@@ -296,11 +296,11 @@ export default function ReviewDetailPage() {
           <Descriptions.Item label="生成模式">
             {MODE_LABEL[review.task_mode as keyof typeof MODE_LABEL] ?? review.task_mode ?? '—'}
           </Descriptions.Item>
-          <Descriptions.Item label="Provider">{review.provider}</Descriptions.Item>
+          <Descriptions.Item label="出图服务商">{review.provider}</Descriptions.Item>
           <Descriptions.Item label="生成轮次">
             {review.round_count} / {review.max_rounds}
           </Descriptions.Item>
-          <Descriptions.Item label="Provider 调用">{review.attempt_count} 次</Descriptions.Item>
+          <Descriptions.Item label="出图调用">{review.attempt_count} 次</Descriptions.Item>
           <Descriptions.Item label="最佳候选">
             <GradeTag grade={review.best_grade} score={review.best_score} />
           </Descriptions.Item>
@@ -521,7 +521,7 @@ export default function ReviewDetailPage() {
                 setRegenOpen(true)
               }}
             >
-              重新生成 / 切换 Provider
+              重新生成 / 换服务商
             </Button>
             <Typography.Text type="secondary" style={{ fontSize: fontScale.body }}>
               通过时采用上方选中的那张候选图;不选则采用系统挑出的最佳候选。
@@ -548,7 +548,7 @@ export default function ReviewDetailPage() {
         />
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           <div>
-            <div className="section-label">Provider</div>
+            <div className="section-label">出图服务商</div>
             <Select
               style={{ width: '100%' }}
               value={regenProvider}
@@ -569,7 +569,7 @@ export default function ReviewDetailPage() {
               */}
             {providers.isError && (
               <Typography.Text type="danger" style={{ fontSize: fontScale.meta }}>
-                拉不到 Provider 列表(不是"没有可用 Provider")。这次重新生成会用任务原来的 Provider
+                拉不到服务商列表(不是"没有可用的服务商")。这次重新生成会用任务原来的服务商
               </Typography.Text>
             )}
           </div>

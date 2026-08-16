@@ -19,12 +19,31 @@ import { apiClient } from './client'
  * (硬规则第 4 条)。少了它,列表字段会被纯文本输入框回传成字符串。
  */
 export interface AttributeFieldSpec {
+  /**
+   * 界面上叫什么(注册表的 `AttributeField.label`)。
+   *
+   * **前端不留一份 `primary_color -> 主色` 的对照表** —— 那张表会和注册表
+   * 分叉,而分叉的表现是运营在属性页看到「主色」、在颜色维明细里看到
+   * `primary_color`,同一个字段两个名字。后端没升级时缺席,按字段名兜底。
+   */
+  label?: string
   /** ENUM / ENUM_LIST / TEXT / TEXT_LIST / NUMBER / BOOL */
   value_type: string
   /** true = 提交成数组 */
   multi_value: boolean
   /** 枚举字段的合法取值;非枚举字段是空数组 */
   options: string[]
+}
+
+/**
+ * 一个属性字段在界面上的名字。**唯一的取法** —— 别在别处再写一次
+ * `row.spec?.label ?? row.field_name`,那正是分叉的起点。
+ *
+ * 兜底成字段名而不是空串:后端认不出的历史字段显示 `legacy_thing`
+ * 比显示空白强,后者会让人以为这一行坏了。
+ */
+export function attributeLabel(row: { field_name: string; spec?: AttributeFieldSpec }): string {
+  return row.spec?.label || row.field_name
 }
 
 export interface AttributeValue {
@@ -133,8 +152,8 @@ export interface Extraction {
  * 语气不是装饰:`error` 会留在屏幕上等人关掉,`success` 两秒就消失。
  * 一次全部失败的识别用 success 弹一下,运营的结论是「识别过了」。
  *
- * `QUEUED` / `RUNNING` 是异步 worker 的真实中间态，是否继续轮询由后端
- * `can_cancel` 给出，前端不维护第二份终态清单。
+ * `QUEUED` / `RUNNING` 是异步 worker 的真实中间态,是否继续轮询由后端
+ * `can_cancel` 给出,前端不维护第二份终态清单。
  */
 export const RUN_STATUS_LABEL: Record<ExtractionRunStatus, string> = {
   QUEUED: '已排队',

@@ -9,7 +9,8 @@ import { useQuery } from '@tanstack/react-query'
 import { productsApi } from '../api/products'
 import { readError } from '../api/client'
 import {
-  AUDIENCE_LABEL, GARMENT_TYPES, STATUS_LABEL, type Product, type ProductStatus,
+  AUDIENCE_LABEL, GARMENT_TYPES, GARMENT_TYPE_LABEL, PATTERN_TYPE_LABEL, STATUS_LABEL,
+  garmentTypeOptions, type Product, type ProductStatus,
 } from '../api/types'
 import { AudienceTag } from '../components/AudienceBadge'
 import { useServerSort } from '../hooks/useServerSort'
@@ -126,8 +127,20 @@ const filters = useUrlFilters({
         />
       ),
     },
-    { title: '类型', dataIndex: 'garment_type', width: 120 },
-    { title: '图案', dataIndex: 'pattern_type', width: 110 },
+    // 品类与图案都是后端枚举:列里渲染的是中文名,不是枚举值本身。
+    // 落回原值只在后端加了新枚举而前端标签表还没跟上时出现
+    {
+      title: '类型',
+      dataIndex: 'garment_type',
+      width: 130,
+      render: (v: string) => GARMENT_TYPE_LABEL[v] ?? v,
+    },
+    {
+      title: '图案',
+      dataIndex: 'pattern_type',
+      width: 110,
+      render: (v: string) => PATTERN_TYPE_LABEL[v] ?? v,
+    },
     {
       title: '颜色',
       dataIndex: 'primary_color',
@@ -165,7 +178,7 @@ const filters = useUrlFilters({
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <PageHeader
         title="商品与 SKU"
-        subtitle="查看和维护已建档的 SKU；新款建档与批量导入从右侧入口开始"
+        subtitle="查看和维护已建档的 SKU;新款建档与批量导入从右侧入口开始"
       />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>
@@ -195,7 +208,7 @@ const filters = useUrlFilters({
             style={{ width: 150 }}
             value={garmentType}
             onChange={(v) => filters.patch({ garment_type: v, page: 1 })}
-            options={GARMENT_TYPES.map((v) => ({ value: v, label: v }))}
+            options={garmentTypeOptions(GARMENT_TYPES)}
           />
           <Button icon={<ReloadOutlined />} onClick={() => query.refetch()}>
             刷新
@@ -224,7 +237,7 @@ const filters = useUrlFilters({
               description={
                 query.isError
                   ? readError(query.error)
-                  : '还没有 SKU。请先新建商品款式，或向已有款式批量导入 SKU。'
+                  : '还没有 SKU。请先新建商品款式,或向已有款式批量导入 SKU。'
               }
             />
           ),

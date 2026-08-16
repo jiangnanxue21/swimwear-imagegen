@@ -43,7 +43,7 @@ export default function SpendPage() {
 
   const columns = [
     {
-      title: 'Provider',
+      title: '服务商',
       dataIndex: 'provider',
       key: 'provider',
       render: (v: string) => <strong>{v}</strong>,
@@ -186,7 +186,7 @@ export default function SpendPage() {
               type="warning"
               showIcon
               message={`有 ${data.unpriced_calls} 次调用没有计入金额`}
-              description="这些 provider 还没配单价,它们的开销不是 0,是未知。在 .env 的 PROVIDER_PRICE_BOOK 里补上单价,这一页才是完整的。"
+              description="这些服务商还没配单价,它们的开销不是 0,是未知。在 .env 的 PROVIDER_PRICE_BOOK 里补上单价,这一页才是完整的。"
             />
           )}
 
@@ -223,7 +223,7 @@ export default function SpendPage() {
             />
           )}
 
-          <Card size="small" title="按 Provider">
+          <Card size="small" title="按服务商">
             <Table<ProviderSpend>
               size="small"
               rowKey={(r) => `${r.provider}-${r.currency}`}

@@ -106,6 +106,18 @@ def _translate(error: sku_matrix.SkuPlanError) -> ValidationError:
     `test_an_illegal_variant_code_tells_the_form_which_row` 本来会当场抓住它,
     但那条用例属于"已写、一次都没跑过"的那批(见 STATUS.md),
     直到这台机器上第一次跑起真库 pytest 才露出来。
+
+    ## `msg` 归 `sku_matrix` 管,这里不再二次加工(A52)
+
+    上一版 `normalize_code` 的消息都长成 `f"{field} ……"`,而 `field` 是那个
+    模块自己的形参名 —— 运营看到的是「variant_codes[0] 含不允许的字符」:
+    一个他在界面上根本找不到的词。前端 `help={problem}` 与
+    「第 N 行颜色:{msg}」都是原样渲染,所以那串名字是直达运营的。
+
+    修法在源头:`normalize_code` 现在同时收 `field`(机器定位)与
+    `label`(人看的名字),消息里拼的是后者。这里**不做**"把开头那个词摘掉"
+    的兜底 —— 兜底会让下一条按老样子写的消息静默地被修好,而
+    `test_a52_...::test_no_message_repeats_its_own_locator` 会当场把它变红。
     """
     return ValidationError(
         error.message,
@@ -160,6 +172,26 @@ def _reuse_or_conflict(spu: Spu, fingerprint: str) -> Spu:
     )
 
 
+def _preview_variants(raw: Any) -> list[dict[str, Any]]:
+    """试算的颜色行:**整行空白的丢掉,其余原样保留。**
+
+    第一步的表单里躺着一行 `emptyColour()` —— 三个字段全是空串。它表达的是
+    "还没填",不是"填了个空的",所以试算不该为它报错。
+
+    判据是**整行空白**而不是"编码为空":只看编码的话,一行填了工作名却漏了
+    编码的输入会被静默丢掉,而那正是运营需要系统当场指出来的那种错。
+    """
+    rows: list[dict[str, Any]] = list(raw or [])
+    return [
+        row
+        for row in rows
+        if any(
+            str(row.get(key) or "").strip()
+            for key in ("variant_code", "working_name", "supplier_color_code")
+        )
+    ]
+
+
 def preview_spu(session: Session, data: dict[str, Any]) -> dict[str, Any]:
     """建档试算。**一个字都不写库。**
 
@@ -194,17 +226,43 @@ def preview_spu(session: Session, data: dict[str, Any]) -> dict[str, Any]:
     第二步还没选模板。空着时只跑颜色那一段,`sku_count` 回 `null`
     (**不是 0** —— 0 会被读成"这次建档一行都不产生")。第三步选完模板
     再试算一次,那一次才答得出行数上限。
+
+    ## 颜色表也可空 —— 和"模板还没选"是同一类事
+
+    第一步只填了 SPU 编码,颜色表是一行空编码。这一版之前那份载荷会先被
+    pydantic 的 `min_length=1` 拒掉,于是**第一步的试算从来没跑通过**:
+    `code_taken`(编码已被占用,错在第一步)这条四类失败里唯一能被提前的,
+    实际上最早也要等到第二步试算成功之后才显示。
+
+    现在"整列空白的颜色行"一律跳过,与"模板还没选"走同一条逻辑:
+    答得出的照答(`spu_code` 合不合法、`code_taken`),答不出的回 `null`
+    (`sku_count`)或空列表(`variant_codes`)。
+
+    **跳过的判据是"整行空白",不是"编码为空"。** 只看编码的话,一行填了
+    工作名却漏了编码的输入会被静默丢掉,而那是一个运营真的想让系统看见的错。
     """
     spu_code = ""
     try:
         spu_code = sku_matrix.normalize_spu_code(data.get("spu_code"))
-        variants_in: list[dict[str, Any]] = list(data.get("color_variants") or [])
-        codes = list(
-            sku_matrix.normalize_variant_codes(
-                [v.get("variant_code", "") for v in variants_in]
+        variants_in = _preview_variants(data.get("color_variants"))
+        # 一个颜色都没填:跳过颜色段而不是抛。`normalize_variant_codes` 对
+        # 空列表抛"至少要有一个颜色变体" —— 那句话在**提交**时是对的,
+        # 在第一步的试算里不是:那时候还没轮到填颜色
+        codes = (
+            list(
+                sku_matrix.normalize_variant_codes(
+                    [v.get("variant_code", "") for v in variants_in]
+                )
             )
+            if variants_in
+            else []
         )
         template = (data.get("size_template") or "").strip() or None
+        # 没有颜色就没有行可展开。这一条挡的是"选了模板但还没填颜色":
+        # 走进 `expand()` 的话它会抛那句"至少要有一个颜色变体",
+        # 而这一步该回答的是"模板本身认不认识",不是"你颜色还没填"
+        if not codes:
+            template = None
         planned: tuple[sku_matrix.PlannedSku, ...] = ()
         sizes: list[str] = []
         if template is not None:
@@ -531,6 +589,60 @@ def skus_of(session: Session, spu_id: UUID) -> list[Product]:
     )
 
 
+def rows_touching_spu(session: Session, spu: Spu) -> list[Product]:
+    """这个款**可能**属于的全部 SKU 行:外键那批 ∪ 字符串码那批。
+
+    ## 它和 `skus_of()` 刻意不同,而且不能合并
+
+        skus_of()            回答「这个 SPU 的 SKU 是哪些」——**权威口径**。
+                             §4.4:`products.spu` 那列禁止作为查询权威,
+                             按它查会把改过名的行算进来
+        rows_touching_spu()  回答「停用它之前,有没有可能漏掉一行」——**安全闸**
+
+    两个问题对"错"的容忍方向是相反的。权威口径宁可窄:多算一行会让别的款的
+    SKU 出现在这个款下面。安全闸宁可宽:**少算一行的代价是一件仍然挂在平台上
+    的商品被静静放过**,而那正是 4.1 节 H 要防的结局。
+
+    差出来的那一格是真实存在的:`Product.spu_id` 可空,老导入路径只写了
+    `spu` 字符串。`disable_spu` 原来用 `skus_of()`,于是同一个款的存量行挂在
+    平台上时,闸**放行**。
+
+    宽出来的那部分(同码不同款的行)在这里只会让停用被拒,而拒绝会点名是
+    哪几个 SKU 与哪个渠道 —— 运营看得见、查得清,代价是一次多余的核对;
+    反过来那一边没有任何人会发现。
+    """
+    by_fk = select(Product).where(Product.spu_id == spu.id)
+    rows = {row.id: row for row in session.scalars(by_fk)}
+    if spu.spu_code:
+        # 只补**没有外键**的那些行:有外键而外键指向别的款的,是那个款的事
+        by_code = select(Product).where(
+            Product.spu == spu.spu_code, Product.spu_id.is_(None)
+        )
+        for row in session.scalars(by_code):
+            rows.setdefault(row.id, row)
+    return sorted(rows.values(), key=lambda p: p.sku or "")
+
+
+def _locked_spu(session: Session, spu_id: UUID) -> Spu:
+    """取一行 SPU 并**持有行锁**。状态迁移(停用 / 恢复)一律走它。
+
+    这两条都写 `row_version += 1`,而在此之前它们用的是无锁的 `get_spu()`,
+    只有 `update_spu` 加了 `with_for_update()`。差出来的是两个真实的竞态:
+
+        改字段 × 停用   `update_spu` 的行锁挡不住停用那一侧,两边各自
+                        `row_version += 1`,版本号丢一格 —— 而版本号是
+                        详情页那张编辑表单唯一的乐观锁
+        停用 × 停用     两个请求都读到 ACTIVE,都写审计,都进一格
+
+    幂等那一层(已经 DISABLED 就直接返回)挡不住它们:两个请求读到的都是
+    停用**之前**的状态。
+    """
+    spu = session.scalar(select(Spu).where(Spu.id == spu_id).with_for_update())
+    if spu is None:
+        raise NotFoundError(f"SPU {spu_id} 不存在")
+    return spu
+
+
 def update_spu(
     session: Session, spu_id: UUID, data: dict[str, Any], *, actor: str
 ) -> Spu:
@@ -604,11 +716,14 @@ def disable_spu(session: Session, spu_id: UUID, *, reason: str, actor: str) -> S
     要版本号的话,一次双击的第二下会撞 409「已被其他人更新」——
     而那句话在双击这个语境下是假的。字段编辑那一侧(`update_spu`)仍然要。
     """
-    spu = get_spu(session, spu_id)
+    spu = _locked_spu(session, spu_id)
     if spu.status == SpuStatus.DISABLED.value:
         return spu
 
-    skus = skus_of(session, spu_id)
+    # **平台闸用宽口径取数**(`rows_touching_spu`,不是 `skus_of`)。
+    # 后者按外键查,而 `Product.spu_id` 可空、老导入路径只写 `spu` 字符串 ——
+    # 漏掉的那一行如果正挂在平台上,闸会放行,而这道闸的全部意义就是不放行
+    skus = rows_touching_spu(session, spu)
     live = product_service.live_listings_for(session, [row.id for row in skus])
     if live:
         by_id = {row.id: row for row in skus}
@@ -657,8 +772,11 @@ def restore_spu(session: Session, spu_id: UUID, *, actor: str) -> Spu:
     断言的依据在停用那一刻就停止更新了。回 DRAFT 让它重新走一遍。
 
     **不要理由。** 恢复是撤销,停用是决定 —— 前者不需要三个月后有人来问。
+
+    与 `disable_spu` 一样走 `_locked_spu`:它同样写 `row_version += 1`,
+    同样会和详情页那张编辑表单的保存撞车。
     """
-    spu = get_spu(session, spu_id)
+    spu = _locked_spu(session, spu_id)
     if spu.status != SpuStatus.DISABLED.value:
         return spu
     spu.status = SpuStatus.DRAFT.value

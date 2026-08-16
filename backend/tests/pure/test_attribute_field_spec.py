@@ -73,7 +73,14 @@ def test_unregistered_field_degrades_to_plain_text_instead_of_raising():
     所以这里返回一个不带约束的文本规格,而不是抛 KeyError。
     """
     spec = field_spec_out("a_field_that_was_removed_long_ago")
-    assert spec == {"value_type": "TEXT", "multi_value": False, "options": []}
+    # `label` 回落成字段名本身:显示 `a_field_that_was_removed_long_ago`
+    # 比显示空白强 —— 后者会让人以为这一行坏了
+    assert spec == {
+        "label": "a_field_that_was_removed_long_ago",
+        "value_type": "TEXT",
+        "multi_value": False,
+        "options": [],
+    }
 
 
 def test_unknown_is_only_offered_where_the_enum_really_has_it():
@@ -88,3 +95,34 @@ def test_unknown_is_only_offered_where_the_enum_really_has_it():
         options = field_spec_out(name)["options"]
         has_unknown = "UNKNOWN" in options
         assert has_unknown == ("UNKNOWN" in [v.value for v in field.enum]), name
+
+
+# ============================================ 界面用语:英文标识符不许上界面
+
+
+def test_every_registered_field_has_a_chinese_label():
+    """每个字段都要有中文名,而且**不能等于字段名本身**。
+
+    字段名会在四个地方直接显示给运营:属性页表格的第一列、证据抽屉的标题、
+    颜色维那格的「缺:…」、批量结果里的字段清单。少一个中文名的表现不是报错,
+    是那几处里冒出一个 `waistband_type` —— 运营既读不懂,也没法转述给开发。
+
+    `label` 在 dataclass 上没有默认值,所以"忘了写"会在导入期 TypeError;
+    这一条补的是另一半:**写了但抄了字段名**。那种写法能过构造函数,
+    而界面上的结果和没写一模一样。
+    """
+    for name, field in REGISTRY.items():
+        assert field.label, f"{name}: 没有中文名"
+        assert field.label != name, f"{name}: label 抄了字段名,等于没翻译"
+        assert not field.label.isascii(), f"{name}: label 里一个中文都没有"
+
+
+def test_the_spec_out_carries_the_label_so_the_frontend_need_not_keep_a_table():
+    """`label` 必须跟着 `field_spec_out` 出去。
+
+    前端自己维护一张 `primary_color -> 主色` 的表也能显示,而那张表会和
+    注册表分叉 —— 分叉的表现是运营在属性页看到「主色」、在颜色维明细里
+    看到 `primary_color`,同一个字段两个名字。
+    """
+    for name, field in REGISTRY.items():
+        assert field_spec_out(name)["label"] == field.label, name

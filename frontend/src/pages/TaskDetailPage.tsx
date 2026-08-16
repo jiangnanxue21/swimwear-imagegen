@@ -97,7 +97,7 @@ function CandidateTile({
         <div>
           {candidate.width ?? '—'}×{candidate.height ?? '—'}
         </div>
-        <div className="mono" style={{ color: brandVars.textMuted }}>seed {candidate.seed ?? '—'}</div>
+        <div className="mono" style={{ color: brandVars.textMuted }}>种子 {candidate.seed ?? '—'}</div>
         <Button
           size="small"
           type="link"
@@ -157,8 +157,8 @@ export default function TaskDetailPage() {
       query.data && taskLiveness(query.data.status) === 'LIVE' ? 4000 : false,
   })
 
-  // 成功评分和评分调用台账必须分开取：前者只在解析成功后才有行，后者才包含
-  // 限流、鉴权失败、超时和非法 JSON。只查前者会把“调用失败”显示成“没评分”。
+  // 成功评分和评分调用台账必须分开取:前者只在解析成功后才有行,后者才包含
+  // 限流、鉴权失败、超时和非法 JSON。只查前者会把「调用失败」显示成「没评分」。
   const evaluationAttempts = useQuery({
     queryKey: ['task-evaluation-attempts', id],
     queryFn: () => evaluationApi.attemptsForTask(id),
@@ -184,7 +184,7 @@ export default function TaskDetailPage() {
     if (!id || !status || taskLiveness(status) === 'LIVE') return
     evaluations.refetch()
     evaluationAttempts.refetch()
-    // 两个 query handle 每次渲染都是新对象；依赖只跟状态走
+    // 两个 query handle 每次渲染都是新对象;依赖只跟状态走
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, status])
 
@@ -230,9 +230,9 @@ export default function TaskDetailPage() {
   const attemptColumns: ColumnsType<Attempt> = [
     { title: '轮', dataIndex: 'round_number', width: 50, align: 'center' },
     { title: '次', dataIndex: 'attempt_number', width: 50, align: 'center' },
-    { title: 'Provider', dataIndex: 'provider', width: 90 },
+    { title: '服务商', dataIndex: 'provider', width: 90 },
     {
-      title: 'seed',
+      title: '随机种子',
       dataIndex: 'seed',
       width: 110,
       render: (v: number | null) => <span className="mono">{v ?? '—'}</span>,
@@ -315,7 +315,7 @@ export default function TaskDetailPage() {
         <Alert
           type="warning"
           showIcon
-          message="提交结果未知:这次生成可能已经在 Provider 那边跑起来了"
+          message="提交结果未知:这次生成可能已经在服务商那边跑起来了"
           description={
             <Space direction="vertical" size={4}>
               <span>
@@ -348,21 +348,21 @@ export default function TaskDetailPage() {
           message={
             task.dispatch_status === 'DISPATCHED'
               ? task.status === 'CREATED'
-                ? '消息已进入 Redis，但还没有 Celery worker 领取'
-                : '消息已进入 Redis，正在等待 Celery worker 领取'
+                ? '任务消息已进入队列,但还没有后台执行进程来领'
+                : '任务消息已进入队列,正在等后台执行进程来领'
               : task.dispatch_status === 'PENDING'
-                ? '消息正在等待投递到 Redis'
+                ? '任务消息正在等待投递到队列'
                 : task.dispatch_status === 'ABANDONED'
-                  ? '消息投递已放弃，需要处理 Redis 或 worker 故障'
+                  ? '任务消息投递已放弃,需要排查队列(Redis)或后台执行进程的故障'
                   : '任务正在等待后台执行'
           }
           description={(
             <Space direction="vertical" size={2}>
-              <span>FastAPI 窗口只记录 HTTP；真正的 FASHN 请求与报错会出现在 Celery worker 窗口。</span>
+              <span>接口服务只记录 HTTP 请求;真正的 FASHN 调用与报错在后台执行进程(Celery worker)的窗口里。</span>
               <span className="mono">
-                Windows 启动：python -m celery -A app.tasks.celery_app:celery_app worker -l info -P solo
+                Windows 启动命令:python -m celery -A app.tasks.celery_app:celery_app worker -l info -P solo
               </span>
-              {task.dispatch_error && <span>最近一次派发错误：{task.dispatch_error}</span>}
+              {task.dispatch_error && <span>最近一次派发错误:{task.dispatch_error}</span>}
             </Space>
           )}
         />
@@ -372,8 +372,8 @@ export default function TaskDetailPage() {
         <Alert
           type="info"
           showIcon
-          message="任务在调用 Provider 前已经取消"
-          description="因此下面没有 FASHN 请求记录或 Provider 报错；这类未执行任务可以从任务列表删除。"
+          message="任务在调用服务商前已经取消"
+          description="因此下面没有 FASHN 请求记录,也没有服务商报错;这类未执行的任务可以从任务列表删除。"
         />
       )}
 
@@ -386,7 +386,7 @@ export default function TaskDetailPage() {
           type="warning"
           showIcon
           message="本轮没有达到 A 档,已自动淘汰并排下一轮"
-          description="重生原因与修复策略记录在下方的 Provider 调用记录里。"
+          description="重生原因与修复策略记录在下方的出图调用记录里。"
         />
       )}
 
@@ -418,7 +418,7 @@ export default function TaskDetailPage() {
           <Descriptions.Item label="商品">
             <Link to={`/products/${task.product_id}`}>查看商品</Link>
           </Descriptions.Item>
-          <Descriptions.Item label="Provider">{task.provider}</Descriptions.Item>
+          <Descriptions.Item label="出图服务商">{task.provider}</Descriptions.Item>
           <Descriptions.Item label="路由">{task.routing_mode}</Descriptions.Item>
           <Descriptions.Item label="模式">{MODE_LABEL[task.mode] ?? task.mode}</Descriptions.Item>
           <Descriptions.Item label="轮次">{task.current_round} / {task.max_rounds}</Descriptions.Item>
@@ -429,7 +429,7 @@ export default function TaskDetailPage() {
           <Descriptions.Item label="队列派发">
             {task.dispatch_status ?? '—'}（尝试 {task.dispatch_attempts} 次）
           </Descriptions.Item>
-          <Descriptions.Item label="基础 seed" span={3}>{task.base_seed ?? '默认'}</Descriptions.Item>
+          <Descriptions.Item label="基础随机种子" span={3}>{task.base_seed ?? '默认'}</Descriptions.Item>
           <Descriptions.Item label="幂等键" span={3}>
             <span className="mono" style={{ fontSize: fontScale.meta }}>{task.idempotency_key}</span>
           </Descriptions.Item>
@@ -483,7 +483,7 @@ export default function TaskDetailPage() {
       <Card size="small" title="标题、卖点与描述">
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           <span>
-            文案不是生成任务的一部分：它使用已确认的商品属性生成标题、卖点、描述和关键词，
+            文案不是生成任务的一部分:它使用已确认的商品属性生成标题、卖点、描述和关键词,
             并在商品向导中单独版本化、校验和批准。
           </span>
           <Link to={`/wizard/${task.product_id}?step=COPY`}>
@@ -543,7 +543,7 @@ export default function TaskDetailPage() {
         )}
       </Drawer>
 
-      <Card size="small" title={`Provider 调用记录 · ${task.attempts.length} 次`}>
+      <Card size="small" title={`出图调用记录 · ${task.attempts.length} 次`}>
         <Table<Attempt>
           rowKey="id"
           size="small"

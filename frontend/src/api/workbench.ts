@@ -553,7 +553,7 @@ export const STALE_COMPONENT_LABEL: Record<string, string> = {
   upstream_snapshot: '颜色维快照',
   shared_facts: 'SPU 已确认事实',
   shared_sample: '共享样品',
-  color_set: 'ACTIVE 颜色集合',
+  color_set: '在售颜色集合',
   color_facts: '颜色已确认事实',
   color_sample: '颜色样品',
   color_plan: '颜色生成方案',
@@ -792,11 +792,18 @@ export interface FlowAnomaly {
  */
 export function detectFlowAnomaly(flow: ProductFlow): FlowAnomaly | null {
   const state = new Map<FlowStep, StepState>()
+  //: 异常详情里也说中文。这段话最后是显示给运营看的(工作台那个「状态异常」
+  //: 的浮层),而 `BLOCKED` / `IMAGE_SET` 这种词摆在那里,他既看不懂也
+  //: 转述不出去 —— 而这条提示的全部用处就是被转述给开发
+  const stateText = (step: FlowStep) => {
+    const v = state.get(step)
+    return v ? STEP_STATE_LABEL[v]?.text ?? v : '缺失'
+  }
   for (const step of flow.steps) {
     if (!(step.state in STEP_STATE_LABEL)) {
       return {
         reason: `未知的子状态 ${step.state}`,
-        detail: `${step.step} = ${step.state};前端文案表里没有这个取值,可能是后端枚举先上了线`,
+        detail: `${FLOW_STEP_LABEL[step.step] ?? step.step} = ${step.state};前端文案表里没有这个取值,可能是后端枚举先上了线`,
       }
     }
     state.set(step.step, step.state)
@@ -806,7 +813,7 @@ export function detectFlowAnomaly(flow: ProductFlow): FlowAnomaly | null {
   if (missing.length) {
     return {
       reason: '聚合接口少返回了子状态',
-      detail: `缺少:${missing.join('、')}`,
+      detail: `缺少:${missing.map((s) => FLOW_STEP_LABEL[s] ?? s).join('、')}`,
     }
   }
 
@@ -825,21 +832,21 @@ export function detectFlowAnomaly(flow: ProductFlow): FlowAnomaly | null {
   if (started('ATTRIBUTE') && !materialReady) {
     return {
       reason: '素材未就绪,属性步却已开工',
-      detail: `素材 = ${state.get('MATERIAL')},属性 = ${state.get('ATTRIBUTE')}`,
+      detail: `素材 = ${stateText('MATERIAL')},属性 = ${stateText('ATTRIBUTE')}`,
     }
   }
   for (const step of ['IMAGE_SET', 'COPY'] as FlowStep[]) {
     if (started(step) && !ready('ATTRIBUTE')) {
       return {
         reason: `属性未确认,${FLOW_STEP_LABEL[step]}步却已开工`,
-        detail: `属性 = ${state.get('ATTRIBUTE')},${FLOW_STEP_LABEL[step]} = ${state.get(step)}`,
+        detail: `属性 = ${stateText('ATTRIBUTE')},${FLOW_STEP_LABEL[step]} = ${stateText(step)}`,
       }
     }
   }
   if (started('DRAFT') && !(ready('IMAGE_SET') && ready('COPY'))) {
     return {
       reason: '图片集或文案未批准,草稿却已开工',
-      detail: `图片集 = ${state.get('IMAGE_SET')},文案 = ${state.get('COPY')},草稿 = ${state.get('DRAFT')}`,
+      detail: `图片集 = ${stateText('IMAGE_SET')},文案 = ${stateText('COPY')},草稿 = ${stateText('DRAFT')}`,
     }
   }
 

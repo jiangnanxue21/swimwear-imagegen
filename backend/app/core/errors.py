@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -99,10 +100,56 @@ class FieldProblem:
     `undefined` —— `http_error_handler` 顶部记的正是这件事。
     """
 
-    #: 出问题的位置。点分路径,与 pydantic 的 `loc` 同源(``color_variants[0].variant_code``)
+    #: 出问题的位置。**一种方言:`a[0].b`** —— 列表下标用方括号,
+    #: 对象字段用点。归一化在 `normalize_pydantic_loc()`,见那个函数
     loc: str
     #: 给人看的那句话
     msg: str
+
+
+def normalize_pydantic_loc(loc: Sequence[object]) -> str:
+    """pydantic 的 `loc` 元组 -> 全仓唯一的那种方言。
+
+        ("body", "color_variants", 0, "variant_code")  ->  color_variants[0].variant_code
+        ("query", "page")                              ->  page
+
+    ## 为什么必须归一
+
+    `fields` 这个通道里以前有**两种方言**:
+
+        服务层   `spu_service._api_loc()` 产出 `color_variants[1].variant_code`
+        框架层   `main.py` 直接 `".".join(...)`,产出
+                 `body.color_variants.0.variant_code`
+
+    而 `_api_loc()` 存在的全部理由就是让前端高亮到具体那一行。前端只认一种,
+    于是另一种落进"通用问题"那一栏 —— 偏偏**最常见**的那几类错(长度超限、
+    颜色数超上限、类型不对)都被 schema 先接走,走的正是认不出的那一种。
+    结果是运营看到一条英文原文、指不到任何一行。
+
+    ## 三条口径
+
+    `body` / `query` / `path` / `header` / `cookie` 这些**位置前缀去掉**:
+    它们说的是"从哪儿来",而前端要的是"表单里哪一格"。整数下标写成方括号。
+    其余原样点分。
+    """
+    parts = list(loc or ())
+    if parts and str(parts[0]) in _PYDANTIC_LOC_SOURCES:
+        parts = parts[1:]
+    out = ""
+    for part in parts:
+        if isinstance(part, int):
+            out += f"[{part}]"
+        elif out:
+            out += f".{part}"
+        else:
+            out = str(part)
+    return out
+
+
+#: pydantic 在 `loc` 首位放的请求位置。它们不是表单字段名,一律剥掉。
+_PYDANTIC_LOC_SOURCES = frozenset(
+    {"body", "query", "path", "header", "cookie"}
+)
 
 
 class AppError(Exception):

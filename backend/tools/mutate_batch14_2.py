@@ -109,8 +109,12 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "N10",
         "渲染块死代码化(batch13-3 / M11 的原样重演)",
         FRONTEND_TAB,
-        "      <MissingEvidenceNotice evidence={lastExtraction.data?.evidence ?? []} />",
-        "      {false && <MissingEvidenceNotice evidence={lastExtraction.data?.evidence ?? []} />}",
+        # 锚点跟着挂载点从单行改成多行(组件多收了一个 `labelOf`)。
+        # 变异**意图一字未改**:把渲染块死代码化,验的仍然是守卫认不认得出
+        # `{false && ...}`。改锚点而不是删变异 —— 失锚的变异不报错、不变红,
+        # 只是安静地什么都没验,那正是 `audit_anchors.py` 存在的理由
+        "      <MissingEvidenceNotice",
+        "      {false && <MissingEvidenceNotice",
     ),
     (
         "N11",

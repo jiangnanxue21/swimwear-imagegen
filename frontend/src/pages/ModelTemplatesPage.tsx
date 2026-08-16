@@ -12,9 +12,11 @@ import {
   AUDIENCE_LABEL,
   BODY_TYPES,
   BODY_TYPES_BY_AUDIENCE,
+  BODY_TYPE_LABEL,
   MODEL_AUDIENCES,
   MODEL_LICENSE_STATUS_LABEL,
   POSES,
+  POSE_LABEL,
   type Audience,
   type ModelTemplate,
 } from '../api/types'
@@ -120,7 +122,7 @@ function LicenseFields() {
       <Form.Item
         name="prohibited_categories"
         label="禁止使用的品类"
-        extra="按规则包键填,如 men_swimwear;与草稿用的是同一个派生"
+        extra="按规则包的键填,例如 men_swimwear —— 和生成上架草稿时用的是同一套键"
       >
         <Select mode="tags" placeholder="回车添加" />
       </Form.Item>
@@ -248,7 +250,7 @@ export default function ModelTemplatesPage() {
                     裁掉头和脚之后几个模板长得一样,选哪个都行等于没得选 */}
                 <Image
                   src={t.url}
-                  alt={`模特模板 ${t.name} · ${t.pose} · ${t.body_type}`}
+                  alt={`模特模板 ${t.name} · ${POSE_LABEL[t.pose] ?? t.pose} · ${BODY_TYPE_LABEL[t.body_type] ?? t.body_type}`}
                   preview={{ mask: '查看大图' }}
                 />
                 <figcaption>
@@ -258,8 +260,8 @@ export default function ModelTemplatesPage() {
                         的字段 —— 选模特时看不到受众,§10.5 的硬约束就只剩
                         后端一道。§21.3:文字标签,不用性别符号或颜色编码 */}
                     <Tag>{AUDIENCE_LABEL[t.audience as Audience] ?? t.audience}</Tag>
-                    <Tag>{t.pose}</Tag>
-                    <Tag>{t.body_type}</Tag>
+                    <Tag>{POSE_LABEL[t.pose] ?? t.pose}</Tag>
+                    <Tag>{BODY_TYPE_LABEL[t.body_type] ?? t.body_type}</Tag>
                     {t.license_status && t.license_status !== 'LICENSED' ? (
                       <BrandTag tone={t.license_status === 'UNVERIFIED' ? 'warning' : 'danger'}>
                         {MODEL_LICENSE_STATUS_LABEL[t.license_status] ?? t.license_status}
@@ -365,7 +367,7 @@ export default function ModelTemplatesPage() {
           </Form.Item>
           <Space.Compact block>
             <Form.Item name="pose" label="姿势" style={{ width: '50%', marginRight: 8 }}>
-              <Select options={POSES.map((v) => ({ value: v, label: v }))} />
+              <Select options={POSES.map((v) => ({ value: v, label: POSE_LABEL[v] }))} />
             </Form.Item>
             {/* 体型选项按受众过滤(§10.4)。选了男装还能选到 CURVY 的话,
                 那个操作就"可以做到"了 —— 后端会拒,但错误说在提交之后 */}
@@ -378,15 +380,16 @@ export default function ModelTemplatesPage() {
                     <Select
                       disabled={!picked}
                       placeholder={picked ? undefined : '先选受众'}
-                      options={options.map((v) => ({ value: v, label: v }))}
+                      options={options.map((v) => ({ value: v, label: BODY_TYPE_LABEL[v] ?? v }))}
                     />
                   </Form.Item>
                 )
               }}
             </Form.Item>
           </Space.Compact>
-          <Form.Item name="background" label="背景">
-            <Input placeholder="studio" />
+          {/* 背景词会拼进出图提示词,所以填英文 —— 与商品的颜色字段同一个道理 */}
+          <Form.Item name="background" label="背景" extra="填英文,会直接进出图提示词">
+            <Input placeholder="例如 studio" />
           </Form.Item>
           <Form.Item name="tags" label="标签">
             <Select mode="tags" placeholder="回车添加" />
@@ -484,7 +487,7 @@ export default function ModelTemplatesPage() {
           </Form.Item>
           <Space.Compact block>
             <Form.Item name="pose" label="姿势" style={{ width: '50%', marginRight: 8 }}>
-              <Select options={POSES.map((v) => ({ value: v, label: v }))} />
+              <Select options={POSES.map((v) => ({ value: v, label: POSE_LABEL[v] }))} />
             </Form.Item>
             <Form.Item name="background" label="背景" style={{ width: '50%' }}>
               <Input />

@@ -178,6 +178,16 @@ class ColorView:
     missing_required_fields: frozenset[str] = frozenset()
     #: 有冲突待人决定的字段。有值就是 NEEDS_CONFIRM
     conflicting_fields: frozenset[str] = frozenset()
+    #: 字段名 -> 中文名。**由调用方从注册表递进来,本层不去查。**
+    #:
+    #: 上面两个集合装的是标识符(判定要用),而 `detail` 是给运营看的一句话
+    #: —— 「缺:primary_color」既读不懂也转述不出去。翻译需要注册表,
+    #: 而本层不许 import 它(见 `test_a45_batch25_color_substate` 的
+    #: 「汇总,不重算」:那条守卫钉死本模块只能 import `workbench.flow`)。
+    #:
+    #: 空表 = 调用方没给,`_label_of` 回落成字段名本身。**不回落成空串**:
+    #: 少一个中文名的表现应该是显示一个英文名,不是显示一句「缺:、」
+    field_labels: Mapping[str, str] = field(default_factory=dict)
 
     #: 这个颜色自有的启用图片项数。None = 没查
     owned_image_count: int | None = None
@@ -246,16 +256,25 @@ def _material(view: ColorView) -> ColorStepResult:
     return ColorStepResult(FlowStep.MATERIAL, ColorSubState.DONE)
 
 
+def _labels(view: ColorView, names: Iterable[str]) -> tuple[str, ...]:
+    """字段名 -> 中文名,按字段名排序后翻译。
+
+    排序用**字段名**而不是中文名:同一组缺失字段在两次请求之间的顺序
+    必须稳定,否则界面上那句话会无缘无故地变一次序,看起来像有东西变了。
+    """
+    return tuple(view.field_labels.get(n, n) for n in sorted(names))
+
+
 def _attribute(view: ColorView, *, material_ok: bool) -> ColorStepResult:
     if view.confirmed_fields is None:
         return ColorStepResult(FlowStep.ATTRIBUTE, ColorSubState.UNKNOWN, "颜色事实没查")
     if view.conflicting_fields:
-        names = "、".join(sorted(view.conflicting_fields))
+        names = "、".join(_labels(view, view.conflicting_fields))
         return ColorStepResult(
             FlowStep.ATTRIBUTE, ColorSubState.NEEDS_CONFIRM, f"待决定:{names}"
         )
     if view.missing_required_fields:
-        names = "、".join(sorted(view.missing_required_fields))
+        names = "、".join(_labels(view, view.missing_required_fields))
         # 缺必需事实时,是"还没做"还是"做不了"取决于上一步:样品都没有的话
         # 识别跑不起来,这时候说 TODO 会让运营在属性页干等
         state = ColorSubState.TODO if material_ok else ColorSubState.BLOCKED

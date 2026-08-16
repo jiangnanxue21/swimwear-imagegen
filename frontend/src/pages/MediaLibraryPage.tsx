@@ -22,9 +22,9 @@ import PageHeader from '../components/PageHeader'
 /**
  * 素材库(M1)。
  *
- * 这一页存在的理由不是「多一个能看图的地方」，而是：统一素材层上线之后，
- * **来源与角色是两个独立维度**，需要一个地方能同时按两者筛。以前商品图、
- * 生成候选、成品图分散在三个页面，「这个 SPU 到底有哪些图可以用来上架」
+ * 这一页存在的理由不是「多一个能看图的地方」,而是:统一素材层上线之后,
+ * **来源与角色是两个独立维度**,需要一个地方能同时按两者筛。以前商品图、
+ * 生成候选、成品图分散在三个页面,「这个 SPU 到底有哪些图可以用来上架」
  * 这个问题在界面上根本问不出来。
  */
 
@@ -64,22 +64,29 @@ const SORT_OPTIONS = [
   { value: 'spu:asc', label: 'SPU 升序' },
 ]
 
-const STATUS_COLOR: Record<string, string> = {
-  READY: 'green',
-  PENDING: 'default',
-  QUARANTINED: 'orange',
-  FAILED: 'red',
-  DELETED: 'default',
+/**
+ * 素材生命周期(后端 `MediaStatus`)。文案与颜色放同一张表 —— 拆成两张
+ * 的下场是加一个状态时只补了颜色,标签上留着一个英文枚举值。
+ *
+ * `QUARANTINED` 说「已隔离」不说「不合规」:合规预检有假阳性,
+ * 隔离是「先拦下来等人看」,不是判定。
+ */
+const STATUS_META: Record<string, { text: string; color: string }> = {
+  READY: { text: '可用', color: 'green' },
+  PENDING: { text: '待处理', color: 'default' },
+  QUARANTINED: { text: '已隔离', color: 'orange' },
+  FAILED: { text: '入库失败', color: 'red' },
+  DELETED: { text: '已删除', color: 'default' },
 }
 
-/** 角色来源徽标。模型猜的角色不能当主图，这个信息必须在列表里看得见。 */
+/** 角色来源徽标。模型猜的角色不能当主图,这个信息必须在列表里看得见。 */
 function RoleSourceTag({ asset }: { asset: MediaAsset }) {
   if (asset.role_source === 'HUMAN') return <BrandTag tone="accent">人工</BrandTag>
   if (asset.role_source === 'RULE') return <Tag>规则</Tag>
   if (asset.role_source === 'MODEL') {
     const confident = (asset.role_confidence ?? 0) >= 0.9
     return (
-      <Tooltip title={confident ? '把握足够，可用于主图位' : '把握不足 0.9，不能当主图'}>
+      <Tooltip title={confident ? '把握足够,可用于主图位' : '把握不足 0.9,不能当主图'}>
         <BrandTag tone={confident ? 'accent' : 'warning'}>
           模型 {asset.role_confidence?.toFixed(2) ?? '—'}
         </BrandTag>
@@ -107,8 +114,8 @@ export default function MediaLibraryPage() {
     queryFn: () => mediaApi.list(query),
   })
 
-  // 迁移状态单独拉：它回答的是「回填跑完了没有、这一周干净不干净」，
-  // 和素材列表不是同一件事，也不该因为筛选条件变化就重新查
+  // 迁移状态单独拉:它回答的是「回填跑完了没有、这一周干净不干净」，
+  // 和素材列表不是同一件事,也不该因为筛选条件变化就重新查
   const migration = useQuery({
     queryKey: ['media-migration'],
     queryFn: mediaApi.migrationStatus,
@@ -188,7 +195,7 @@ export default function MediaLibraryPage() {
       </Typography.Title>
 
       {/* 迁移期状态。切换读路径之前这两个数字必须都是 0 —— 放在页面顶部
-          而不是藏在运维脚本里，是因为「一周无 mismatch」是个需要有人天天看的判据。
+          而不是藏在运维脚本里,是因为「一周无 mismatch」是个需要有人天天看的判据。
           A12 之后只对管理员显示:天天看它的人是管理员,不是运营 */}
       {isAdmin && cov && (assetsPending > 0 || candidatesPending > 0) && (
         <Alert
@@ -200,7 +207,7 @@ export default function MediaLibraryPage() {
               商品素材 {cov.product_assets_shadowed}/{cov.product_assets}，
               生成候选 {cov.candidates_linked}/{cov.candidates_with_image}。
               请在后端执行 <span className="mono">python -m app.scripts.backfill_media_assets --apply</span>。
-              回填完成前，素材库看到的不是全部图片。
+              回填完成前,素材库看到的不是全部图片。
             </>
           }
         />
@@ -210,7 +217,7 @@ export default function MediaLibraryPage() {
           type="error"
           showIcon
           message={`双读对账发现 ${mismatchTotal} 处不一致（最近 ${migration.data?.window_days} 天）`}
-          description="新旧两边的素材数据对不上。切换读路径的前提是一周无新增不一致，现在还不能切。详见 media_migration_mismatches 表。"
+          description="新旧两边的素材数据对不上。切换读路径的前提是一周无新增不一致,现在还不能切。详见 media_migration_mismatches 表。"
         />
       )}
       {isAdmin && migrationUnknown && (
@@ -249,7 +256,10 @@ export default function MediaLibraryPage() {
             allowClear
             placeholder="状态"
             style={{ width: 140 }}
-            options={Object.keys(STATUS_COLOR).map((value) => ({ value, label: value }))}
+            options={Object.entries(STATUS_META).map(([value, meta]) => ({
+              value,
+              label: meta.text,
+            }))}
             onChange={(v) => setQuery((q) => ({ ...q, status: v, page: 1 }))}
           />
           {/* 排序做成下拉而不是表头箭头:这一页是图片栅格,没有表头可点。
@@ -320,12 +330,14 @@ export default function MediaLibraryPage() {
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Space wrap size={4}>
                 <Tag>{SOURCE_LABEL[asset.source] ?? asset.source}</Tag>
-                <Tag color={STATUS_COLOR[asset.status]}>{asset.status}</Tag>
+                <Tag color={STATUS_META[asset.status]?.color}>
+                  {STATUS_META[asset.status]?.text ?? asset.status}
+                </Tag>
               </Space>
               <Space wrap size={4}>
                 <RoleSourceTag asset={asset} />
                 {asset.legacy_kind && (
-                  <Tooltip title="从旧表迁移过来的。旧枚举到角色的映射有损，建议复核">
+                  <Tooltip title="从旧表迁移过来的。旧枚举到角色的映射有损,建议复核">
                     <BrandTag tone="sand">待复核</BrandTag>
                   </Tooltip>
                 )}
@@ -390,13 +402,13 @@ export default function MediaLibraryPage() {
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
-            隔离不删除素材，只是让它不参与上架，随时可以放行。
+            隔离不删除素材,只是让它不参与上架,随时可以放行。
             请写清原因——放行的人需要知道当初为什么隔离。
           </Typography.Text>
           <Input.TextArea
             rows={3}
             value={reason}
-            placeholder="例如：图中有供应商水印 / 露出超过平台尺度"
+            placeholder="例如:图中有供应商水印 / 露出超过平台尺度"
             onChange={(e) => setReason(e.target.value)}
           />
         </Space>

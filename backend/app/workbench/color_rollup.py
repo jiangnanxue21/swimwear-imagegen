@@ -47,6 +47,10 @@ from app.workbench import color_flow, upstream_collect, upstream_snapshot
 from app.workbench import stale as stale_rules
 from app.workbench.color_flow import ColorView, SpuColorRollup
 
+#: 字段名 -> 中文名,递给 `color_flow` 拼「缺:…」那句话用。
+#: 建一次而不是每个颜色建一次:一个 SPU 有 24 个颜色上限,而这张表是常量。
+_FIELD_LABELS: Mapping[str, str] = {name: f.label for name, f in REGISTRY.items()}
+
 
 def _required_variant_fields(audience: Audience | None) -> frozenset[str]:
     """这个受众下,VARIANT 层有哪些字段是必需的。
@@ -185,6 +189,11 @@ def build_color_views(
                 sample_count=samples.get(colour.variant_id, 0),
                 confirmed_fields=confirmed,
                 missing_required_fields=required - confirmed,
+                # 中文名从注册表递进去。判定层不许 import 注册表
+                # (「汇总,不重算」那条守卫),而它要拼的那句
+                # 「缺:主色」需要这份词表 —— 所以由这里,也就是
+                # 唯一已经拿着 REGISTRY 的地方,一次性给全
+                field_labels=_FIELD_LABELS,
                 # 冲突要另查一次事实表才知道,而 `ColorUpstream` 只带
                 # CONFIRMED 的版本 —— 本批不猜:留空表示"这里不报冲突",
                 # 属性页仍然会报。硬从"必需字段缺失"推冲突会把两种完全

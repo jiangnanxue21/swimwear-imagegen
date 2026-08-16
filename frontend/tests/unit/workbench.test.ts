@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  FLOW_STEP_LABEL,
   detectFlowAnomaly,
   stepStates,
   type FlowStep,
@@ -74,11 +75,14 @@ describe('detectFlowAnomaly', () => {
   })
 
   it('聚合接口少返回子状态:列出缺哪些', () => {
+    // 列的是**中文步骤名**。这段 detail 最终显示在工作台的「状态异常」浮层里,
+    // 而 COPY / DRAFT 这种词运营既看不懂也转述不出去 —— 转述给开发正是它
+    // 唯一的用处。要断言的是"缺哪几步说得出来",不是"用哪种写法说"。
     const short = flow({}, 'DONE', ORDER.slice(0, 3).map((s) => step(s, 'DONE')))
     const anomaly = detectFlowAnomaly(short)
     expect(anomaly?.reason).toContain('少返回')
-    expect(anomaly?.detail).toContain('COPY')
-    expect(anomaly?.detail).toContain('DRAFT')
+    expect(anomaly?.detail).toContain(FLOW_STEP_LABEL.COPY)
+    expect(anomaly?.detail).toContain(FLOW_STEP_LABEL.DRAFT)
   })
 
   it('未知的下一步动作:明说前端不猜跳转目标', () => {

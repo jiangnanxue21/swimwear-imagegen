@@ -149,7 +149,7 @@ export default function TaskListPage() {
       ),
     },
     {
-      title: 'Provider',
+      title: '服务商',
       dataIndex: 'provider',
       key: 'provider',
       width: 100,
@@ -173,7 +173,7 @@ export default function TaskListPage() {
       // 拼成 `3 / 1` 看起来像数据坏了,所以表格只展示已运行数,
       // 计划上限放在解释里。
       render: (_, row) => (
-        <Tooltip title={`当前自动运行上限 ${row.max_rounds} 轮；重试可能增加实际轮次`}>
+        <Tooltip title={`当前自动运行上限 ${row.max_rounds} 轮;重试可能增加实际轮次`}>
           <span>{row.current_round}</span>
         </Tooltip>
       ),
@@ -220,7 +220,7 @@ export default function TaskListPage() {
             {row.can_retry && (submitUnknown ? (
               // FE-TASK-LIST-04:普通重试对这条稳定 409。给它自己的按钮,
               // 而不是让运营点一次失败再去别处找出路
-              <Tooltip title="提交结果未知:先到 Provider 后台核对,确认没有产生结果后再强制重试">
+              <Tooltip title="提交结果未知:先到服务商后台核对,确认没有产生结果后再强制重试">
                 <Button
                   size="small"
                   danger
@@ -240,7 +240,7 @@ export default function TaskListPage() {
               </Button>
             ))}
             {row.can_delete && (
-              <Tooltip title="删除任务及其执行明细；已经产生的费用不会撤销">
+              <Tooltip title="删除任务及其执行明细;已经产生的费用不会撤销">
                 <Button
                   size="small"
                   danger
@@ -248,7 +248,7 @@ export default function TaskListPage() {
                   loading={remove.isPending && remove.variables === row.id}
                   onClick={() => modal.confirm({
                     title: '删除这条已取消任务？',
-                    content: '任务及其执行明细将被删除；已经产生的费用不会撤销。',
+                    content: '任务及其执行明细将被删除;已经产生的费用不会撤销。',
                     okText: '删除',
                     okButtonProps: { danger: true },
                     cancelText: '取消',
@@ -269,7 +269,7 @@ export default function TaskListPage() {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <PageHeader
         title="生成任务"
-        subtitle="AI 出图的执行记录。失败任务可重试；不再需要的任务请先取消再删除"
+        subtitle="AI 出图的执行记录。失败任务可重试;不再需要的任务请先取消再删除"
       />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>

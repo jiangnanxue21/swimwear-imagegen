@@ -48,6 +48,20 @@ review_checks:
   - crotch
   - print_consistency
 
+# 上面那些键的中文名。审阅页显示的是这一列 —— 键是给 spec 与代码用的,
+# 运营那一侧看到 `cup_shape` 既读不懂也转述不出去。
+# **少一条会在加载期直接拒**(`spec_loader` 的 untranslated 检查),
+# 不会变成审阅页上一个静默冒出来的英文词。
+review_check_labels:
+  cup_shape: 罩杯形状
+  shoulder_strap: 肩带
+  neckline: 领口
+  back_style: 背部款式
+  waistline: 腰线
+  leg_cut: 裤口开叉
+  crotch: 裆部
+  print_consistency: 印花一致性
+
 channel: GENERIC
 # 1.1.0 —— 给 price / stock / lead_time_days 补了 type / minimum / decimal_places。
 #

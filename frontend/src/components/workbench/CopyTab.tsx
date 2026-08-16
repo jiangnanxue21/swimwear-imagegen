@@ -141,7 +141,7 @@ function ClaimTable({ claims, attributes }: { claims: CopyClaim[]; attributes: A
             ]}
           />
         ) : (
-          <span>事实源里找不到这个字段 —— 这条 claim 应当已被 CLAIM_NOT_IN_FACTS 拦下</span>
+          <span>事实源里找不到这个字段 —— 这条卖点声明本该已被 CLAIM_NOT_IN_FACTS 拦下</span>
         )
         return (
           <Popover content={body} title={row.field_name} trigger="click">
@@ -157,7 +157,7 @@ function ClaimTable({ claims, attributes }: { claims: CopyClaim[]; attributes: A
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="这一版没有 claims。颜色与品类没有任何 claim 会被判为硬失败。"
+        description="这一版没有任何卖点声明。颜色与品类一条声明都没有的话,校验会判硬失败。"
       />
     )
   }
@@ -416,7 +416,9 @@ export default function CopyTab({
                     : blocking.length
                       ? '有硬失败,不能批准'
                       : copy.status !== 'VALIDATED'
-                        ? `只有校验通过(VALIDATED)的文案可以批准,当前 ${copy.status}`
+                        ? `只有校验通过的文案可以批准,当前是「${
+                            COPY_STATUS_LABEL[copy.status]?.text ?? copy.status
+                          }」`
                         : '保存并批准'
               }
             >

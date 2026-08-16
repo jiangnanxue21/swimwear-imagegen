@@ -215,7 +215,7 @@ export default function BatchActionBar({
               <Typography.Text style={{ fontSize: fontScale.body }}>
                 {stuck
                   ? '条目已经落库并停在待处理,不会丢。请让管理员检查消息队列是否可用,恢复后在批次详情里点一次重试即可 —— 不要重新建批次,那会重复计费。'
-                  : '批次已经落库,由后台 worker 逐件执行。批次页会自动刷新进度,不用重复提交。'}
+                  : '批次已经落库,由后台执行进程逐件执行。批次页会自动刷新进度,不用重复提交。'}
               </Typography.Text>
               <Button
                 size="small"

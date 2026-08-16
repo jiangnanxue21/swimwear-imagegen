@@ -29,7 +29,7 @@ function GradeBar({ grades }: { grades: Record<Grade, number> }) {
   }
   return (
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
-    <PageHeader title="指标仪表盘" subtitle="系统跑得好不好:分档分布、Provider 调用、出图覆盖率" />
+    <PageHeader title="指标仪表盘" subtitle="系统跑得好不好:分档分布、出图调用、出图覆盖率" />
       <div style={{ display: 'flex', height: 18, borderRadius: 3, overflow: 'hidden' }}>
         {GRADE_ORDER.map((grade) => {
           const count = grades[grade] ?? 0
@@ -97,7 +97,7 @@ export default function DashboardPage() {
       width: 100,
       render: (id: string) => <Link to={`/tasks/${id}`} className="mono">{id.slice(0, 8)}</Link>,
     },
-    { title: 'Provider', dataIndex: 'provider', width: 90 },
+    { title: '服务商', dataIndex: 'provider', width: 90 },
     {
       title: '错误码',
       dataIndex: 'error_code',
@@ -179,7 +179,7 @@ export default function DashboardPage() {
         </Col>
         <Col xs={12} md={6}>
           <Card size="small">
-            <Statistic title="Provider 调用" value={data.providers.total_calls} />
+            <Statistic title="出图调用" value={data.providers.total_calls} />
           </Card>
         </Col>
         <Col xs={12} md={6}>
@@ -229,7 +229,7 @@ export default function DashboardPage() {
 
       <Row gutter={[12, 12]}>
         <Col xs={24} lg={12}>
-          <Card size="small" title="Provider 调用次数" style={{ height: '100%' }}>
+          <Card size="small" title="各服务商调用次数" style={{ height: '100%' }}>
             <CountRow data={data.providers.calls_by_provider} empty="还没有调用记录" />
             {data.providers.failed_attempts > 0 && (
               <div style={{ marginTop: 10, fontSize: fontScale.body, color: brandVars.slate }}>

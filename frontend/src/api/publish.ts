@@ -127,6 +127,65 @@ export interface PublishRejectionOut {
   created_at: string | null
 }
 
+/* ------------------------------------------------------------------
+ * 诊断字段的中文名。
+ *
+ * **这几张表不违反本文件顶部那句「这一层没有文案表」。** 那句话说的是
+ * *派生结论* —— 发布到哪一步了、能点什么、为什么不能提交 —— 那些必须
+ * 由后端 `publish_view.py` 算完给 `*_label`,前端复述一遍就等于有了
+ * 第二份业务规则。
+ *
+ * 下面这四张表翻译的是**已经写死的历史事实**:这次尝试是创建还是更新、
+ * 结局是什么、投递行排到哪了。它们是枚举值,不是结论,后端不会为它们
+ * 派生标签,而抽屉里原来直接把 `SUCCEEDED` / `DEAD` 这类词摆给运营看。
+ *
+ * 查不到时一律回落成原值:后端加了新取值,界面显示的是那个英文词,
+ * 而不是空白 —— 空白会让人以为这一格没有数据。
+ * ------------------------------------------------------------------ */
+
+/** `PublishOperation`。说「首次上架」而不是「创建」——运营眼里创建的是草稿。 */
+export const PUBLISH_OPERATION_LABEL: Record<string, string> = {
+  CREATE: '首次上架',
+  UPDATE: '更新商品',
+  REPUBLISH: '重新上架',
+  DELIST: '下架',
+}
+
+/**
+ * `PublishAttemptStatus`。
+ *
+ * `UNKNOWN` 的措辞是这张表里最要紧的一格:它**不是**「失败」。请求发出去了,
+ * 平台可能已经收到 —— 说成失败会让运营直接重发,而那正是 7.4 节要防的。
+ */
+export const PUBLISH_ATTEMPT_STATUS_LABEL: Record<string, string> = {
+  PENDING: '待发出',
+  IN_FLIGHT: '发送中',
+  SUCCEEDED: '平台已接收',
+  UNKNOWN: '结果未知',
+  FAILED: '平台拒绝',
+  ABORTED: '本地放弃(未发出)',
+}
+
+/**
+ * `PublishOutboxStatus`。
+ *
+ * `DEAD` 说「重试已用尽,待人工处理」而不是「已死亡」—— 它是一句待办,
+ * 不是一个结局:处理完还能重新投递(REDELIVER)。
+ */
+export const PUBLISH_OUTBOX_STATUS_LABEL: Record<string, string> = {
+  PENDING: '排队中',
+  LEASED: '投递中',
+  DONE: '已投递',
+  DEAD: '重试已用尽,待人工处理',
+}
+
+/** `RejectionStatus`。前两档都仍然阻断,措辞不能让人误以为已经了结。 */
+export const PUBLISH_REJECTION_STATUS_LABEL: Record<string, string> = {
+  OPEN: '未处理',
+  FIXED_PENDING_EXPORT: '已声明修复,待新导出佐证',
+  RESOLVED: '已解决',
+}
+
 /** 6.4 的「发布前 / 发布中 / 发布后」三段,后端一次给全 —— 不用拼第二个请求 */
 export interface ChannelListingDetail extends ChannelListingRow {
   draft: {

@@ -79,10 +79,13 @@ function ImagePreview({ images }: { images: DraftImagePreview }) {
         type={images.status === 'INCOMPATIBLE' ? 'error' : 'warning'}
         showIcon
         message={
-          <Space size={8}>
-            <span>图片映射{meta.text}</span>
-            <Tag color={meta.color}>{images.status}</Tag>
-          </Space>
+          /*
+           * 原来这里是「图片映射{meta.text}」后面再挂一个 `<Tag>{images.status}</Tag>`
+           * —— 同一件事说两遍,而第二遍印的是 UNPROVEN / INCOMPATIBLE 这类英文
+           * 枚举值。中文那一遍留下,英文那一遍去掉:上面卡片标题里已经有一个
+           * 同款中文 Tag,再补一个只会让同一屏出现两个一模一样的标签。
+           */
+          <span>图片映射{meta.text}</span>
         }
         description={images.note}
       />

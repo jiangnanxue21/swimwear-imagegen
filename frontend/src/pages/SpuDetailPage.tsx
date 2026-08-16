@@ -62,11 +62,14 @@ import PageHeader from '../components/PageHeader'
 import GenerationPlanPanel from '../components/GenerationPlanPanel'
 import {
   SPU_AUDIENCE_LABEL,
+  SPU_STATUS_LABEL,
+  categoryLabel,
   colorVariantLabel,
   spusApi,
   type ColorVariant,
   type SpuSku,
 } from '../api/spus'
+import type { FieldProblem } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 import { brandVars, fontScale } from '../theme'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -114,7 +117,37 @@ export default function SpuDetailPage() {
     queryClient.invalidateQueries({ queryKey: ['spu', spuId] })
   }, [queryClient, spuId])
 
-  const onWriteError = useWriteError(refresh)
+  /*
+   * 编码规则从后端拉(与建档页同一个端点)。
+   *
+   * 这一页原来把 `maxLength={16}` 和 `.toUpperCase()` 写死在输入框上,
+   * 而 `max_variant_code` / `normalizes_to_uppercase` 正是 `/spus/code-rules`
+   * 下发的两样东西 —— 变异 R1 教的"值证明不了出处"在前端复现了一遍:
+   * 16 和后端常量恰好相等,所以任何比值的守卫都是绿的,而改后端那个常量
+   * 时这一页不会跟着变。
+   *
+   * 拉不到不致命:`maxLength` 退回不限、只 trim 不转大写,判定本来就在后端。
+   */
+  const rules = useQuery({
+    queryKey: ['spu-code-rules'],
+    queryFn: () => spusApi.codeRules(),
+    staleTime: Infinity,
+  })
+  const normalizeCode = (value: string) => {
+    const trimmed = value.trim()
+    return rules.data?.normalizes_to_uppercase ? trimmed.toUpperCase() : trimmed
+  }
+
+  /*
+   * 字段级明细也要接(`onFields`)。
+   *
+   * 「加一个颜色」走的是 `add_color_variant` -> `_translate()`,和建档页
+   * **同一条错误路径**、同样点了名(`loc` 就是 `variant_code`,正好对上
+   * 下面那个唯一的输入框)。上一版这里只传了 `refresh`,于是那份明细
+   * 被丢掉一次 —— `useWriteError` 自己的文档写着「修一半比不修更危险」。
+   */
+  const [colourProblems, setColourProblems] = useState<FieldProblem[]>([])
+  const onWriteError = useWriteError(refresh, setColourProblems)
 
   const saveBasics = useMutation({
     mutationFn: () =>
@@ -205,9 +238,20 @@ export default function SpuDetailPage() {
       width: 520,
       content: (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          {/*
+            **这句话必须说得到做得到。** 上一版写的是「勾选『显示已停用』
+            找得回来」,而那个勾选框不存在 —— `spusApi.list` 全树零调用点,
+            路由里也没有 SPU 列表页(只有 `/spus/:spuId`)。
+            一句页面自己做不到的话,正是这一轮在消灭的形状,而它在这里
+            换了个位置重现了一次。
+
+            改成实话:底下的 SKU **不**跟着归档,所以它们仍然在工作台与
+            SPU 聚合页上,从任意一行都能点回这一页 —— 那条路是真的通的。
+          */}
           <div>
             停用之后这个款从建档列表里消失,<b>不再接受新的颜色与 SKU</b>。
-            颜色、SKU、素材、属性、审计一样不少 —— 勾选「显示已停用」找得回来。
+            颜色、SKU、素材、属性、审计一样不少;底下的 SKU 不跟着归档,
+            所以从工作台或 SPU 聚合页点进任意一行,都能回到这一页恢复它。
           </div>
           <div style={{ color: brandVars.textFaint }}>
             它<b>不会</b>连带归档底下那 {spu.sku_count} 行 SKU:归档一行有它
@@ -281,7 +325,8 @@ export default function SpuDetailPage() {
     },
     {
       // display_name 是投影列:唯一写入点是属性服务在 VARIANT 层确认
-      // `standard_color_name` 的那一刻。建档后它是空的,而空在这里有含义 ——
+      // `primary_color` 的那一刻(**不是 `standard_color_name`** —— 那个名字
+      // 全仓没有对应字段)。建档后它是空的,而空在这里有含义 ——
       // 它就是"这个颜色的正式名称还没被确认过",所以照实显示,不回落
       title: '正式名称',
       dataIndex: 'display_name',
@@ -426,7 +471,7 @@ export default function SpuDetailPage() {
             <Space>
               {disabled ? (
                 <Button loading={restore.isPending} onClick={() => restore.mutate()}>
-                  恢复到建档动线
+                  恢复这个款
                 </Button>
               ) : (
                 /*
@@ -550,8 +595,12 @@ export default function SpuDetailPage() {
                   {/* 受众在 SPU 层必填且没有"待确认"(§4.2),所以这里不会有空态 */}
                   <Tag>{SPU_AUDIENCE_LABEL[spu.audience] ?? spu.audience}</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="品类">{spu.base_category}</Descriptions.Item>
-                <Descriptions.Item label="状态">{spu.status}</Descriptions.Item>
+                <Descriptions.Item label="品类">{categoryLabel(spu.base_category)}</Descriptions.Item>
+                <Descriptions.Item label="状态">
+                  <Tag color={SPU_STATUS_LABEL[spu.status]?.color}>
+                    {SPU_STATUS_LABEL[spu.status]?.text ?? spu.status}
+                  </Tag>
+                </Descriptions.Item>
                 <Descriptions.Item label="SKU 数">{spu.sku_count}</Descriptions.Item>
                 <Descriptions.Item label="供应商编号">
                   {spu.supplier_ref || '—'}
@@ -583,18 +632,20 @@ export default function SpuDetailPage() {
                   style={{ width: 200 }}
                   value={newColour.variant_code}
                   placeholder="颜色编码,例如 NVY"
-                  maxLength={16}
-                  // 与建档页同一个归一化(去空白 + 转大写),而且**只有**
-                  // 这两件事 —— 后端 `normalize_code` 刻意不删非法字符
+                  status={colourProblems.length ? 'error' : undefined}
+                  maxLength={rules.data?.max_variant_code}
+                  // 与建档页同一个归一化(去空白 + 按后端说的转大写),而且
+                  // **只有**这两件事 —— 后端 `normalize_code` 刻意不删非法字符
                   onBlur={(e) =>
                     setNewColour((c) => ({
                       ...c,
-                      variant_code: e.target.value.trim().toUpperCase(),
+                      variant_code: normalizeCode(e.target.value),
                     }))
                   }
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setColourProblems([])
                     setNewColour((c) => ({ ...c, variant_code: e.target.value }))
-                  }
+                  }}
                 />
                 <Input
                   value={newColour.working_name}
@@ -614,6 +665,41 @@ export default function SpuDetailPage() {
                 </Button>
                 <Button onClick={() => setAddingColour(false)}>取消</Button>
               </Space.Compact>
+            )}
+            {/*
+              拉不到编码规则要**说出来**(FE-GLOBAL-03)。与建档页同一条:
+              运营看到一个没有长度限制、不自动转大写的输入框时,他分不出
+              "这个系统本来就不管"和"这一次没拉到"。校验不受影响 ——
+              它在后端,点「加上」时会真的跑一遍。
+            */}
+            {addingColour && rules.isError && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 10 }}
+                message="编码规则没拉到 —— 长度限制与自动大写这一次不生效"
+                description="校验不受影响(它在后端,点「加上」时会真的跑一遍)。"
+                action={
+                  <Button size="small" onClick={() => rules.refetch()}>
+                    重试
+                  </Button>
+                }
+              />
+            )}
+            {addingColour && colourProblems.length > 0 && (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 10 }}
+                message="这个颜色编码后端没收"
+                description={
+                  <ul style={{ paddingLeft: 18, margin: 0 }}>
+                    {colourProblems.map((p, i) => (
+                      <li key={i}>{p.msg}</li>
+                    ))}
+                  </ul>
+                }
+              />
             )}
             {addingColour && (
               <Alert
