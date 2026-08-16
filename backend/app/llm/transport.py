@@ -456,6 +456,10 @@ class MultimodalClient:
                         "llm request retrying",
                         extra={
                             "extra_fields": {"event": "llm.retrying",
+                                # 少了它,「为什么这一次等了 8 秒」在链路模式里
+                                # 会从这条调用的时间线上掉队 —— 而重试恰恰是
+                                # 排一次慢调用时第一个要看的东西。
+                                "llm_call_id": call_id,
                                 "attempt": attempt + 1,
                                 "max_retries": self.config.max_retries,
                                 "delay_seconds": round(delay, 2),
@@ -518,6 +522,11 @@ class MultimodalClient:
         # 字节。交给 httpx 的 `json=` 序列化,它会按自己的参数再编一次,
         # 于是 pre-flight 通过的请求在线上是另一个尺寸(见 canonical_json_bytes)。
         # Content-Type 由适配器在 headers 里显式写好,不依赖 `json=` 代设。
+        # 这一次往返的墙钟。**旁挂库要它**:「第一次 429 用了 775ms、第二次 200
+        # 用了 7.2 秒」这类对照是载荷面板里两个页签并排摆着的全部理由,而上一版
+        # 往 `capture_attempt` 里传的是写死的 `None` —— 界面上那一格永远是空的。
+        # 量在 `_send_once` 里而不是外层:外层那个 `attempt_started` 含重试等待。
+        round_trip_started = time.monotonic()
         try:
             response = await client.post(
                 request.url,
@@ -537,6 +546,7 @@ class MultimodalClient:
                 detail=self._error_detail(status=None),
             ) from exc
 
+        round_trip_ms = int((time.monotonic() - round_trip_started) * 1000)
         status = response.status_code
         response_bytes = bytes(response.content)
         try:
@@ -549,6 +559,7 @@ class MultimodalClient:
             "llm_call_id": _llm_call_id.get(),
             "attempt": _llm_attempt.get(),
             "http_status": status,
+            "duration_ms": round_trip_ms,
             "response_body_bytes": len(response_bytes),
             "content_type": response.headers.get("content-type"),
             "upstream_request_id": (
@@ -567,7 +578,7 @@ class MultimodalClient:
             _llm_call_id.get(),
             attempt=_llm_attempt.get(),
             http_status=status,
-            duration_ms=None,
+            duration_ms=round_trip_ms,
             content_type=response.headers.get("content-type"),
             upstream_request_id=response_fields["upstream_request_id"],
             body=body,

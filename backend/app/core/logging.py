@@ -176,10 +176,14 @@ def _attach_ring_handler(root: logging.Logger) -> None:
 
         if not settings.OPS_LOG_RING_ENABLED:
             return
-        from app.core.log_ring import RingHandler
+        from app.core.log_ring import RingHandler, SelfTrafficFilter
 
         ring = RingHandler(url=settings.REDIS_URL, cap=settings.OPS_LOG_RING_CAP)
         ring.setFormatter(JsonFormatter())
+        # 控制台自己的访问日志不进环形。挂在 handler 上而不是 logger 上:
+        # stdout 那一份必须原样保留(归档面一个字节没动),被挡掉的只有
+        # "诊断窗口里的自指部分"。理由全文见 SelfTrafficFilter。
+        ring.addFilter(SelfTrafficFilter(f"{settings.API_PREFIX}/ops/"))
         root.addHandler(ring)
     except Exception:  # noqa: BLE001 - 见 docstring 最后一段
         return

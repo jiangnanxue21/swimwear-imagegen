@@ -96,6 +96,45 @@ ROUTINE_GROUPS: dict[str, str] = {
 }
 
 
+#: 级别序。**API、CLI、折叠判定共用这一张。**
+#:
+#: 上一版没有它:`api/ops_logs.py` 用 `level == 精确值` 过滤,而
+#: `tools/watch_logs.py` 的 `--level` 是「最低级别」。同一个词在两个入口
+#: 是两种意思,而设计文档写的是「一个人在终端学会的过滤,换到页面上不用重学」。
+#: 更糟的是精确匹配把 §1.4 那个病放了回来:运营选 WARNING 想找问题,
+#: ERROR **被过滤掉了**。
+LEVEL_ORDER: dict[str, int] = {
+    "DEBUG": 10,
+    "INFO": 20,
+    "WARNING": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+}
+
+#: 认不出的级别按 INFO 算 —— 第三方 logger 偶尔会写自定义级别名,
+#: 把它们当成"最低级"会让筛选悄悄漏掉,当成"最高级"会让它们永远不被折叠。
+_UNKNOWN_LEVEL_RANK = 20
+
+#: 不折叠的下限。**ERROR 与 CRITICAL 都在线上。**
+#:
+#: 上一版 API 写的是 `level != "ERROR"`,于是一条 CRITICAL 的例行事件照样被
+#: 折进计数条 —— 而 CLI 写的是 `< 40`,两边对 CRITICAL 的结论相反。
+NEVER_FOLD_FROM = LEVEL_ORDER["ERROR"]
+
+#: 访问日志的事件码。环形的自指过滤(`core/log_ring.py`)要按它认人,
+#: 而那里不许再抄一份字面量 —— 抄了就是第二张分类表。
+ACCESS_EVENT = "http.request_completed"
+
+#: 任务链路里一轮的里程碑。链路模式按 `round` 字段分段,段头取这条事件的摘要
+#: (`docs/LOG-CONSOLE.md` §5.2)。
+#:
+#: **它必须住在这里,不能住在前端。** 硬规则第 4 条:ops 页源码里不许出现
+#: 任何事件码字面量。所以 `api/ops_logs.py` 在每一条上给出一个布尔
+#: (`round_summary`),前端只认那个布尔 —— 哪条事件当段头是分类法的一部分,
+#: 而分类法只有一份。
+ROUND_SUMMARY_EVENT = "gen.round_evaluated"
+
+
 @dataclass(frozen=True)
 class LogEvent:
     """一个事件码的元数据。
@@ -464,6 +503,32 @@ def label_of(event: str | None) -> str | None:
 def is_routine(event: str | None) -> bool:
     known = EVENTS.get(event or "")
     return known.routine if known else False
+
+
+def level_rank(level: str | None) -> int:
+    return LEVEL_ORDER.get(str(level or "").upper(), _UNKNOWN_LEVEL_RANK)
+
+
+def level_at_least(level: str | None, minimum: str | None) -> bool:
+    """这条日志够不够 ``minimum`` 这一档。**级别筛选一律走它。**
+
+    `minimum` 为空表示不筛。判据是"及以上"而不是"恰好等于":选 WARNING
+    的人要找的是问题,而 ERROR 是更严重的问题 —— 把它挡掉是把 §1.4 那个
+    病换了个地方复发。
+    """
+    if not minimum:
+        return True
+    return level_rank(level) >= level_rank(minimum)
+
+
+def folds_away(event: str | None, level: str | None) -> bool:
+    """这条日志在流视角里能不能折进计数条。
+
+    **判定只有这一份**,API 的 `_shape` 与 CLI 的 `Filter.accepts` 都调它。
+    上一版两边各写各的,对 CRITICAL 的结论正好相反 —— 而"什么时候可以藏一条
+    日志"是一条业务规则,规则有两份就等于没有。
+    """
+    return is_routine(event) and level_rank(level) < NEVER_FOLD_FROM
 
 
 def routine_group_of(event: str | None) -> str | None:

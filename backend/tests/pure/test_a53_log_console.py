@@ -17,14 +17,18 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 from app.core.log_events import (
+    ACCESS_EVENT,
     DOMAINS,
     EVENTS,
     LOGGER_DOMAIN_FALLBACK,
     ROUTINE_GROUPS,
     domain_for_logger,
+    folds_away,
+    level_at_least,
     resolve_domain,
 )
 
@@ -479,3 +483,306 @@ def test_the_ring_never_becomes_the_archive():
     assert body.index("StreamHandler") < body.index("_attach_ring_handler"), (
         "环形必须是**第二个** handler:stdout 先挂,它挂不上也不影响归档"
     )
+
+
+# ============================================================ a54 修复的守卫
+#
+# 下面这一组钉的是 a53 落地时**没有被任何东西守住**的七件事。它们的共同形状:
+# 每一条都不会报错、不会变红,只会让控制台在某个具体时刻少说一句真话。
+
+
+def test_the_worker_installs_the_json_logging_too():
+    """**worker 必须自己装一次日志。**
+
+    a53 只在 `app/main.py` 顶层调过 `setup_logging()`,而 worker 的入口是
+    `celery -A app.tasks.celery_app.celery_app worker` —— 它不 import
+    `app.main`,全仓也没有任何模块 import 它。于是环形里一条 worker 日志
+    都没有,而"为什么是 Redis 而不是进程内环形"的全部理由就是那 59 个
+    住在 worker 里的调用点。
+
+    症状是沉默的:页面上 `gen` / `batch` / `publish` 三个域基本空着,
+    看起来像"这段时间没跑任务"。连 a53 交接给出的自检顺序(先看 `held`
+    涨不涨)都发现不了 —— API 进程自己在写,那个数一直在涨。
+    """
+    source = (BACKEND / "app/tasks/celery_app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    hooked: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        calls = {
+            n.func.id
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        }
+        if "setup_logging" not in calls:
+            continue
+        for deco in node.decorator_list:
+            target = deco.func if isinstance(deco, ast.Call) else deco
+            if isinstance(target, ast.Attribute):
+                hooked.add(target.value.id if isinstance(target.value, ast.Name) else target.attr)
+    assert "worker_process_init" in hooked, (
+        "worker 子进程没有装 JSON 日志 —— 环形里不会有任何 tasks 域的日志,"
+        "而页面不会说少了一个进程,它只会看起来像「这段时间没跑任务」"
+    )
+    assert "beat_init" in hooked, "beat 进程同理:它产出的节拍与投递日志也该进环形"
+
+
+def test_watching_the_console_does_not_flush_the_console():
+    """**看日志的动作不许冲刷诊断窗口。**
+
+    a53 没有这条过滤:中间件对每个请求写一条访问日志,包括 `/api/ops/logs`
+    自己,而跟随模式是 3 秒一拍。1200 条/小时、cap 5000 —— 四小时后环形里
+    全是"某人在看运行日志",而 `held/cap` 显示 5000/5000,看起来非常健康。
+    """
+    import logging as std_logging
+
+    from app.core.log_ring import SelfTrafficFilter
+
+    def record(fields: dict) -> std_logging.LogRecord:
+        one = std_logging.LogRecord("app.main", 20, "x", 1, "http request completed", None, None)
+        one.extra_fields = fields
+        return one
+
+    keep = SelfTrafficFilter()
+    self_traffic = {"event": ACCESS_EVENT, "path": "/api/ops/logs", "status": 200}
+    assert not keep.filter(record(self_traffic)), "控制台自己的 2xx 访问日志不该进环形"
+    assert keep.filter(record({**self_traffic, "status": 500})), (
+        "`/api/ops/logs` 自己 500 了是要看见的 —— 那不是噪音,是这一页坏了"
+    )
+    assert keep.filter(record({**self_traffic, "path": "/api/generation-tasks"})), (
+        "别的端点的访问日志照进 —— 被挡掉的只有自指的那部分"
+    )
+    assert keep.filter(record({"event": "gen.round_evaluated", "path": "/api/ops/logs"})), (
+        "只认访问日志那一个事件码,不许按路径一刀切"
+    )
+
+
+def test_the_level_filter_means_at_least_not_exactly():
+    """选 WARNING 的人要找的是问题,而 ERROR 是更严重的问题。
+
+    a53 的 API 是精确匹配,于是筛 WARNING 会把 ERROR 挡掉 —— §1.4 那个病
+    换了个地方复发。CLI 那边一直是"及以上",两个入口两种意思。
+    """
+    assert level_at_least("ERROR", "WARNING"), "选 WARNING 必须看得见 ERROR"
+    assert level_at_least("CRITICAL", "WARNING")
+    assert not level_at_least("INFO", "WARNING")
+    assert level_at_least("INFO", None), "不筛就是全都要"
+
+    api = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    cli = (BACKEND / "tools/watch_logs.py").read_text(encoding="utf-8")
+    for name, body in (("API", api), ("CLI", cli)):
+        assert "level_at_least" in body, f"{name} 没有走共用的级别判定,两边会再次分叉"
+        assert "_LEVEL_ORDER" not in body, f"{name} 自己存了一张级别表 —— 那就是第二份真相"
+
+
+def test_critical_is_never_folded_either():
+    """`routine` 对 ERROR **和 CRITICAL** 都不生效。
+
+    a53 的 API 写的是 `level != "ERROR"`,CLI 写的是 `< 40` —— 同一条
+    CRITICAL 的例行事件,页面折起来、终端展开着。而"什么时候可以藏一条日志"
+    是业务规则,规则有两份等于没有。
+    """
+    routine = next(key for key, one in EVENTS.items() if one.routine)
+    assert folds_away(routine, "INFO")
+    assert not folds_away(routine, "ERROR")
+    assert not folds_away(routine, "CRITICAL"), "CRITICAL 被折进计数条了"
+    assert not folds_away("gen.round_evaluated", "INFO"), "非例行事件永远不折"
+
+
+def test_the_byte_budget_truncation_is_visible_too():
+    """`_fit` 砍掉的字段也要进 `truncated`。
+
+    a53 的顺序是 `truncated_paths()` 在前、`_fit()` 在后,于是 256KB 那一档
+    砍掉的东西一条都没进那张表 —— 而它恰恰砍得最狠。设计 §6.2 第三条边界
+    写的是**截断必须显形**,界面照着 `truncated` 画,表是空的就等于没截。
+    """
+    from app.llm import payload_store
+
+    payload = {"body": {"system": "长" * 400_000}, "truncated": []}
+    fitted = payload_store._fit(payload)  # noqa: SLF001 - 守卫要打到这一层
+
+    assert "body.system" in fitted["truncated"], (
+        f"按字节预算砍过的字段没有列进 truncated:{fitted['truncated']}"
+    )
+    assert len(json.dumps(fitted, ensure_ascii=False).encode("utf-8")) <= 262_144
+
+
+class _FakeSettings:
+    """纯测试环境里没有 pydantic,`payload_store._settings()` 会返回 None,
+
+    于是 `capture_enabled()` 恒假、写入路径**一步都走不到**。用它顶上去,
+    守卫才真的打在被守的那段代码上而不是在早退分支上空转。
+    """
+
+    REDIS_URL = "redis://localhost:6379/0"
+    OPS_LLM_PAYLOAD_CAPTURE = True
+    OPS_LLM_PAYLOAD_TTL_SECONDS = 86_400
+    OPS_LLM_PAYLOAD_MAX_BYTES = 262_144
+    OPS_PAYLOAD_STRING_CHARS = 40_000
+
+
+def _with_fake_settings(store):
+    original = store._settings  # noqa: SLF001
+    store._settings = lambda: _FakeSettings()  # noqa: SLF001
+    return original
+
+
+def test_a_path_without_a_call_id_writes_nothing():
+    """`"-"` 不是 id,是「这条路径没有 id」。
+
+    `evaluators/vision.py` 的连接自检直接调 `_send_once`,绕过
+    `_send_with_retries`,于是 contextvar 还是默认值。a53 只挡空串,
+    结果每点一次「测试连接」就往 `ops:llm:-` 覆盖写一次,还顺手续 TTL。
+    """
+    from app.llm import payload_store
+
+    assert not payload_store.has_call_id("-")
+    assert not payload_store.has_call_id("")
+    assert not payload_store.has_call_id(None)
+    assert payload_store.has_call_id("c41f8a09d2e3")
+
+    written: list[str] = []
+
+    class Recording:
+        def pipeline(self, *_args, **_kwargs):
+            return self
+
+        def hset(self, key, *_args, **_kwargs):
+            written.append(key)
+            return self
+
+        def expire(self, *_args):
+            return self
+
+        def execute(self):
+            return None
+
+    from app.core import log_ring
+
+    original = _with_fake_settings(payload_store)
+    log_ring._HOLDER._client = Recording()  # noqa: SLF001
+    log_ring._HOLDER._blocked_until = 0.0  # noqa: SLF001
+    payload_store.capture_attempt(
+        "-",
+        attempt=0,
+        http_status=200,
+        duration_ms=1,
+        content_type="application/json",
+        upstream_request_id=None,
+        body={"ok": True},
+    )
+    # 同一个假客户端下,**真的有 id** 时必须写得出来 —— 否则上面那条断言
+    # 可能只是因为整条路径根本没通。
+    payload_store.capture_attempt(
+        "c41f8a09d2e3",
+        attempt=1,
+        http_status=200,
+        duration_ms=1,
+        content_type="application/json",
+        upstream_request_id=None,
+        body={"ok": True},
+    )
+    payload_store._settings = original  # noqa: SLF001
+    log_ring.reset_client_for_tests()
+    assert written == ["ops:llm:c41f8a09d2e3"], f"写出的键不对:{written}"
+
+
+def test_the_sidecar_keeps_its_own_books():
+    """旁挂库写失败也要记账。
+
+    a53 的 `except` 直接 `return`:不记数、不进冷却期。于是
+    `/api/ops/llm/{id}` 报 404 的时候,分不清"过期了"还是"从来没写进去过",
+    而这两者的下一步完全相反。环形那边的口径是「不赌,但也不瞎」。
+    """
+    from app.core import log_ring
+    from app.llm import payload_store
+
+    class Exploding:
+        def pipeline(self, *_args, **_kwargs):
+            raise RuntimeError("redis is down")
+
+    before = payload_store.STATS.snapshot()["dropped_since_boot"]
+    original = _with_fake_settings(payload_store)
+    log_ring._HOLDER._client = Exploding()  # noqa: SLF001
+    log_ring._HOLDER._blocked_until = 0.0  # noqa: SLF001
+    payload_store.capture_attempt(
+        "c41f8a09d2e3",
+        attempt=1,
+        http_status=200,
+        duration_ms=7,
+        content_type="application/json",
+        upstream_request_id=None,
+        body={"ok": True},
+    )
+    payload_store._settings = original  # noqa: SLF001
+    log_ring.reset_client_for_tests()
+
+    after = payload_store.STATS.snapshot()["dropped_since_boot"]
+    assert after == before + 1, "旁挂库掉了一条却没有记账"
+
+    meta = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    assert "payload_store.STATS" in meta, "这个数没有出口就等于没有"
+
+
+def test_a_disabled_ring_never_looks_like_an_empty_period():
+    """`OPS_LOG_RING_ENABLED=false` 时必须说出来。
+
+    a53 没有这条分支:handler 没挂,但 `/logs` 照样去读 Redis,读到空,
+    界面画出"这个筛选组合下没有日志" —— 而那句话的意思是"这段时间没发生",
+    正是这一页反复申明不许说的那一句。
+    """
+    source = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "list_logs"
+    )
+    guard = ast.unparse(body)
+    assert "OPS_LOG_RING_ENABLED" in guard, "关掉环形之后这个端点没有任何分支"
+    assert "ring_disabled" in guard, "关掉之后要给界面一个能说出口的理由"
+
+
+def test_the_stream_is_filtered_before_it_is_shaped():
+    """先筛后成形。
+
+    `_shape` 里有一次 `json.dumps`,a53 对全窗 5000 条每条都做一遍,
+    而其中绝大多数会被随后的筛选丢掉;跟随模式 3 秒一拍,这笔开销是常驻的。
+
+    ## 判据按**调用名**比,不按子串比
+
+    上一版这里写的是 `assert "_matches" in text`,而 `tools/mutate_a54.py`
+    的 P1 把调用改名成 `_matches_removed` —— 子串照样在,守卫照样绿。
+    一条按子串判的断言,挡不住把函数换掉这件事,而换掉正是它要挡的。
+    """
+    source = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "list_logs"
+    )
+    called = sorted(
+        (node.lineno, node.func.id)
+        for node in ast.walk(body)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    )
+    first = {}
+    for line, name in called:
+        first.setdefault(name, line)
+    assert "_matches" in first, f"筛选没有独立出来,又回到了先成形再丢掉:{sorted(first)}"
+    assert "_shape" in first, "这个端点不成形了?"
+    assert first["_matches"] < first["_shape"], "成形跑在筛选前面了"
+
+
+def test_the_domain_counts_survive_picking_a_domain():
+    """点进一个域之后,其余域的计数不许全变成 0。
+
+    a53 是前端按已经筛过的那一屏算的,于是点进 `gen` 之后其余十四格全是 0 ——
+    恰好在最需要"别处还有没有事"的时候把这个信息拿掉。
+    """
+    source = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    assert "domain_counts" in source, "服务端没有给出域计数,前端只能按当前这一屏猜"
+    tree = ast.parse(source)
+    body = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "list_logs"
+    )
+    text = ast.unparse(body)
+    assert "domain=None" in text, "域计数吃了 domain 筛选 —— 那它只会数出选中的那一个"

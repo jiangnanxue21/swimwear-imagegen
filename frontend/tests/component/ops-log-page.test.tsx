@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from 'antd'
 import { MemoryRouter } from 'react-router-dom'
@@ -47,6 +48,7 @@ function entry(over: Partial<LogEntry>): LogEntry {
     event_label: null,
     routine: false,
     routine_group: null,
+    round_summary: false,
     message: 'something happened',
     request_id: 'req-1',
     fields: {},
@@ -64,11 +66,25 @@ const META: LogMeta = {
   routine_groups: [{ key: 'lease', label: '租约让位' }],
   levels: ['INFO', 'WARNING', 'ERROR'],
   ring: RING,
-  payload_capture: { enabled: true, ttl_seconds: 86400 },
+  payload_capture: {
+    enabled: true,
+    ttl_seconds: 86400,
+    dropped_since_boot: 0,
+    last_error: null,
+  },
 }
 
-function page(items: LogEntry[], ring: RingMeta = RING): LogPage {
-  return { items, ring, oldest_ts: items.length ? items[items.length - 1].ts : null }
+function page(
+  items: LogEntry[],
+  ring: RingMeta = RING,
+  domainCounts: LogPage['domain_counts'] = {},
+): LogPage {
+  return {
+    items,
+    ring,
+    oldest_ts: items.length ? items[items.length - 1].ts : null,
+    domain_counts: domainCounts,
+  }
 }
 
 function renderPage(initial = '/ops-logs') {
@@ -188,5 +204,137 @@ describe('这一页不持有分类表', () => {
 
     expect(await screen.findByText('只有这一个')).toBeInTheDocument()
     expect(screen.queryByText('发布上架')).not.toBeInTheDocument()
+  })
+})
+
+// ================================================================ a54 修的那几件
+
+describe('运行日志页(a54 修复)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    opsMocks.meta.mockResolvedValue(META)
+    opsMocks.logs.mockResolvedValue(page([entry({})]))
+  })
+
+  it('计数条点得开 —— 折叠是降噪,不是掩埋', async () => {
+    opsMocks.logs.mockResolvedValue(
+      page([
+        entry({ seq: 'a', routine: true, routine_group: '租约让位', message: '让位一次' }),
+        entry({ seq: 'b', routine: true, routine_group: '租约让位', message: '让位两次' }),
+      ]),
+    )
+    renderPage()
+
+    const bar = await screen.findByText(/例行 ×2/)
+    expect(screen.queryByText('让位一次')).not.toBeInTheDocument()
+    await userEvent.click(bar)
+    expect(await screen.findByText('让位一次')).toBeInTheDocument()
+    expect(screen.getByText('让位两次')).toBeInTheDocument()
+  })
+
+  it('域计数来自后端,点进一个域之后别的域不会全变 0', async () => {
+    opsMocks.logs.mockResolvedValue(
+      page([entry({ domain: 'publish' })], RING, {
+        publish: { total: 3, warn: 0, error: 0 },
+        gen: { total: 7, warn: 1, error: 0 },
+      }),
+    )
+    renderPage('/ops-logs?domain=publish')
+
+    // 这一屏一条 publish 的日志都没别的域,但 gen 的计数照样在
+    expect(await screen.findByText('7')).toBeInTheDocument()
+    expect(screen.getByText('3')).toBeInTheDocument()
+  })
+
+  it('级别筛选说的是「及以上」,不是「恰好等于」', async () => {
+    renderPage()
+    // 取值来自 /meta,标签上带 ≥ —— 选 WARNING 的人要看得见 ERROR
+    expect(await screen.findByText('≥ WARNING')).toBeInTheDocument()
+    expect(screen.getByText('≥ ERROR')).toBeInTheDocument()
+  })
+
+  it('事件精筛有入口,取值来自 /meta', async () => {
+    opsMocks.meta.mockResolvedValue({
+      ...META,
+      events: [
+        { key: 'a.b', label: '某件事', domain: 'publish', routine: false, routine_group: null },
+      ],
+    })
+    renderPage()
+
+    const picker = await screen.findByPlaceholderText('按事件精筛')
+    await userEvent.click(picker)
+    expect(await screen.findByText('某件事')).toBeInTheDocument()
+  })
+
+  it('链路模式按轮次分段,段头取后端标出来的那条', async () => {
+    opsMocks.logs.mockResolvedValue(
+      page([
+        entry({ seq: 'a', fields: { round: 1 }, message: '领到任务' }),
+        entry({
+          seq: 'b',
+          fields: { round: 1 },
+          round_summary: true,
+          message: '4 张候选 · B 档',
+        }),
+      ]),
+    )
+    renderPage('/ops-logs?trace_kind=task&trace_id=t-1')
+
+    expect(await screen.findByText(/第 1 轮/)).toBeInTheDocument()
+    expect(screen.getByText('4 张候选 · B 档')).toBeInTheDocument()
+  })
+
+  it('call 芯片一步打开载荷页签', async () => {
+    opsMocks.logs.mockResolvedValue(
+      page([entry({ seq: 'a', fields: { llm_call_id: 'c41f8a09d2e3' } })]),
+    )
+    opsMocks.llmPayload.mockResolvedValue({
+      llm_call_id: 'c41f8a09d2e3',
+      provider: 'vision',
+      model: 'v-2026',
+      request: {
+        endpoint: 'https://example.test/v1/chat',
+        headers: { authorization: '***' },
+        body: { model: 'v-2026' },
+        images: [{ tag: 'CANDIDATE_IMAGE', mime_type: 'image/png', base64_chars: 42, sha256_16: 'ab' }],
+        sha256_16: '9b7d31e0aa02c4f8',
+        body_bytes: 412083,
+      },
+      attempts: [
+        {
+          attempt: 1,
+          http_status: 429,
+          duration_ms: 775,
+          content_type: 'text/html',
+          upstream_request_id: null,
+          body: '<html>too many requests</html>',
+        },
+      ],
+      truncated: [],
+      ttl_seconds: 86400,
+    })
+    renderPage()
+
+    await userEvent.click(await screen.findByText(/call /))
+    // 图片只剩 chip,正文永不留存;耗时不再是空的
+    expect(await screen.findByText(/CANDIDATE_IMAGE/)).toBeInTheDocument()
+    expect(screen.getByText(/775 ms/)).toBeInTheDocument()
+    expect(screen.getByText(/<html>too many requests<\/html>/)).toBeInTheDocument()
+  })
+
+  it('环形被关掉时说出来,而不是画一张空列表', async () => {
+    opsMocks.logs.mockResolvedValue(page([], { ...RING, enabled: false, unavailable_reason: 'ring_disabled' }))
+    renderPage()
+
+    expect(await screen.findByText(/这不代表这段时间没有日志/)).toBeInTheDocument()
+    expect(screen.getByText(/OPS_LOG_RING_ENABLED/)).toBeInTheDocument()
+  })
+
+  it('展开哪一行进 URL —— 刷新与分享链接都保得住', async () => {
+    opsMocks.logs.mockResolvedValue(page([entry({ seq: 'a', message: '这一条' })]))
+    renderPage('/ops-logs?expanded=a&tab=raw')
+
+    expect(await screen.findByText(/控制台不改写它/)).toBeInTheDocument()
   })
 })

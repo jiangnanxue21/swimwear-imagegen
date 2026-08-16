@@ -48,6 +48,7 @@ import json
 import logging
 from typing import Any
 
+from app.core.log_ring import RingStats, get_client, note_failure
 from app.llm.redaction import safe_payload_for_log, was_truncated
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,22 @@ logger = logging.getLogger(__name__)
 #: 键前缀。`{call_id}` 就是日志里那个 `llm_call_id` —— 界面上点一下
 #: `call c41f8a09d2e3` 芯片,取的就是这个键。
 KEY_PREFIX = "ops:llm:"
+
+#: 旁挂库自己的账(a54 补)。
+#:
+#: 上一版 `_write` 的 `except` 直接 `return`:既不记数也不进冷却期。
+#: 环形那边有 `dropped_since_boot`,口径写着"不赌,但也不瞎";旁挂库这边是
+#: 纯瞎 —— `/api/ops/llm/{id}` 报 404 的时候,分不清是"过期了"还是
+#: "从来就没写进去过",而这两者的下一步完全不同。
+STATS = RingStats()
+
+#: `llm_call_id` 的缺省值(`transport._llm_call_id` 的 default)。
+#:
+#: 它不是一个 id,是"这条路径没有 id"。上一版 `_write` 只挡空串,于是
+#: `evaluators/vision.py` 的连接自检(它直接调 `_send_once`,绕过
+#: `_send_with_retries`)会把响应写进 `ops:llm:-` 的 `attempt:0`,
+#: 每点一次"测试连接"覆盖一次,还顺手给这个垃圾键续一次 TTL。
+NO_CALL_ID = "-"
 
 _FIELD_REQUEST = "request"
 _FIELD_META = "meta"
@@ -77,6 +94,11 @@ def _settings() -> Any | None:
 def capture_enabled() -> bool:
     settings = _settings()
     return bool(settings is not None and settings.OPS_LLM_PAYLOAD_CAPTURE)
+
+
+def has_call_id(call_id: str | None) -> bool:
+    """这条路径有没有真的 call id。`"-"` 不是 id,是「没有」。"""
+    return bool(call_id) and call_id != NO_CALL_ID
 
 
 def _string_limit() -> int:
@@ -114,10 +136,18 @@ def truncated_paths(value: Any, prefix: str = "") -> list[str]:
 
 
 def _fit(payload: dict[str, Any]) -> dict[str, Any]:
-    """把一条记录压进 `OPS_LLM_PAYLOAD_MAX_BYTES`。
+    """把一条记录压进 `OPS_LLM_PAYLOAD_MAX_BYTES`,**并把砍过的路径记进 `truncated`**。
 
     超了就从**最长的字符串**开始砍,而不是整条丢掉 —— 丢掉的那条恰恰是
     "响应特别大"的那一次,而那多半就是要查的那一次。
+
+    ## 为什么 `truncated` 要在这里补(a54 修)
+
+    上一版的顺序是:`redact()` -> `truncated_paths()` -> `_write()` -> `_fit()`。
+    也就是说 `_fit` 砍掉的那些字符串,是在 `truncated` 算完**之后**才发生的,
+    一条都没进那张表。而 256KB 这一档恰恰砍得最狠 —— 界面于是在最该说
+    「你看到的不是全文」的那一次保持沉默,而设计 §6.2 的第三条边界写的是
+    **截断必须显形**。
     """
     limit = _max_bytes()
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -144,13 +174,31 @@ def _fit(payload: dict[str, Any]) -> dict[str, Any]:
 
         target[path[-1]] = text[:keep] + TRUNCATION_MARK.format(omitted=len(text) - keep)
 
+    def label(path: tuple[Any, ...]) -> str:
+        out = ""
+        for step in path:
+            if isinstance(step, int):
+                out = f"{out}[{step}]"
+            else:
+                out = f"{out}.{step}" if out else str(step)
+        return out or "<root>"
+
+    cut_here: list[str] = []
     for _ in range(40):
         ranked = sorted(leaves(payload, ()), key=lambda item: -item[1])
         if not ranked or ranked[0][1] <= 200:
             break
         cut(payload, ranked[0][0])
+        cut_here.append(label(ranked[0][0]))
         if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= limit:
             break
+    if cut_here:
+        listed = payload.get("truncated")
+        listed = list(listed) if isinstance(listed, list) else []
+        # `truncated` 自己也是一个字符串叶子的容器,砍到它头上没有意义,滤掉。
+        payload["truncated"] = listed + [
+            one for one in cut_here if one not in listed and not one.startswith("truncated")
+        ]
     return payload
 
 
@@ -161,24 +209,28 @@ def _write(call_id: str, field: str, value: dict[str, Any]) -> None:
     这里不打日志,理由和 RingHandler 一样 —— 这条路径在日志系统内部,
     打日志会绕回来。
     """
-    if not call_id or not capture_enabled():
+    if not has_call_id(call_id) or not capture_enabled():
         return
     settings = _settings()
     if settings is None:
         return
     try:
-        from app.core.log_ring import _HOLDER  # 复用同一个带冷却期的客户端
-
-        client = _HOLDER.get(settings.REDIS_URL)
+        client = get_client(settings.REDIS_URL)  # 与环形共用那个带冷却期的客户端
         if client is None:
+            STATS.drop()
             return
         key = key_for(call_id)
         pipe = client.pipeline(transaction=False)
         pipe.hset(key, field, json.dumps(_fit(value), ensure_ascii=False))
         pipe.expire(key, _ttl())
         pipe.execute()
-    except Exception:  # noqa: BLE001 - 见 docstring
+    except Exception as exc:  # noqa: BLE001 - 见 docstring
+        # 静默对**业务**,不对运维:计数进 STATS,并让共享客户端进冷却期 ——
+        # 少了后者,Redis 挂掉时每一次付费调用都要白付 0.2 秒。
+        note_failure(exc)
+        STATS.drop(exc)
         return
+    STATS.ok()
 
 
 def capture_request(
@@ -200,7 +252,7 @@ def capture_request(
     配一行小字「你看到的是脱敏视图,哈希对应的是发出去的原始字节」——
     于是"为什么图片是一行 sha 而不是图"有答案,而不是让人怀疑控制台在藏东西。
     """
-    if not capture_enabled():
+    if not capture_enabled() or not has_call_id(call_id):
         return
     payload = {
         "endpoint": redact(endpoint),
@@ -235,7 +287,7 @@ def capture_attempt(
     第二次是 200」这类问题,只有把两次尝试摆在同一个切换器里才看得出来 ——
     覆盖式写入会让第一次的现场消失,而第一次恰恰是出问题的那一次。
     """
-    if not capture_enabled():
+    if not capture_enabled() or not has_call_id(call_id):
         return
     payload = {
         "attempt": attempt,
@@ -257,12 +309,10 @@ def load(call_id: str) -> dict[str, Any] | None:
     一个空面板说不清是哪一种,而它们的下一步完全不同。
     """
     settings = _settings()
-    if settings is None:
+    if settings is None or not has_call_id(call_id):
         return None
     try:
-        from app.core.log_ring import _HOLDER
-
-        client = _HOLDER.get(settings.REDIS_URL)
+        client = get_client(settings.REDIS_URL)
         if client is None:
             return None
         raw = client.hgetall(key_for(call_id))

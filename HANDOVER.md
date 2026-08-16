@@ -1,3 +1,104 @@
+# 2026-08-16 a54 交接:上一轮走查的十处修复,加一条失锚的变异
+
+> 决策记在 `docs/DECISIONS.md` §3.81,逐条落地记录在 `docs/LOG-CONSOLE.md`
+> 第十二章。下方 a53 交接紧接着,保留为历史记录。
+
+## 这一轮修的是"守卫没看见的那一层"
+
+a53 的门禁全绿,而下面这十件事一件都没被看见。它们的共同形状:
+**不报错、不变红,只在某个具体时刻让控制台少说一句真话。**
+
+```
+P0  worker 的日志一条都没进过环形     -> celery_app 接 worker_process_init / beat_init
+P0  看日志的动作在冲刷诊断窗口         -> log_ring.SelfTrafficFilter(只挡 2xx/3xx,只挡环形)
+P1  级别筛选 API 精确、CLI 及以上      -> level_at_least / folds_away 并进注册表,两端共用
+P1  环形关掉时界面画一张空列表         -> unavailable_reason="ring_disabled"
+P1  字节预算砍掉的字段不显形           -> _fit 把砍过的路径并进 truncated
+P1  连接自检往 ops:llm:- 写垃圾        -> has_call_id():"-" 不是 id,是「没有」
+P1  旁挂库写失败一条都不记             -> payload_store.STATS,随 /meta 出来
+P1  duration_ms 永远是 null            -> _send_once 实测;llm.retrying 补 call id
+P2  /logs 先成形再筛                   -> _matches 在原始 dict 上判,只有入选的才 dump
+P2  前端十项(见下)                    -> 见 LOG-CONSOLE.md 第十二章第 9 条
+```
+
+前端那十项里,两项是**坏掉的**而不是没做:「滚动即暂停跟随」监听的是一个
+没有 `overflow`、没有高度的 div,`scrollTop` 恒为 0 —— 这个功能一次都没触发过;
+域计数按已经筛过的那一屏算,点进一个域之后其余十四格全是 0。
+
+## 三件必须知道的事
+
+**一、加日志的两步没变,但级别与折叠的判定只有一份了。**
+`log_events.py` 现在还管 `LEVEL_ORDER` / `level_at_least()` / `folds_away()`,
+API 与 CLI 都调它;守卫钉着两边都不许自己存级别表。
+
+**二、`ROUND_SUMMARY_EVENT` 与 `ACCESS_EVENT` 也住在注册表里。**
+前者让后端在每条日志上给一个 `round_summary` 布尔,链路分段因此不需要前端
+认事件码;后者让环形的自指过滤不必抄一份字面量。硬规则第 4 条的延长线。
+
+**三、`tools/mutate_a46_phase5.py` 的 N1 失锚是本轮 CI 变红的原因,
+而修法不是重新对准。** 锚点写死了「一共 19 份」,a53 加一份文档就失锚,
+而失锚的变异什么都没验。改成锚在不含数字的那一段上(§3.81 第三条),
+N2 同病一并改。
+
+## 改了什么
+
+```
+backend/app/core/log_events.py       +LEVEL_ORDER / level_at_least / folds_away /
+                                      ACCESS_EVENT / ROUND_SUMMARY_EVENT
+backend/app/core/log_ring.py         +SelfTrafficFilter、get_client()、note_failure()
+backend/app/core/logging.py          环形挂过滤器,前缀跟随 API_PREFIX
+backend/app/tasks/celery_app.py      worker / beat 各自装一次 JSON 日志
+backend/app/llm/payload_store.py     _fit 记截断、has_call_id、STATS、改用公开客户端
+backend/app/llm/transport.py         实测 duration_ms;llm.retrying 补 llm_call_id
+backend/app/api/ops_logs.py          级别≥、ring_disabled、_matches 先筛、domain_counts、
+                                      round_summary、/meta 出旁挂库计数
+backend/tools/watch_logs.py          共用判定、去重表有界、未知事件码报错
+backend/tools/mutate_a46_phase5.py   N1/N2 锚点改成不含被守卫读的那个数
+backend/tools/mutate_a54.py          新增。11 条变异,逐条验红
+backend/tests/pure/test_a53_log_console.py  +10 条守卫
+frontend/src/api/ops.ts              +domain_counts / round_summary / 旁挂库计数
+frontend/src/pages/OpsLogPage.tsx    滚动暂停改 window、折叠条点得开、事件精筛、
+                                      链路按 round 分段、载荷面板补齐、call 芯片、
+                                      展开态进 URL、<a> 换 Link
+frontend/src/pages/AuditLogPage.tsx  +request_id -> 运行日志 的反向互链
+frontend/tests/component/ops-log-page.test.tsx  类型对齐 + 8 条用例
+docs/LOG-CONSOLE.md                  第十二章;第十一章改名为「a53 那一轮没有做的」
+docs/DECISIONS.md                    §3.81
+```
+
+## 验了什么,**没验什么**
+
+```
+跑绿   纯测试 2933/2934(唯一那条失败见下)、verify-delivery 19/19、
+       verify-sample-data 10/10、verify-imports 511 个文件、
+       audit-anchors 579/579(原 578/579)、audit-guards 696、audit-doc-refs
+验红   tools/mutate_a54.py 11/11 —— 每一条修复都被自己的守卫抓住
+       其中 P1 第一次跑出来是 **GREEN**:守卫写的是 `"_matches" in text`,
+       而变异把调用改名成 `_matches_removed`,子串照样在。改成按 AST 调用名
+       与行号比。**这一条就是变异验证存在的理由。**
+```
+
+**没验的四件,别读成"应该没问题":**
+
+1. **前端那十项修复一行都没有被执行过。** 这台机器没有 `node_modules`,
+   `tsc` / ESLint / Vitest 一个都没跑。它们只过了源码级守卫(不许持有分类表)
+   与人工复读。**下一步第一件事就是 `make fe-check`。**
+2. **真 Redis 仍然一次都没连过。** 自指过滤、`ring_disabled` 分支、
+   旁挂库计数,全部只有假客户端覆盖。
+3. **`pytest` / `make test-nodb` 没跑**(缺 fastapi / sqlalchemy),
+   三个端点仍然没有被 TestClient 打过。
+4. **`test_no_tracked_text_file_carries_crlf` 是红的,而且不是本轮弄红的。**
+   这棵工作树里 611 个文件是 CRLF、94 个混合、47 个 LF,是打包/传输产物。
+   本轮所有编辑都按各文件原有行尾写回,没有扩大也没有缩小这个面。
+   要修就 `git add --renormalize .` 单独一轮做,别混进这个补丁。
+
+第一次连真 Redis 时,自检顺序按这个走(**和 a53 给的那条不一样,那条发现不了
+worker 缺日志**):跑一个生成任务 -> 看 `gen` / `batch` 域出不出条目 ->
+再看 `/api/ops/logs/meta` 的 `dropped_since_boot` 是不是 0 -> 开着页面挂半天,
+回来看 `held` 里是不是仍然有非 `http` 域的东西。
+
+---
+
 # 2026-08-16 a53 交接:运行日志控制台 —— 归类、展示、原文
 
 > 决策记在 `docs/DECISIONS.md` §3.80,设计在 `docs/LOG-CONSOLE.md`
