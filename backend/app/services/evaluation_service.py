@@ -199,7 +199,10 @@ def _prescreen(
             full_evaluation_count=rule_set.thresholds.full_evaluation_count,
         )
     except Exception:  # noqa: BLE001
-        logger.warning("prescreen failed, falling back to full evaluation for all candidates")
+        logger.warning(
+            "prescreen failed, falling back to full evaluation for all candidates",
+            extra={"extra_fields": {"event": "eval.prescreen_failed"}},
+        )
         return {}
     return {item.key: item for item in ranked}
 
@@ -578,7 +581,12 @@ def _prompt_context(session: Session, audience: object = None) -> dict:
         if settings.is_production:
             logger.error(
                 "cannot load the active prompt; refusing to score with a different rubric",
-                extra={"extra_fields": {"error": type(exc).__name__}},
+                extra={
+                    "extra_fields": {
+                        "event": "eval.prompt_missing",
+                        "error": type(exc).__name__,
+                    }
+                },
             )
             raise ManualReviewRequired(
                 "读取生效中的评分提示词失败,无法确认本次该用哪套评分标准;"
@@ -588,7 +596,7 @@ def _prompt_context(session: Session, audience: object = None) -> dict:
         logger.warning(
             "cannot load the active prompt, falling back to the built-in default "
             "(non-production only)",
-            extra={"extra_fields": {"error": type(exc).__name__}},
+            extra={"extra_fields": {"event": "eval.prompt_fallback", "error": type(exc).__name__}},
         )
         return {}
 
@@ -699,7 +707,13 @@ def evaluate_round(
             # 只记一条失败留痕,并让它退出本轮排序。整轮都没评成时下面会转人工。
             logger.warning(
                 "evaluation payload unparseable",
-                extra={"extra_fields": {"candidate_id": key, "reason": exc.message}},
+                extra={
+                    "extra_fields": {
+                        "event": "eval.payload_unparseable",
+                        "candidate_id": key,
+                        "reason": exc.message,
+                    }
+                },
             )
             _record_attempt(
                 session, task, candidate,
@@ -723,7 +737,13 @@ def evaluate_round(
             # 同样不是图片的问题,处理方式和解析失败一致。
             logger.warning(
                 "evaluator call failed",
-                extra={"extra_fields": {"candidate_id": key, "code": str(exc.code)}},
+                extra={
+                    "extra_fields": {
+                        "event": "eval.call_failed",
+                        "candidate_id": key,
+                        "code": str(exc.code),
+                    }
+                },
             )
             _record_attempt(
                 session, task, candidate,
@@ -811,7 +831,7 @@ def evaluate_round(
         logger.error(
             "the whole round failed to score",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.round_failed",
                     "task_id": str(task.id),
                     "round": task.current_round,
                     "candidates": len(scorer_failures),
@@ -839,7 +859,7 @@ def evaluate_round(
         logger.warning(
             "some candidates could not be scored this round",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.partial_failure",
                     "task_id": str(task.id),
                     "failed": len(scorer_failures),
                     "scored": len(verdicts),
@@ -888,7 +908,7 @@ def evaluate_round(
         logger.warning(
             "refusing to decide the round on an incomplete scoreboard",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.incomplete_scoreboard",
                     "task_id": str(task.id),
                     "round": task.current_round,
                     "failed": len(scorer_failures),
@@ -927,7 +947,7 @@ def evaluate_round(
     logger.info(
         "round evaluated",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "gen.round_evaluated",
                 "task_id": str(task.id),
                 "round": task.current_round,
                 "outcome": decision.outcome.value,

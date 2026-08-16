@@ -304,7 +304,13 @@ def _verify_image_inner(payload: bytes, *, role: str, io, Image, ImageOps) -> tu
     except Exception:  # noqa: BLE001 - 转不了就用原图,不该因为方向问题整单失败
         logger.warning(
             "cannot apply exif orientation, sending the original bytes",
-            extra={"extra_fields": {"role": role, "format": fmt}},
+            extra={
+                "extra_fields": {
+                    "event": "llm.exif_rotation_failed",
+                    "role": role,
+                    "format": fmt,
+                }
+            },
         )
         return payload, mime
 
@@ -390,7 +396,7 @@ def compact_for_inline_request(
                     logger.info(
                         "image compacted for multimodal request budget",
                         extra={
-                            "extra_fields": {
+                            "extra_fields": {"event": "llm.image_compacted",
                                 "role": role,
                                 "source_bytes": len(payload),
                                 "result_bytes": len(encoded),
@@ -600,7 +606,7 @@ class ImageResolver:
             # 然后如实报告"人体姿态异常"——一个由我们自己引入的假阳性。
             logger.info(
                 "image needed exif rotation, sending inline instead of by url",
-                extra={"extra_fields": {"role": role}},
+                extra={"extra_fields": {"event": "llm.image_inline_fallback", "role": role}},
             )
             source_byte_size = len(verified)
             verified, mime = await asyncio.to_thread(
@@ -768,7 +774,12 @@ class ImageResolver:
                     logger.warning(
                         "cannot read the object for public-url verification, "
                         "falling back to inline",
-                        extra={"extra_fields": {"role": role}},
+                        extra={
+                            "extra_fields": {
+                                "event": "llm.image_url_unverifiable",
+                                "role": role,
+                            }
+                        },
                     )
 
         import asyncio

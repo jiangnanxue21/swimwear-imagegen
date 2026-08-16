@@ -123,13 +123,25 @@ def get_active_evaluator(name: str | None = None) -> ImageQualityEvaluator:
     if _mock_fallback_allowed():
         logger.warning(
             "evaluator unusable, falling back to mock (dev environment only)",
-            extra={"extra_fields": {"requested": requested, "reason": reason}},
+            extra={
+                "extra_fields": {
+                    "event": "eval.mock_fallback",
+                    "requested": requested,
+                    "reason": reason,
+                }
+            },
         )
         return MockImageQualityEvaluator()
 
     logger.error(
         "evaluator unusable and mock fallback is not allowed outside development",
-        extra={"extra_fields": {"requested": requested, "reason": reason}},
+        extra={
+            "extra_fields": {
+                "event": "eval.unusable",
+                "requested": requested,
+                "reason": reason,
+            }
+        },
     )
     raise EvaluatorUnavailableError(
         f"评分器 {requested} 当前不可用({reason});任务已转人工审核。"

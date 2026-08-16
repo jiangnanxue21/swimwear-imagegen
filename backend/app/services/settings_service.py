@@ -227,7 +227,12 @@ def apply(session: Session, changes: dict[str, Any], actor: str) -> list[str]:
             },
         )
         invalidate()
-        logger.info("settings updated", extra={"extra_fields": {"keys": sorted(touched)}})
+        logger.info("settings updated", extra={
+            "extra_fields": {
+                "event": "settings.updated",
+                "keys": sorted(touched),
+            }
+        })
     return sorted(touched)
 
 

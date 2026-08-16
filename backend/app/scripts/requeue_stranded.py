@@ -223,7 +223,12 @@ def _reactivate_abandoned(session) -> int:
         except Exception:  # noqa: BLE001
             session.rollback()
             logger.exception(
-                "reactivate failed", extra={"extra_fields": {"task_id": str(task_id)}}
+                "reactivate failed", extra={
+                    "extra_fields": {
+                        "event": "ops.requeue_failed",
+                        "task_id": str(task_id),
+                    }
+                }
             )
     if revived:
         # 立刻投一次,省掉等下一轮 relay 的时间;投失败也不要紧,意图还在库里
@@ -231,7 +236,11 @@ def _reactivate_abandoned(session) -> int:
             dispatch_service.relay_once(session, limit=max(revived, 50))
         except Exception:  # noqa: BLE001
             session.rollback()
-            logger.exception("relay after reactivation failed")
+            logger.exception("relay after reactivation failed", extra={
+                "extra_fields": {
+                    "event": "ops.requeue_failed",
+                }
+            })
     return revived
 
 
@@ -255,7 +264,12 @@ def _requeue_legacy(session, stranded) -> int:
         except Exception:  # noqa: BLE001
             session.rollback()
             logger.exception(
-                "requeue failed", extra={"extra_fields": {"task_id": str(task.id)}}
+                "requeue failed", extra={
+                    "extra_fields": {
+                        "event": "ops.requeue_failed",
+                        "task_id": str(task.id),
+                    }
+                }
             )
     return requeued
 

@@ -233,7 +233,7 @@ def login(request: Request, payload: LoginRequest) -> dict[str, Any]:
         logger.warning(
             "browser login throttled",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "auth.login_throttled",
                     "username": username[:64],
                     "source": key[0],
                     "failures": verdict.failures_in_window,
@@ -259,7 +259,7 @@ def login(request: Request, payload: LoginRequest) -> dict[str, Any]:
         # 而没有它的话,一次真实的爆破在日志里和一次手滑长得一模一样。
         logger.warning(
             "browser login rejected",
-            extra={"extra_fields": {"username": username[:64]}},
+            extra={"extra_fields": {"event": "auth.login_rejected", "username": username[:64]}},
         )
         raise AppError(
             "用户名或密码错误",
@@ -283,7 +283,13 @@ def login(request: Request, payload: LoginRequest) -> dict[str, Any]:
 
     logger.info(
         "browser login accepted",
-        extra={"extra_fields": {"actor": identity.name, "role": identity.role}},
+        extra={
+            "extra_fields": {
+                "event": "auth.login_accepted",
+                "actor": identity.name,
+                "role": identity.role,
+            }
+        },
     )
     return _identity_payload(identity)
 
@@ -310,5 +316,10 @@ def logout(request: Request) -> dict[str, Any]:
     actor = (request.scope.get("session") or {}).get("name")
     request.session.clear()
     if actor:
-        logger.info("browser logout", extra={"extra_fields": {"actor": str(actor)[:64]}})
+        logger.info("browser logout", extra={
+            "extra_fields": {
+                "event": "auth.logout",
+                "actor": str(actor)[:64],
+            }
+        })
     return {"ok": True}

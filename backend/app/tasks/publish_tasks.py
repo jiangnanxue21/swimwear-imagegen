@@ -41,7 +41,11 @@ def deliver_outbox(limit: int = 20) -> dict:
     try:
         return publish_service.run_due(SessionLocal, limit=limit)
     except Exception:  # noqa: BLE001 - 见模块文档
-        logger.exception("publish outbox delivery failed")
+        logger.exception("publish outbox delivery failed", extra={
+            "extra_fields": {
+                "event": "publish.outbox_delivery_failed",
+            }
+        })
         return {"claimed": 0, "succeeded": 0, "retry": 0, "failed": 0, "error": True}
 
 
@@ -53,5 +57,9 @@ def poll_listings(limit: int = 50) -> dict:
     try:
         return poll_service.poll_due(SessionLocal, limit=limit)
     except Exception:  # noqa: BLE001 - 见模块文档
-        logger.exception("publish status polling failed")
+        logger.exception("publish status polling failed", extra={
+            "extra_fields": {
+                "event": "publish.poll_failed",
+            }
+        })
         return {"claimed": 0, "changed": 0, "unchanged": 0, "error": True}

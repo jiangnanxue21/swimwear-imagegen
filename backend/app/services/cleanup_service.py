@@ -548,9 +548,9 @@ def run_delist(
         queued.append(row.external_spu_id)
 
     logger.info(
-        "cleanup.delist_queued",
+        "queued a delist for this listing",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "ops.delist_queued",
                 "test_batch_tag": test_batch_tag,
                 "shop_id": shop_id,
                 "channel": channel,
@@ -744,7 +744,13 @@ def purge_superseded_exports(
             # (那正是要看见的),但回收是批量的:记下来,继续下一个
             logger.warning(
                 "orphan export delete failed",
-                extra={"extra_fields": {"storage_path": path, "error": str(exc)}},
+                extra={
+                    "extra_fields": {
+                        "event": "ops.orphan_export_delete_failed",
+                        "storage_path": path,
+                        "error": str(exc),
+                    }
+                },
             )
             out.append(replace(entry, deleted=False, error=str(exc)))
             continue

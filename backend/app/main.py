@@ -134,7 +134,7 @@ class SafeStaticFiles(StaticFiles):
         if is_hidden_path(path):
             logger.warning(
                 "blocked a dotfile request under the static mount",
-                extra={"extra_fields": {"path": path}},
+                extra={"extra_fields": {"event": "http.dotfile_blocked", "path": path}},
             )
             return PlainTextResponse("Not Found", status_code=404)
         return await super().get_response(path, scope)
@@ -161,7 +161,7 @@ async def lifespan(app: FastAPI):
             logger.error(
                 "refusing to start: SETTINGS_KEY_DIR is inside the publicly served "
                 "storage directory",
-                extra={"extra_fields": detail},
+                extra={"extra_fields": {"event": "app.secrets_dir_exposed", **detail}},
             )
             raise RuntimeError(
                 f"SETTINGS_KEY_DIR({settings.secrets_dir})位于对外托管的存储目录"
@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
         logger.error(
             "SETTINGS_KEY_DIR is inside the publicly served storage directory; "
             "move it out or the master key is downloadable",
-            extra={"extra_fields": detail},
+            extra={"extra_fields": {"event": "app.secrets_dir_exposed", **detail}},
         )
     # 价目表在启动时校验一次。热路径上它已经降级成「没配价」不再抛
     # (`spend._price_book_or_empty`),所以这条日志是**唯一**会主动说
@@ -183,7 +183,7 @@ async def lifespan(app: FastAPI):
         logger.error(
             "PROVIDER_PRICE_BOOK is unparseable; every call will be recorded as "
             "unpriced and the spend page will show zero",
-            extra={"extra_fields": {"reason": reason}},
+            extra={"extra_fields": {"event": "app.price_book_unparseable", "reason": reason}},
         )
 
     # 批次租约与识别预算的一致性(A45-batch18 / P2-1)。
@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI):
         logger.error(
             "item lease is shorter than the configured extraction budget; "
             "a healthy worker can lose items it is still running",
-            extra={"extra_fields": {"reason": shortfall}},
+            extra={"extra_fields": {"event": "app.lease_budget_shortfall", "reason": shortfall}},
         )
 
     # 同步端点的并发上限。**必须在这里设,不能在模块顶层** ——
@@ -225,7 +225,7 @@ async def lifespan(app: FastAPI):
             "db pool capacity is smaller than the sync-endpoint concurrency limit; "
             "excess requests will queue on the pool and fail after pool_timeout",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "app.pool_capacity_low",
                     "pool_capacity": pool_capacity,
                     "threadpool": settings.SERVER_THREADPOOL_SIZE,
                     "pool_timeout_seconds": settings.DB_POOL_TIMEOUT_SECONDS,
@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "application started",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "app.started",
                 "env": settings.APP_ENV,
                 "storage": str(settings.storage_dir),
                 "threadpool": settings.SERVER_THREADPOOL_SIZE,
@@ -245,7 +245,7 @@ async def lifespan(app: FastAPI):
         },
     )
     yield
-    logger.info("application stopped")
+    logger.info("application stopped", extra={"extra_fields": {"event": "app.stopped"}})
 
 
 def create_app() -> FastAPI:
@@ -322,7 +322,13 @@ def create_app() -> FastAPI:
             exc = rejection(needs_admin=False)
             logger.warning(
                 "rejected an unauthenticated api request",
-                extra={"extra_fields": {"path": path, "method": request.method}},
+                extra={
+                    "extra_fields": {
+                        "event": "http.unauthenticated_rejected",
+                        "path": path,
+                        "method": request.method,
+                    }
+                },
             )
             return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
         return await call_next(request)
@@ -342,11 +348,26 @@ def create_app() -> FastAPI:
                 "duration_ms": round((time.perf_counter() - started) * 1000),
             }
             if response.status_code >= 500:
-                logger.error("http request completed", extra={"extra_fields": fields})
+                logger.error("http request completed", extra={
+                    "extra_fields": {
+                        "event": "http.request_completed",
+                        **fields,
+                    }
+                })
             elif response.status_code >= 400:
-                logger.warning("http request completed", extra={"extra_fields": fields})
+                logger.warning("http request completed", extra={
+                    "extra_fields": {
+                        "event": "http.request_completed",
+                        **fields,
+                    }
+                })
             else:
-                logger.info("http request completed", extra={"extra_fields": fields})
+                logger.info("http request completed", extra={
+                    "extra_fields": {
+                        "event": "http.request_completed",
+                        **fields,
+                    }
+                })
             response.headers["x-request-id"] = rid
             return response
         finally:
@@ -429,7 +450,14 @@ def create_app() -> FastAPI:
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         logger.warning(
             "business error",
-            extra={"extra_fields": {"code": str(exc.code), "path": request.url.path, **exc.detail}},
+            extra={
+                "extra_fields": {
+                    "event": "http.business_error",
+                    "code": str(exc.code),
+                    "path": request.url.path,
+                    **exc.detail,
+                }
+            },
         )
         return JSONResponse(status_code=exc.http_status, content=exc.to_payload())
 
@@ -496,7 +524,7 @@ def create_app() -> FastAPI:
         logger.warning(
             "request validation failed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "http.validation_failed",
                     "method": request.method,
                     "path": request.url.path,
                     "fields": problems,
@@ -518,7 +546,12 @@ def create_app() -> FastAPI:
     async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
         # 只记录类型与 request_id,绝不把数据库异常原文返回给客户端
         logger.exception(
-            "unhandled error", extra={"extra_fields": {"path": request.url.path}}
+            "unhandled error", extra={
+                "extra_fields": {
+                    "event": "http.unhandled_error",
+                    "path": request.url.path,
+                }
+            }
         )
         return JSONResponse(
             status_code=500,

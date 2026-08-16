@@ -305,9 +305,9 @@ def _reuse(
         select(PublishOutbox).where(PublishOutbox.publish_attempt_id == existing.id)
     )
     logger.info(
-        "publish.enqueue_reused",
+        "reused an existing publish attempt for the same idempotency key",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "publish.enqueue_reused",
                 "listing_id": str(listing.id),
                 "attempt_status": existing.status,
                 "operation": operation.value,
@@ -526,7 +526,7 @@ def run_due(
             logger.warning(
                 "lease lost before dispatch; skipping to avoid a duplicate publish",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "publish.lease_lost_before_dispatch",
                         "outbox_id": str(call.outbox_id),
                         "attempt_id": str(call.attempt_id),
                     }
@@ -768,9 +768,9 @@ def _record_stale_outcome(
         },
     )
     logger.warning(
-        "publish.stale_outcome",
+        "discarded a delivery outcome that no longer matches the current attempt",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "publish.stale_outcome",
                 "outbox_id": str(call.outbox_id),
                 "attempt_id": str(call.attempt_id),
                 "listing_id": str(listing.id),
@@ -858,9 +858,9 @@ def apply_outcome(
     row.last_error = (final.error_message or "")[:2000]
     session.flush()
     logger.warning(
-        "publish.delivery_dead",
+        "giving up on this delivery after repeated failures",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "publish.delivery_dead",
                 "listing_id": str(listing.id),
                 "attempt_status": final.attempt_status,
                 "error_code": final.error_code,
@@ -1077,9 +1077,9 @@ def redeliver_dead(
         },
     )
     logger.warning(
-        "publish.redeliver_dead",
+        "the redelivery gave up as well",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "publish.redeliver_dead",
                 "outbox_id": str(row.id),
                 "attempt_id": str(attempt.id),
                 "actor": actor,
@@ -1222,9 +1222,9 @@ def _record_external_id(listing: ChannelListing, external_spu_id: str) -> None:
         return
     if listing.external_spu_id != external_spu_id:
         logger.warning(
-            "publish.external_id_mismatch",
+            "the platform reported a different external id than the one on record",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "publish.external_id_mismatch",
                     "listing_id": str(listing.id),
                     "known": listing.external_spu_id,
                     "returned": external_spu_id,

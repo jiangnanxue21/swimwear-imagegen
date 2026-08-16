@@ -416,3 +416,36 @@ GET 端点    一律不提交。唯一例外 download_batch_file(只增不改的
 —— 别人推进之后这一边再也不知道。判定的名字也一并改了:`isLiveTaskStatus`
 删掉了,因为那个名字说「活着」而实际含义是「非终态」,缺陷正是从这个歧义
 里长出来的。
+
+## 日志有两条路:一条给机器归档,一条给人排障(a53)
+
+`docs/LOG-CONSOLE.md` 是设计,第十章记着落地时对它的五处订正。这里只留
+改代码之前必须知道的四条。
+
+```
+app/core/log_events.py   注册表:15 个域 + 全部事件码 + logger 前缀兜底。唯一事实来源
+app/core/log_ring.py     RingHandler:LPUSH+LTRIM 进 Redis,fire-and-forget
+app/llm/payload_store.py 模型载荷旁挂库 ops:llm:{call_id},TTL 24h
+app/api/ops_logs.py      三个只读端点,管理员闸
+frontend/src/pages/OpsLogPage.tsx   运行日志页(流视角 / 域轨道 / 链路模式)
+```
+
+1. **加一条日志 = 两件事,少一件就红。** 在 `log_events.EVENTS` 里登记事件码,
+   并在调用点写 `extra={"extra_fields": {"event": "...", ...}}`。
+   `tests/pure/test_a53_log_console.py` **双向**比对:写了没登记会红,
+   登记了没人写**也会红** —— 后者防的是筛选下拉里摆出一个永远筛不出东西的选项,
+   而运营会把它读成「这段时间没发生」。
+
+2. **`extra_fields` 那一层包裹不能省。** `JsonFormatter` 只读
+   `record.extra_fields`;写成 `extra={"key": ...}` 时那些字段**一个都不会进日志**,
+   不报错、不提示。这不是假设:a53 之前有 14 个调用点正是这么写的,其中包括
+   「已计费但结果未知,拒绝付费重试」那一条 —— 它记的 `key` / `action` 全是空的。
+
+3. **`LLM_LOG_PAYLOADS` 的语义与默认值不动。** 它管归档面(进 stdout,
+   会被采集到别处),默认关是对的。新增的 `OPS_LLM_PAYLOAD_CAPTURE` 默认**开**,
+   因为它是另一个去向:有 TTL、有管理员闸、不出本机 Redis。
+   两者共用同一个脱敏函数,图片正文两边都永不留存。
+
+4. **日志绝不反噬业务。** 环形是**第二个** handler,stdout 那条链路一个字节没动;
+   0.2 秒超时、异常静默吞掉、失败进冷却期、handler 内不打日志。
+   掉了多少条看 `/api/ops/logs/meta` 的 `dropped_since_boot` —— 不赌,但也不瞎。

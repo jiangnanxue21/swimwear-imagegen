@@ -156,13 +156,13 @@ def ingest(
             # 带溯源的行补角色,于是 §6.2 门禁不会认下这张图。
             # 留一条日志,因为这件事发生了就该有人知道。
             logger.warning(
-                "media.ingest.provenance_conflict.deduped",
-                extra={
+                "media asset provenance conflicts with an existing row; treated as a duplicate",
+                extra={"extra_fields": {"event": "media.provenance_conflict_deduped",
                     "product_id": str(product.id),
                     "media_asset_id": str(existing.id),
                     "sha256": sha256,
                     "incoming_source": source.value,
-                },
+                }},
             )
         if revived:
             # 复活要留痕。它是一次**状态回退**(DELETED -> READY/QUARANTINED),
@@ -208,13 +208,13 @@ def ingest(
         # 这次上传整笔回滚,那条"待人工放行"的记录也一起没了,
         # 运营手上只剩一句报错。放行通道 `release()` 认的正是隔离态。
         logger.warning(
-            "media.ingest.provenance_conflict.quarantined",
-            extra={
+            "media asset provenance conflicts with an existing row; quarantined it",
+            extra={"extra_fields": {"event": "media.provenance_conflict_quarantined",
                 "product_id": str(product.id),
                 "spu": product.spu,
                 "sha256": sha256,
                 "incoming_source": source.value,
-            },
+            }},
         )
         status = MediaStatus.QUARANTINED
 
@@ -278,12 +278,12 @@ def ingest(
         if winner is None:
             raise
         logger.info(
-            "media.ingest.lost_dedupe_race",
-            extra={
+            "lost the dedupe race; reusing the row the winner inserted",
+            extra={"extra_fields": {"event": "media.lost_dedupe_race",
                 "product_id": str(product.id),
                 "media_asset_id": str(winner.id),
                 "sha256": sha256,
-            },
+            }},
         )
         _fill_missing_role(winner, role=role, role_source=role_source,
                            role_confidence=role_confidence)
@@ -570,6 +570,7 @@ def shadow_from_output_asset(
             "output asset has no source media; skipping shadow write",
             extra={
                 "extra_fields": {
+                    "event": "media.shadow_write_skipped",
                     "output_id": str(output.id),
                     "candidate_id": str(output.candidate_id or ""),
                 }
@@ -1264,6 +1265,7 @@ def _mismatch(
         "media migration mismatch",
         extra={
             "extra_fields": {
+                "event": "media.migration_mismatch",
                 "legacy_kind": kind,
                 "legacy_id": str(legacy_id or ""),
                 "field": field_name,

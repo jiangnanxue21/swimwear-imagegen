@@ -108,7 +108,11 @@ def _atomic_write_key(path: Path, material: bytes) -> bytes:
         os.chmod(path.parent, 0o700)
     except OSError:
         # 目录可能是别人建的(共享卷),改不动权限不该让启动失败
-        logger.warning("cannot tighten permissions on the secrets directory")
+        logger.warning("cannot tighten permissions on the secrets directory", extra={
+            "extra_fields": {
+                "event": "settings.dir_permissions_unchanged",
+            }
+        })
 
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -164,7 +168,11 @@ def _migrate_legacy_key(target: Path) -> bytes | None:
     except SecretsUnavailable:
         raise
     except OSError:
-        logger.exception("cannot migrate the legacy settings key file")
+        logger.exception("cannot migrate the legacy settings key file", extra={
+            "extra_fields": {
+                "event": "settings.key_migration_failed",
+            }
+        })
         return None
 
     try:
@@ -176,7 +184,7 @@ def _migrate_legacy_key(target: Path) -> bytes | None:
     logger.warning(
         "migrated the settings encryption key out of the public storage directory",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "settings.key_migrated",
                 "from": str(legacy),
                 "to": str(target),
                 "legacy_removed": removed,
@@ -186,7 +194,7 @@ def _migrate_legacy_key(target: Path) -> bytes | None:
     if not removed:
         logger.error(
             "the legacy key file is still readable through /files; delete it by hand",
-            extra={"extra_fields": {"path": str(legacy)}},
+            extra={"extra_fields": {"event": "settings.legacy_key_readable", "path": str(legacy)}},
         )
     return winner
 
@@ -207,7 +215,7 @@ def _read_or_create_key_file():
         winner = _atomic_write_key(path, Fernet.generate_key())
         logger.warning(
             "generated a settings encryption key file; set SETTINGS_SECRET_KEY for multi-node",
-            extra={"extra_fields": {"path": str(path)}},
+            extra={"extra_fields": {"event": "settings.key_generated", "path": str(path)}},
         )
         return winner
     except SecretsUnavailable:
@@ -247,7 +255,11 @@ def available() -> bool:
     except SecretsUnavailable:
         return False
     except Exception:  # noqa: BLE001 - 任何异常都当成\"不可用\",绝不退化成明文
-        logger.exception("settings encryption unavailable")
+        logger.exception("settings encryption unavailable", extra={
+            "extra_fields": {
+                "event": "settings.encryption_unavailable",
+            }
+        })
         return False
 
 
@@ -270,7 +282,11 @@ def describe() -> dict[str, object]:
     except SecretsUnavailable as exc:
         return {"available": False, "source": SOURCE_NONE, "message": str(exc)}
     except Exception:  # noqa: BLE001
-        logger.exception("settings encryption unavailable")
+        logger.exception("settings encryption unavailable", extra={
+            "extra_fields": {
+                "event": "settings.encryption_unavailable",
+            }
+        })
         return {
             "available": False,
             "source": SOURCE_NONE,
@@ -290,12 +306,20 @@ def decrypt(stored: str) -> str:
         return ""
     if not stored.startswith(CIPHER_PREFIX):
         # 不认识的格式一律当成解不开,绝不把它当明文返回
-        logger.warning("stored setting is not a recognised ciphertext")
+        logger.warning("stored setting is not a recognised ciphertext", extra={
+            "extra_fields": {
+                "event": "settings.ciphertext_unrecognised",
+            }
+        })
         return ""
     try:
         return _box().decrypt(stored[len(CIPHER_PREFIX):].encode()).decode()
     except Exception:  # noqa: BLE001 - InvalidToken 及其它一律同样处理
-        logger.warning("cannot decrypt stored setting;主密钥可能已更换")
+        logger.warning("cannot decrypt stored setting;主密钥可能已更换", extra={
+            "extra_fields": {
+                "event": "settings.decrypt_failed",
+            }
+        })
         return ""
 
 

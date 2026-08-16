@@ -199,7 +199,7 @@ def save_version(
             last_error = exc
             logger.warning(
                 "prompt version collided, retrying",
-                extra={"extra_fields": {"key": key}},
+                extra={"extra_fields": {"event": "settings.prompt_version_collision", "key": key}},
             )
     else:
         raise RuntimeError(
@@ -209,7 +209,7 @@ def save_version(
     logger.info(
         "prompt template saved",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "settings.prompt_saved",
                 "key": key,
                 "version": row.version,
                 "active": activate,
@@ -240,7 +240,13 @@ def activate_version(session: Session, key: str, version: int) -> PromptTemplate
     session.flush()
     logger.info(
         "prompt template activated",
-        extra={"extra_fields": {"key": key, "version": version}},
+        extra={
+            "extra_fields": {
+                "event": "settings.prompt_activated",
+                "key": key,
+                "version": version,
+            }
+        },
     )
     return row
 
@@ -255,7 +261,7 @@ def reset_to_default(session: Session, key: str, *, updated_by: str | None = Non
     _deactivate_all(session, key)
     logger.info(
         "prompt template reset to built-in default",
-        extra={"extra_fields": {"key": key, "actor": updated_by}},
+        extra={"extra_fields": {"event": "settings.prompt_reset", "key": key, "actor": updated_by}},
     )
 
 

@@ -237,7 +237,13 @@ def _discard_orphans(session: Session, storage: ObjectStorage, paths: list[str])
     if deleter is None:
         logger.warning(
             "storage backend cannot delete; orphaned objects left behind",
-            extra={"extra_fields": {"count": len(paths), "paths": paths[:5]}},
+            extra={
+                "extra_fields": {
+                    "event": "output.delete_unsupported",
+                    "count": len(paths),
+                    "paths": paths[:5],
+                }
+            },
         )
         return
 
@@ -248,7 +254,7 @@ def _discard_orphans(session: Session, storage: ObjectStorage, paths: list[str])
         # 多留几个孤儿文件只是占空间,删错一个是把别人的图删了。
         logger.warning(
             "cannot check references before cleanup; leaving every object in place",
-            extra={"extra_fields": {"count": len(paths)}},
+            extra={"extra_fields": {"event": "output.reference_check_failed", "count": len(paths)}},
         )
         return
 
@@ -257,7 +263,7 @@ def _discard_orphans(session: Session, storage: ObjectStorage, paths: list[str])
         if path in keep:
             logger.info(
                 "keeping an object that another record still points at",
-                extra={"extra_fields": {"path": path}},
+                extra={"extra_fields": {"event": "output.orphan_kept_referenced", "path": path}},
             )
             continue
         try:
@@ -266,12 +272,17 @@ def _discard_orphans(session: Session, storage: ObjectStorage, paths: list[str])
         except Exception:  # noqa: BLE001
             logger.warning(
                 "cannot remove an orphaned output object",
-                extra={"extra_fields": {"path": path}},
+                extra={"extra_fields": {"event": "output.orphan_delete_failed", "path": path}},
             )
     logger.info(
         "cleaned up orphaned output objects after a failed publish",
         extra={
-            "extra_fields": {"removed": removed, "kept": len(keep), "total": len(paths)}
+            "extra_fields": {
+                "event": "output.orphans_cleaned",
+                "removed": removed,
+                "kept": len(keep),
+                "total": len(paths),
+            }
         },
     )
 
@@ -444,7 +455,7 @@ def build_outputs(
     logger.info(
         "outputs built",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "output.built",
                 "task_id": str(task.id),
                 "candidate_id": str(candidate.id),
                 "generation": generation,

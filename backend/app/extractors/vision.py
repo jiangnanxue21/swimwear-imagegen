@@ -563,7 +563,7 @@ class VisionAttributeExtractor:
         logger.info(
             "attribute extraction call completed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "attr.call_completed",
                     "model": actual_model,
                     "api_style": self.config.api_style,
                     "http_status": status,

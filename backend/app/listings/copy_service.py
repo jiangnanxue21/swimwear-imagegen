@@ -240,7 +240,13 @@ def save_copy(
             row = None
             logger.warning(
                 "listing copy version collided, retrying",
-                extra={"extra_fields": {"spu": plan.spu, "locale": locale}},
+                extra={
+                    "extra_fields": {
+                        "event": "listing.copy_version_collision",
+                        "spu": plan.spu,
+                        "locale": locale,
+                    }
+                },
             )
     if row is None:
         raise ValidationError(
@@ -284,7 +290,7 @@ def save_copy(
         logger.warning(
             "copy rejected by validation",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "listing.copy_validation_failed",
                     "spu": plan.spu,
                     "locale": locale,
                     "codes": [v.code.value for v in hard][:5],
@@ -407,7 +413,7 @@ def approve_copy(
         logger.info(
             "copy rules changed since this version was generated, revalidating",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "listing.copy_rules_changed",
                     "copy_id": str(row.id),
                     "saved_spec": row.spec_version,
                     "current_spec": current.spec_version,
@@ -514,7 +520,7 @@ def reject_copy(
     logger.info(
         "listing copy rejected in quick review",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "listing.copy_rejected_quick_review",
                 "spu": row.spu,
                 "locale": row.locale,
                 "reason": checked.reason.value,

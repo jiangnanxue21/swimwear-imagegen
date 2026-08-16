@@ -299,7 +299,7 @@ def _assert_assets_are_usable(
                 "MODEL_REFERENCE asset; there is no license subject to check "
                 "against (PRD 6.4 forbids bypassing ModelTemplate validation)",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "gen.license_subject_missing",
                         "product_id": str(getattr(product, "id", "")),
                         "audience": getattr(product, "audience", None),
                     }
@@ -586,7 +586,13 @@ def create_task(
             raise
         logger.info(
             "idempotency race resolved",
-            extra={"extra_fields": {"idempotency_key": key, "task_id": str(existing.id)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.idempotency_race_resolved",
+                    "idempotency_key": key,
+                    "task_id": str(existing.id),
+                }
+            },
         )
         return existing, True
 
@@ -660,7 +666,11 @@ def _variant_sample_fingerprint(
         # 指纹是**幂等键的一个维度**,不是准入条件。读不到时退回 None
         # (等于这一维不参与),而不是拒绝创建 —— 拒绝的话一次数据库抖动
         # 会让整条出图链路停摆,而它防的只是"换了样品却命中旧任务"
-        logger.warning("sample fingerprint unavailable", exc_info=True)
+        logger.warning("sample fingerprint unavailable", exc_info=True, extra={
+            "extra_fields": {
+                "event": "gen.sample_fingerprint_unavailable",
+            }
+        })
         return None
     return scope_fingerprint.variant_fingerprint(
         scope_fingerprint.views(assets), str(color_variant_id)
@@ -1273,7 +1283,7 @@ def record_usage(
         logger.info(
             "updating the existing usage record instead of adding a second one",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.usage_record_updated",
                     "billing_key": billing_key,
                     "operation": operation,
                     "billable_units": units,
@@ -1605,7 +1615,7 @@ def reap_stalled(
         logger.warning(
             "reaped stalled tasks",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.stalled_tasks_reaped",
                     "count": len(reaped),
                     "possibly_billed": len(spent),
                     # 这一批连外部 ID 都没有,对账成本最高。单独报数是为了让它

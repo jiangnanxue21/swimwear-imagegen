@@ -768,7 +768,13 @@ class FashnImageGenerationProvider(ImageGenerationProvider):
                 continue
             logger.info(
                 "dropping unsupported FASHN task option",
-                extra={"extra_fields": {"option": name, "model": model.model_name}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.provider_option_dropped",
+                        "option": name,
+                        "model": model.model_name,
+                    }
+                },
             )
         # 注:结果一律走 CDN URL 再由编排层下载入库(需求第十九章:尽快下载到
         # 自有存储)。return_base64 会让响应体变得巨大且 60 分钟过期,明确不用。

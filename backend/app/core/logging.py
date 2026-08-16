@@ -8,6 +8,8 @@ import re
 import sys
 from contextvars import ContextVar
 
+from app.core.log_events import resolve_domain
+
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 #: 命中这些片段的键名,其值在日志中一律替换为 ***
@@ -53,17 +55,42 @@ def redact(value: object) -> object:
 
 
 class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
+    def build_payload(self, record: logging.LogRecord) -> dict[str, object]:
+        """一条日志的结构化形状。**`format` 与 RingHandler 共用这一份。**
+
+        拆出来不是为了好看:环形缓冲要在同一份 payload 上再加一个 `seq`,
+        而它拿到的如果是已经 `json.dumps` 过的字符串,就只能反序列化再序列化 ——
+        一次调用两次编解码,而这条路径每条日志都要走。
+
+        ## `event` 与 `domain` 是顶层字段(`docs/LOG-CONSOLE.md` §3)
+
+        调用点写在 `extra_fields` 里,这里把它提上来,并推导出 `domain`:
+
+            写了 event  ->  domain = 注册表里那个码的域
+            没写 event  ->  domain = logger 前缀最长匹配
+
+        兜底那一半是**迁移期的全部保障**:210 个调用点不可能一次迁完,
+        而查看器里不该出现「未分类」。差别只是没迁的那些没有中文事件标签、
+        不能按事件精筛 —— 迁移因此是"渐进补精度",不是"一次换血"。
+        """
+        extra_raw = getattr(record, "extra_fields", None)
+        extra = redact(extra_raw) if isinstance(extra_raw, dict) else {}
+        # `redact` 返回的是新字典,所以 pop 不会动到调用点那一份。
+        raw_event = extra.pop("event", None) if isinstance(extra, dict) else None
+        event = raw_event if isinstance(raw_event, str) and raw_event else None
+
+        payload: dict[str, object] = {
             "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
             "level": record.levelname,
             "logger": record.name,
+            "domain": resolve_domain(event, record.name),
             "message": record.getMessage(),
             "request_id": request_id_var.get(),
         }
-        extra = getattr(record, "extra_fields", None)
+        if event:
+            payload["event"] = event
         if isinstance(extra, dict):
-            payload.update(redact(extra))
+            payload.update(extra)
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         # message 与 exc 也要脱敏,但**不能靠 `redact`** —— 那个函数按键名判定,
@@ -73,7 +100,10 @@ class JsonFormatter(logging.Formatter):
         payload["message"] = scrub_text(payload["message"])
         if "exc" in payload:
             payload["exc"] = scrub_text(payload["exc"])
-        return json.dumps(payload, ensure_ascii=False)
+        return payload
+
+    def format(self, record: logging.LogRecord) -> str:
+        return json.dumps(self.build_payload(record), ensure_ascii=False)
 
 
 class ContextLoggerAdapter(logging.LoggerAdapter):
@@ -122,11 +152,37 @@ def setup_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+    _attach_ring_handler(root)
     # httpcore/httpx 在 DEBUG 下逐行打印请求头(含 Authorization)与响应体
     # 分块 —— 一次评分调用能刷出几百行,而图片是 base64。PIL 的 DEBUG 会为
     # 每个图像块打一行。这三个跟着 root 走到 DEBUG 的代价太大,单独钉住。
     for noisy in ("uvicorn.access", "multipart", "httpcore", "httpx", "PIL"):
         logging.getLogger(noisy).setLevel("WARNING")
+
+
+def _attach_ring_handler(root: logging.Logger) -> None:
+    """挂上环形缓冲那一个 handler(`docs/LOG-CONSOLE.md` §4)。
+
+    **stdout 那条链路一个字节没动。** 这是第二个 handler,不是替换 —— 归档面
+    仍然是 stdout + 外部收集器,环形只是一个"现在、这台、最近几千条"的
+    诊断窗口。
+
+    整段包在 try 里:日志系统起不来不许让应用起不来。这不是防御性编程的
+    口癖,是这个 handler 的全部前提 —— 它连的是 Redis,而 Redis 在本机开发、
+    纯测试、离线门禁三种场景里都可能根本不在。
+    """
+    try:
+        from app.core.config import settings
+
+        if not settings.OPS_LOG_RING_ENABLED:
+            return
+        from app.core.log_ring import RingHandler
+
+        ring = RingHandler(url=settings.REDIS_URL, cap=settings.OPS_LOG_RING_CAP)
+        ring.setFormatter(JsonFormatter())
+        root.addHandler(ring)
+    except Exception:  # noqa: BLE001 - 见 docstring 最后一段
+        return
 
 
 def get_logger(name: str) -> logging.LoggerAdapter:

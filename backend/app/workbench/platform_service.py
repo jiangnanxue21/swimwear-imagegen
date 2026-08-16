@@ -294,9 +294,9 @@ def record_api_rejection(
     for existing in open_rejections(session, draft.id):
         if existing.reason_code == reason.value:
             logger.info(
-                "publish.rejection_already_recorded",
+                "this platform rejection was already recorded",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "publish.rejection_already_recorded",
                         "draft_id": str(draft.id),
                         "reason_code": reason.value,
                         "rejection_id": str(existing.id),

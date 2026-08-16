@@ -407,8 +407,14 @@ def _claim_in_flight(
         if marker is not None:
             marker.rollback()
         logger.warning(
-            "batch.in_flight_marker_failed",
-            extra={"key": key[:32], "error": type(exc).__name__},
+            "could not write the in-flight marker",
+            extra={
+                "extra_fields": {
+                    "event": "batch.in_flight_marker_failed",
+                    "key": key[:32],
+                    "error": type(exc).__name__,
+                }
+            },
         )
         return False
     finally:
@@ -481,8 +487,13 @@ def _mark_provider_call(*, key: str) -> bool:
         if result.rowcount == 0:
             marker.rollback()
             logger.warning(
-                "batch.provider_call_marker_missing_row",
-                extra={"key": key[:32]},
+                "the provider-call marker has no matching row",
+                extra={
+                    "extra_fields": {
+                        "event": "batch.provider_call_marker_missing_row",
+                        "key": key[:32],
+                    }
+                },
             )
             return False
         marker.commit()
@@ -491,8 +502,14 @@ def _mark_provider_call(*, key: str) -> bool:
         if marker is not None:
             marker.rollback()
         logger.warning(
-            "batch.provider_call_marker_failed",
-            extra={"key": key[:32], "error": type(exc).__name__},
+            "could not write the provider-call marker",
+            extra={
+                "extra_fields": {
+                    "event": "batch.provider_call_marker_failed",
+                    "key": key[:32],
+                    "error": type(exc).__name__,
+                }
+            },
         )
         return False
     finally:
@@ -970,14 +987,14 @@ def _execute(
             # (`SUBMIT_RESULT_UNKNOWN` + force 必填对账结论)。这一条把批量
             # 侧对齐到同一个标准。解除通道见 `tools/resolve_billed_unknown.py`。
             logger.error(
-                "batch.billed_result_unknown_refusing_paid_retry",
-                extra={
+                "the previous call was billed but its result is unknown; refusing a paid retry",
+                extra={"extra_fields": {"event": "batch.billed_result_unknown_refusing_paid_retry",
                     "key": item.idempotency_key[:32],
                     "action": action.value,
                     "executions": receipt.executions,
                     "paid_calls": receipt.paid_calls,
                     "scope_key": item.scope_key,
-                },
+                }},
             )
             # 两种成因,给运营的话不一样。混成一句的代价是让人去查一个
             # 不存在的时刻,或者反过来漏掉一个已知的时刻(A45-batch12-2)
@@ -1008,13 +1025,13 @@ def _execute(
             # 台账上这条的 paid_calls > 1 正是要人看见的那个信号。
             # 这条路最多再走一次,之后由上面那个分支接管
             logger.warning(
-                "batch.receipt_requires_paid_retry",
-                extra={
+                "the receipt says this item needs one more paid retry",
+                extra={"extra_fields": {"event": "batch.receipt_requires_paid_retry",
                     "key": item.idempotency_key[:32],
                     "status": receipt.status,
                     "action": action.value,
                     "executions": receipt.executions,
-                },
+                }},
             )
 
     # 付费动作在真正调用之前先落一条独立事务的 IN_FLIGHT 标记。
@@ -1035,11 +1052,11 @@ def _execute(
             # 停下来的代价只是这一件要重试,而重试是安全的:没有标记就说明
             # 也没有调用。
             logger.error(
-                "batch.in_flight_claim_failed_refusing_paid_call",
-                extra={
+                "could not claim the in-flight marker; refusing to make a paid call",
+                extra={"extra_fields": {"event": "batch.in_flight_claim_failed_refusing_paid_call",
                     "key": item.idempotency_key[:32],
                     "action": action.value,
-                },
+                }},
             )
             return ExecResult(
                 ok=False,
@@ -1064,10 +1081,13 @@ def _execute(
     if action in (BatchAction.EXTRACT, BatchAction.GENERATE_COPY):
         if not _mark_provider_call(key=item.idempotency_key):
             logger.error(
-                "batch.provider_call_marker_failed_refusing_paid_call",
+                "could not write the provider-call marker; refusing to make a paid call",
                 extra={
-                    "key": item.idempotency_key[:32],
-                    "action": action.value,
+                    "extra_fields": {
+                        "event": "batch.provider_call_marker_failed_refusing_paid_call",
+                        "key": item.idempotency_key[:32],
+                        "action": action.value,
+                    }
                 },
             )
             # 落成"确认没花钱"。留着 IN_FLIGHT 也能免费重跑
@@ -1180,8 +1200,13 @@ def _same_request_or_conflict(job: BatchJob, fingerprint: str | None) -> BatchJo
     """
     if job.request_fingerprint == fingerprint:
         logger.info(
-            "batch.create_reused_request_key",
-            extra={"batch_id": str(job.id)},
+            "batch create reused an existing request key",
+            extra={
+                "extra_fields": {
+                    "event": "batch.create_reused_request_key",
+                    "batch_id": str(job.id),
+                }
+            },
         )
         # 瞬态标记,不落库。调用方必须知道这一次**没有创建任何东西** ——
         # 不知道的话它会照常执行一遍,而那正是这条幂等要挡的重复执行。
@@ -1309,8 +1334,14 @@ def create_batch(
                 # 咽下去会把一个别的问题伪装成"重复请求",原样抛出去
                 raise
             logger.info(
-                "batch.create_lost_idempotency_race",
-                extra={"key": key[:32], "batch_id": str(winner.id)},
+                "lost the batch idempotency race; reusing the winner",
+                extra={
+                    "extra_fields": {
+                        "event": "batch.create_lost_idempotency_race",
+                        "key": key[:32],
+                        "batch_id": str(winner.id),
+                    }
+                },
             )
             return _same_request_or_conflict(winner, fingerprint)
     else:
@@ -1501,9 +1532,9 @@ def renew_lease(
     held = result.rowcount == 1
     if not held:
         logger.warning(
-            "batch.lease_lost_before_execution",
+            "the item lease was lost before execution started; skipping",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "batch.lease_lost_before_execution",
                     "item_id": str(item_id),
                     "owner": owner,
                     "phase": "renew",
@@ -1742,9 +1773,9 @@ def run_batch(
         # 这一条比 unexplained 更要紧:它意味着**钱花了两次**。
         # 阈值不设 —— 出现一次就该有人看一眼租约时长与单件耗时的关系
         logger.warning(
-            "batch.stale_outcomes",
+            "this settle pass carried outcomes from an expired lease",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "batch.stale_outcomes",
                     "batch_id": str(job.id),
                     "count": len(stale),
                     "skus": [o.item.sku for o in stale[:10]],
@@ -1757,12 +1788,12 @@ def run_batch(
         # §6.3.2:不可解释失败数为 0 才能签字。它是一个异常码缺口,
         # 所以要在日志里点名,而不是只在界面上显示一个数字
         logger.warning(
-            "batch.unexplained_failures",
-            extra={
+            "some failed items carry no failure reason",
+            extra={"extra_fields": {"event": "batch.unexplained_failures",
                 "batch_id": str(job.id),
                 "count": len(unexplained),
                 "messages": [o.message[:200] for o in unexplained[:5]],
-            },
+            }},
         )
     return counts
 
@@ -1914,8 +1945,14 @@ def _record_stale_outcome(
         payload=payload,
     )
     logger.warning(
-        "batch.stale_outcome_discarded",
-        extra={"extra_fields": {"item_id": str(row.id), **payload}},
+        "discarded a batch outcome that no longer matches the current lease",
+        extra={
+            "extra_fields": {
+                "event": "batch.stale_outcome_discarded",
+                "item_id": str(row.id),
+                **(payload),
+            }
+        },
     )
 
 
@@ -2153,9 +2190,9 @@ def reap_expired_leases(
     session.flush()
 
     logger.warning(
-        "batch.leases_reaped",
+        "reaped expired batch item leases",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "batch.leases_reaped",
                 "scanned": len(rows),
                 "requeued": requeued,
                 "gave_up": gave_up,
@@ -2281,9 +2318,9 @@ def redispatch_stalled_batches(
             failed += 1
     if dispatched or failed:
         logger.warning(
-            "batch.redispatched",
+            "redispatched stalled batches",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "batch.redispatched",
                     "candidates": len(jobs),
                     "dispatched": dispatched,
                     "failed": failed,

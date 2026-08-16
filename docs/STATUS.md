@@ -2771,6 +2771,9 @@
 | ~~**"不指定模特"绕行缝(C-10)**~~ **已于 2026-08-11 关闭,但是以拒绝的方式关的** | `generation_service._assert_assets_are_usable()` 的 `MODEL_REFERENCE` 分支不再 return,改为 `ValidationError`;`tasks/generation_tasks._build_request` 里那条"拿不到模板图就退回自由上传模特图"的兜底也删了(它是同一条缝的第二道门,而且发生在四道检查都过了之后)。**关的方式是 fail-closed,不是接通闭环**:自由素材今天解析不到授权主体 —— `ProductAsset` 上没有指向 ModelTemplate 或授权记录的列,`MediaAsset.consent_id` 列在但**全仓没有写入点**,`MediaConsent` 又没有受众字段(连 §10.5 都判不了)。运营的出路是把那张模特图登记成 ModelTemplate 再选它,那是**唯一**能执行四道检查的路径。要重开自由上传这条路,得先补上上面三样中的任意一条可用链路 |
 | 「有证据但不采信」没有界面 | A45-batch14-11 的判定已经产出 `ATTR_EVIDENCE_ONLY` 阻断与 `FILL_ATTRIBUTES` 动作码,前端补了动作码的三张镜像表 + 首页「其余待办」。**但属性页上没有为这条动线做任何事** —— 没有「这批字段为什么不采信」的分组展示,也没有一键人工填写入口。运营点「人工填写属性」会落在属性页,然后自己逐个找。真实抽取器接上、校准为空时这条动线会是主路径,那时要补 |
 | ~~识别的付费调用与 HTTP 请求事务同生死~~ **已由 0054 关闭** | 两个 HTTP 入口现在只 `queue_extraction()`，先提交 QUEUED run，再投递 Celery；真实模型调用与 `record_usage` 在 worker 的独立会话中执行，后续 HTTP 回滚不再撤销已经发生的调用流水。迁移 `0054` 同时落输入快照、逐图成绩、取消与恢复列，relay/reaper 补漏投与卡死。Windows 真基础设施记录见本文顶部与 `AC-VERIFICATION.md` §11。**这只关闭“HTTP 事务同生死”这笔账**；真实供应商的计费口径仍未连端点验证，见上方 vision 限制，不合并宣称 |
+| **运行日志控制台没有连过真 Redis** | a53 落地了环形缓冲(`ops:log_ring`)、载荷旁挂库(`ops:llm:{id}`)与三个读接口,但**写入、读取、TTL 到期三条都只有纯测试用假客户端覆盖过**。真 Redis 上还没验的是:LTRIM 之后 `held` 与 `cap` 对不对得上、TTL 到期后 `/api/ops/llm/{id}` 是不是如实回 404(而不是回一个半截记录)、以及 Celery worker 与 API 两个进程写进同一个键时 `seq` 去重在跟随模式下够不够用。**日志写失败是静默吞掉的**,所以这三样出问题时不会有任何报错 —— 唯一的信号是 `/api/ops/logs/meta` 里的 `dropped_since_boot` |
+| 运行日志页浏览器未实测 | 前端门禁(typecheck / lint / Vitest 9 条 / build)全绿,但**没有人在浏览器里点开过这一页**。Playwright 用例属于任务 24,尚未开工 |
+| 三个 ops 端点没有被 TestClient 打过 | `make test-nodb` 与 `pytest` 需要 fastapi / sqlalchemy,交付这一轮的机器上没装。判定层(域推导、折叠、404 分两种措辞)有纯测试,**接口层的取数与闸没有** |
 | 配置变更无值历史 | 审计只记谁改了哪些键,不记改前改后的值(记了等于把明文密钥换个地方存) |
 | worker 配置最终一致 | 改完配置 worker 最迟 `SETTINGS_CACHE_TTL_SECONDS` 秒跟上,期间两边可能不同 |
 | FALLBACK 路由 | 显式抛错说明尚未实现,不假装支持 |
@@ -2899,7 +2902,7 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 
 ## 七、文档地图
 
-一共 19 份。**每份都写明「什么时候看」** —— 如果一份文档回答不了「谁会在什么情况下
+一共 20 份。**每份都写明「什么时候看」** —— 如果一份文档回答不了「谁会在什么情况下
 打开它」,它就不该留下。这个数和下表的行数由
 `tests/pure/test_a46_phase5_doc_truth.py` 钉在一起:漏收一份活文档、或者加了行
 不改这句话,都会变红(a46-phase5 之前它写着 13,而表里已经是 15 行)。
@@ -2921,6 +2924,7 @@ cd frontend && node tools/syntax-check.mjs   # 前端全量语法解析
 | `docs/VISION-EVALUATOR.md` | 要换视觉大模型、调阈值、或排查评分结果不对 |
 | `docs/PROVIDER-FASHN.md` | 要第一次用真实 Key 验证 FASHN,或排查它的报错与费用 |
 | `docs/SETTINGS.md` | 要加一个可在网页上改的配置项,或搞清楚为什么某项「改了没反应」 |
+| `docs/LOG-CONSOLE.md` | 要加一条日志、要查「这次模型调用到底发了什么」、或者想知道运行日志页与操作审计页各回答什么问题。第十章记着落地时对设计的五处订正 |
 | `comfyui/README.md` | 要接 ComfyUI —— 含节点 ID 的定位方法 |
 | `sample-data/README.md` | 想知道示例商品与素材是怎么组织的 |
 | `docs/REVIEW.md` | 要知道下一步该做什么 —— 施工方案(a20 v4.1),第 12 章任务表已标完成状态 |

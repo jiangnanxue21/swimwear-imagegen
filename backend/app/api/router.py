@@ -22,6 +22,7 @@ from app.api import (
     media_files,
     media_library,
     model_templates,
+    ops_logs,
     products,
     prompts,
     providers,
@@ -76,3 +77,7 @@ api_router.include_router(publish.router)
 api_router.include_router(workbench.router)
 # 运营工作台(任务书阶段 3):批量任务、异常列表、CSV 导入、SPU 聚合、审计查询
 api_router.include_router(workbench_batch.router)
+# 运行日志控制台(docs/LOG-CONSOLE.md)。**管理员闸**,与审计页分工:
+# 审计答"谁改了什么"(合规,入库,长留),这一组答"系统怎么跑的"
+# (排障,环形,短留)。挂在最后是因为它不属于任何一条业务动线
+api_router.include_router(ops_logs.router)

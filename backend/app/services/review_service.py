@@ -401,7 +401,7 @@ def _format_after_approval(session: Session, task, candidate_id, *, actor: str) 
         logger.error(
             "the approved candidate cannot be read, refusing to format",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.approved_source_unreadable",
                     "task_id": str(task.id),
                     "candidate_id": str(candidate.id),
                     "reason": problem,
@@ -427,7 +427,7 @@ def _format_after_approval(session: Session, task, candidate_id, *, actor: str) 
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "output formatting failed after manual approval",
-            extra={"extra_fields": {"task_id": str(task.id)}},
+            extra={"extra_fields": {"event": "eval.formatting_failed", "task_id": str(task.id)}},
         )
         task.error_code = ErrorCode.INTERNAL_ERROR.value
         task.error_message = f"多尺寸输出失败:{type(exc).__name__}"[:500]
@@ -466,7 +466,12 @@ def _readable_source_problem(candidate, *, storage) -> str | None:
     except Exception:  # noqa: BLE001 - 存储层不通不是文件坏了,见 docstring
         logger.warning(
             "cannot verify the selected candidate before formatting",
-            extra={"extra_fields": {"candidate_id": str(candidate.id)}},
+            extra={
+                "extra_fields": {
+                    "event": "eval.candidate_unverifiable",
+                    "candidate_id": str(candidate.id),
+                }
+            },
         )
         return None
 
@@ -542,7 +547,7 @@ def _rebuild_outputs_for_finished_task(
         logger.error(
             "refusing to rebuild outputs: the swapped candidate cannot be read",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.rebuild_source_unreadable",
                     "task_id": str(task.id),
                     "candidate_id": str(candidate.id),
                     "reason": problem,
@@ -564,7 +569,7 @@ def _rebuild_outputs_for_finished_task(
         logger.exception(
             "rebuilding outputs for a finished task failed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.rebuild_failed",
                     "task_id": str(task.id),
                     "candidate_id": str(candidate.id),
                     "status": task.status,
@@ -582,7 +587,7 @@ def _rebuild_outputs_for_finished_task(
     logger.info(
         "outputs rebuilt after a spot-check candidate swap",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "eval.outputs_rebuilt",
                 "task_id": str(task.id),
                 "candidate_id": str(candidate.id),
                 "actor": actor,

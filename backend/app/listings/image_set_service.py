@@ -433,7 +433,7 @@ def _inherit_generated_angles(session: Session, items: list[dict]) -> list[dict]
                 "media asset traces back to candidates with different target angles; "
                 "leaving the image set item angle empty",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "listing.item_angle_ambiguous",
                         "media_asset_id": str(item["media_asset_id"]),
                         "angles": sorted(found),
                     }
@@ -552,7 +552,14 @@ def create_set(
             row = None
             logger.warning(
                 "image set version collided, retrying",
-                extra={"extra_fields": {"spu": spu, "channel": channel, "site": site}},
+                extra={
+                    "extra_fields": {
+                        "event": "listing.image_set_version_collision",
+                        "spu": spu,
+                        "channel": channel,
+                        "site": site,
+                    }
+                },
             )
     if row is None:
         raise ValidationError(
@@ -782,7 +789,7 @@ def approve(session: Session, image_set_id: UUID, *, actor: str) -> ListingImage
         logger.warning(
             "image set approved with a variant coverage gap",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "listing.image_set_coverage_gap",
                     "image_set_id": str(row.id),
                     "spu": row.spu,
                     "required_variants": coverage["required"],
@@ -899,7 +906,7 @@ def reject(
     logger.info(
         "image set rejected in quick review",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "listing.image_set_rejected_quick_review",
                 "image_set_id": str(row.id),
                 "spu": row.spu,
                 "reason": checked.reason.value,
@@ -973,7 +980,7 @@ def downgrade_sets_on_audience_change(
         logger.warning(
             "image set downgraded because the product audience changed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "listing.image_set_downgraded_audience",
                     "image_set_id": str(row.id),
                     "spu": spu,
                     "audience_from": from_audience,
@@ -1034,7 +1041,7 @@ def downgrade_sets_using(
         logger.warning(
             "image set downgraded because an asset was quarantined",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "listing.image_set_downgraded_quarantine",
                     "image_set_id": str(row.id),
                     "spu": row.spu,
                     "media_asset_id": str(media_asset_id),

@@ -34,7 +34,11 @@ def relay_dispatches(limit: int = 100) -> dict:
         return dispatch_service.relay_once(session, limit=limit)
     except Exception:  # noqa: BLE001
         session.rollback()
-        logger.exception("dispatch relay failed")
+        logger.exception("dispatch relay failed", extra={
+            "extra_fields": {
+                "event": "ops.dispatch_relay_failed",
+            }
+        })
         # 形状从 `relay_once` 那边取,不在这里手抄一份(§7.8 第四条)。
         # 成功路径将来多一个计数时,错误路径会自动跟上
         return {**dispatch_service.relay_idle(), "error": True}
@@ -70,12 +74,22 @@ def reap_stalled(older_than_seconds: int | None = None) -> dict:
         if reaped:
             logger.warning(
                 "reaped stalled tasks",
-                extra={"extra_fields": {"count": len(reaped), "task_ids": reaped[:20]}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.stalled_tasks_reaped",
+                        "count": len(reaped),
+                        "task_ids": reaped[:20],
+                    }
+                },
             )
         return {"reaped": len(reaped)}
     except Exception:  # noqa: BLE001
         session.rollback()
-        logger.exception("stalled task reaper failed")
+        logger.exception("stalled task reaper failed", extra={
+            "extra_fields": {
+                "event": "ops.stalled_task_reaper_failed",
+            }
+        })
         return {"reaped": 0, "error": True}
     finally:
         session.close()
@@ -130,7 +144,11 @@ def reap_batch_leases(limit: int = 200, redispatch_limit: int = 20) -> dict:
         return _out()
     except Exception:  # noqa: BLE001
         session.rollback()
-        logger.exception("batch lease reaper failed")
+        logger.exception("batch lease reaper failed", extra={
+            "extra_fields": {
+                "event": "batch.lease_reaper_failed",
+            }
+        })
         # 回滚只撤得掉**还没提交**的那一段。`reaped` 若已赋值就说明它那次
         # 提交成功了,如实带出去
         return _out(error=True)
@@ -203,13 +221,22 @@ def refresh_stale_drafts(limit: int = 200) -> dict:
                 savepoint.rollback()
                 logger.warning(
                     "stale refresh failed for one draft",
-                    extra={"extra_fields": {"draft_id": str(row.id)}},
+                    extra={
+                        "extra_fields": {
+                            "event": "ops.stale_draft_refresh_failed",
+                            "draft_id": str(row.id),
+                        }
+                    },
                 )
         session.commit()
         return {"scanned": scanned, "marked_stale": marked}
     except Exception:  # noqa: BLE001
         session.rollback()
-        logger.exception("stale draft refresh failed")
+        logger.exception("stale draft refresh failed", extra={
+            "extra_fields": {
+                "event": "ops.stale_draft_refresh_pass_failed",
+            }
+        })
         return {"scanned": scanned, "marked_stale": marked, "error": True}
     finally:
         session.close()

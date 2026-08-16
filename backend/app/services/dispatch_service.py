@@ -157,7 +157,7 @@ def mark_failed(session: Session, row: TaskDispatch, error: str) -> None:
         logger.error(
             "dispatch abandoned after repeated failures",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.dispatch_abandoned",
                     "task_id": str(row.task_id),
                     "attempts": row.attempts,
                     "reason": row.reason,
@@ -221,7 +221,7 @@ def reactivate(session: Session, task_id: UUID, *, actor: str = "maintenance") -
         logger.info(
             "skipping reactivation: the task is no longer stranded",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.task_not_stranded",
                     "task_id": str(task_id),
                     "status": task.status,
                     "error_code": task.error_code,
@@ -248,7 +248,13 @@ def reactivate(session: Session, task_id: UUID, *, actor: str = "maintenance") -
     session.flush()
     logger.info(
         "stranded task reactivated",
-        extra={"extra_fields": {"task_id": str(task_id), "superseded": len(rows)}},
+        extra={
+            "extra_fields": {
+                "event": "gen.task_reactivated",
+                "task_id": str(task_id),
+                "superseded": len(rows),
+            }
+        },
     )
     return 1
 
@@ -270,7 +276,12 @@ def send_attribute_extraction(extraction_id: UUID) -> int:
         # Broker URL 可能含密码，异常原文不进入日志。
         logger.warning(
             "attribute extraction dispatch failed; queued run will be relayed",
-            extra={"extra_fields": {"extraction_id": str(extraction_id)}},
+            extra={
+                "extra_fields": {
+                    "event": "attr.dispatch_failed",
+                    "extraction_id": str(extraction_id),
+                }
+            },
         )
         return 0
     return 1
@@ -288,7 +299,7 @@ def _deliver(session: Session, row: TaskDispatch, *, send=_send) -> bool:
             "dispatch attempt failed (%s), will retry from outbox",
             type(exc).__name__,
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.dispatch_attempt_failed",
                     "task_id": str(row.task_id),
                     "attempts": row.attempts,
                     "next_try_at": str(row.available_at),
@@ -370,7 +381,12 @@ def relay_once(session: Session, *, limit: int = 50, send=_send) -> dict[str, in
         "dispatched": dispatched,
         "failed": len(rows) - dispatched,
     }
-    logger.info("dispatch relay pass", extra={"extra_fields": stats})
+    logger.info("dispatch relay pass", extra={
+        "extra_fields": {
+            "event": "gen.dispatch_relay_pass",
+            **stats,
+        }
+    })
     return stats
 
 
@@ -408,7 +424,7 @@ def send_batch(batch_id: str, actor: str) -> bool:
         logger.warning(
             "batch dispatch failed; items stay PENDING",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.batch_dispatch_failed",
                     "batch_id": batch_id,
                     "error": describe_failure(exc),
                 }

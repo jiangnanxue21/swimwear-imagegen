@@ -157,8 +157,14 @@ def _reuse_or_conflict(spu: Spu, fingerprint: str) -> Spu:
     """
     if spu.request_fingerprint == fingerprint:
         logger.info(
-            "spu.create_reused_request_key",
-            extra={"extra_fields": {"spu_id": str(spu.id), "spu_code": spu.spu_code}},
+            "spu create reused an existing request key",
+            extra={
+                "extra_fields": {
+                    "event": "spu.create_reused_request_key",
+                    "spu_id": str(spu.id),
+                    "spu_code": spu.spu_code,
+                }
+            },
         )
         # 瞬态标记,不落库:调用方必须知道这一次**没有建任何东西**。
         # 与批次那条同理由 —— 存进库等于把一个请求级事实钉在长期存在的行上

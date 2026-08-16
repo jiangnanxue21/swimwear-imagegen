@@ -121,7 +121,13 @@ def _checkpoint(session, task: GenerationTask, phase: str) -> None:
     session.commit()
     logger.debug(
         "phase committed",
-        extra={"extra_fields": {"task_id": str(task.id), "phase": phase}},
+        extra={
+            "extra_fields": {
+                "event": "gen.phase_committed",
+                "task_id": str(task.id),
+                "phase": phase,
+            }
+        },
     )
 
 
@@ -277,7 +283,13 @@ def _heartbeat(session, task: GenerationTask, lease: dict[str, str] | None) -> N
         # **不回滚、不落任何状态** —— 现在做主的是新持有者。
         logger.warning(
             "phase lease was taken over while we were still working; stopping",
-            extra={"extra_fields": {"task_id": str(task.id), "owner": owner}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.phase_lease_taken_over",
+                    "task_id": str(task.id),
+                    "owner": owner,
+                }
+            },
         )
         raise _LeaseLost(str(task.id), owner)
 
@@ -370,7 +382,13 @@ def _release_phase(session, task_id: UUID, owner: str) -> None:
         session.rollback()
         logger.warning(
             "cannot release the phase lease; it will expire on its own",
-            extra={"extra_fields": {"task_id": str(task_id), "owner": owner}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.lease_release_failed",
+                    "task_id": str(task_id),
+                    "owner": owner,
+                }
+            },
         )
 
 
@@ -463,7 +481,13 @@ def run_generation_task(self, task_id: str) -> dict[str, Any]:  # noqa: ARG001
         session.rollback()
         logger.info(
             "stopped: the phase lease was taken over by another worker",
-            extra={"extra_fields": {"task_id": task_id, "owner": lost.owner}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.task_stopped",
+                    "task_id": task_id,
+                    "owner": lost.owner,
+                }
+            },
         )
         return {"task_id": task_id, "status": "superseded", "claimed": False,
                 "lease_lost": True}
@@ -477,7 +501,13 @@ def run_generation_task(self, task_id: str) -> dict[str, Any]:  # noqa: ARG001
         session.rollback()
         logger.info(
             "task stopped: another writer won the transition",
-            extra={"extra_fields": {"task_id": task_id, **(clash.detail or {})}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.task_stopped",
+                    "task_id": task_id,
+                    **(clash.detail or {}),
+                }
+            },
         )
         return {"task_id": task_id, "status": "superseded", "claimed": False}
     except _Cancelled as stop:
@@ -485,7 +515,13 @@ def run_generation_task(self, task_id: str) -> dict[str, Any]:  # noqa: ARG001
         session.rollback()
         logger.info(
             "task stopped by cancellation",
-            extra={"extra_fields": {"task_id": task_id, "status": stop.observed_status}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.task_stopped",
+                    "task_id": task_id,
+                    "status": stop.observed_status,
+                }
+            },
         )
         return {"task_id": task_id, "status": stop.observed_status}
     except ProviderError as exc:
@@ -499,7 +535,7 @@ def run_generation_task(self, task_id: str) -> dict[str, Any]:  # noqa: ARG001
         session.rollback()
         logger.error(
             "database unavailable during the pipeline; will retry",
-            extra={"extra_fields": {"task_id": task_id}},
+            extra={"extra_fields": {"event": "gen.db_unavailable", "task_id": task_id}},
         )
         raise
     except Exception as exc:  # noqa: BLE001
@@ -508,7 +544,12 @@ def run_generation_task(self, task_id: str) -> dict[str, Any]:  # noqa: ARG001
         # 也是"这轮的钱已经花了"的凭证,不能因为下一步崩了就一起消失。
         session.rollback()
         logger.exception(
-            "generation pipeline crashed", extra={"extra_fields": {"task_id": task_id}}
+            "generation pipeline crashed", extra={
+                "extra_fields": {
+                    "event": "gen.pipeline_crashed",
+                    "task_id": task_id,
+                }
+            }
         )
         return _fail(session, task_id, "INTERNAL_ERROR", f"流水线异常:{type(exc).__name__}")
     finally:
@@ -547,12 +588,22 @@ def _fail(session, task_id: str, code: str, message: str) -> dict[str, Any]:
             session.rollback()
             logger.warning(
                 "database hiccup while persisting failure state; retrying",
-                extra={"extra_fields": {"task_id": task_id, "retry_in": delay}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.db_unavailable",
+                        "task_id": task_id,
+                        "retry_in": delay,
+                    }
+                },
             )
             time.sleep(delay)
         except Exception:  # noqa: BLE001 - 非基础设施故障,重试没有意义
             session.rollback()
-            logger.exception("failed to persist failure state")
+            logger.exception("failed to persist failure state", extra={
+                "extra_fields": {
+                    "event": "gen.failure_state_unpersisted",
+                }
+            })
             return {"task_id": task_id, "status": TaskStatus.FAILED.value, "error_code": code}
 
     try:
@@ -575,12 +626,22 @@ def _fail(session, task_id: str, code: str, message: str) -> dict[str, Any]:
         session.rollback()
         logger.error(
             "database unavailable while persisting failure state; will retry",
-            extra={"extra_fields": {"task_id": task_id, "error_code": code}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.db_unavailable",
+                    "task_id": task_id,
+                    "error_code": code,
+                }
+            },
         )
         raise
     except Exception:  # noqa: BLE001
         session.rollback()
-        logger.exception("failed to persist failure state")
+        logger.exception("failed to persist failure state", extra={
+            "extra_fields": {
+                "event": "gen.failure_state_unpersisted",
+            }
+        })
     return {"task_id": task_id, "status": TaskStatus.FAILED.value, "error_code": code}
 
 
@@ -595,7 +656,12 @@ def _run(
         if leased is None:
             logger.info(
                 "formatting already leased by another worker, skipping",
-                extra={"extra_fields": {"task_id": str(task.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.formatting_already_leased",
+                        "task_id": str(task.id),
+                    }
+                },
             )
             return {"task_id": str(task.id), "status": task.status, "claimed": False}
         if lease is not None:
@@ -610,7 +676,7 @@ def _run(
         )
         logger.info(
             "resuming output formatting",
-            extra={"extra_fields": {"task_id": str(task.id)}},
+            extra={"extra_fields": {"event": "gen.resuming_phase", "task_id": str(task.id)}},
         )
         if selected is None:
             # 续跑却找不到当初选中的候选:数据被改过或候选被清理了。
@@ -618,7 +684,12 @@ def _run(
             # 既不是终态,现有的重试接口也捞不回来。必须给它一个明确的结局。
             logger.error(
                 "cannot resume formatting: selected candidate is gone",
-                extra={"extra_fields": {"task_id": str(task.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.formatting_source_missing",
+                        "task_id": str(task.id),
+                    }
+                },
             )
             gs.transition(
                 session, task, TaskStatus.FAILED,
@@ -661,7 +732,12 @@ def _run(
         if leased is None:
             logger.info(
                 "provider results already leased by another worker, skipping",
-                extra={"extra_fields": {"task_id": str(task.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.provider_results_already_leased",
+                        "task_id": str(task.id),
+                    }
+                },
             )
             return {"task_id": str(task.id), "status": task.status, "claimed": False}
         if lease is not None:
@@ -690,7 +766,11 @@ def _run(
         logger.info(
             "resuming provider result collection",
             extra={
-                "extra_fields": {"task_id": str(task.id), "external_id": external_id}
+                "extra_fields": {
+                    "event": "gen.resuming_phase",
+                    "task_id": str(task.id),
+                    "external_id": external_id,
+                }
             },
         )
         return _await_and_collect(
@@ -713,7 +793,12 @@ def _run(
         if leased is None:
             logger.info(
                 "scoring already leased by another worker, skipping",
-                extra={"extra_fields": {"task_id": str(task.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.scoring_already_leased",
+                        "task_id": str(task.id),
+                    }
+                },
             )
             return {"task_id": str(task.id), "status": task.status, "claimed": False}
         if lease is not None:
@@ -726,7 +811,13 @@ def _run(
         ]
         logger.info(
             "resuming scoring",
-            extra={"extra_fields": {"task_id": str(task.id), "candidates": len(scored)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.resuming_phase",
+                    "task_id": str(task.id),
+                    "candidates": len(scored),
+                }
+            },
         )
         if not scored:
             # 停在 SCORING 却一张候选图都没有:数据被改过。让它有个明确结局,
@@ -763,7 +854,13 @@ def _run(
     if not _claim(session, task):
         logger.info(
             "task already claimed by another worker, skipping",
-            extra={"extra_fields": {"task_id": str(task.id), "status": task.status}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.task_already_claimed",
+                    "task_id": str(task.id),
+                    "status": task.status,
+                }
+            },
         )
         return {"task_id": str(task.id), "status": task.status, "claimed": False}
 
@@ -835,7 +932,7 @@ def _run(
             logger.error(
                 "submit did not complete cleanly; provider may have accepted part of it",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "gen.submit_incomplete",
                         "task_id": str(task.id),
                         "provider": task.provider,
                         "partial_external_ids": len(partial),
@@ -948,7 +1045,7 @@ def _await_and_collect(
         logger.info(
             "provider status",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.provider_status",
                     "task_id": str(task.id), "provider": task.provider,
                     "external_id": external_id, "status": str(status),
                 }
@@ -989,7 +1086,7 @@ def _await_and_collect(
             logger.warning(
                 "provider result not retrievable yet; keeping external id for resume",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "gen.provider_result_not_ready",
                         "task_id": str(task.id),
                         "external_id": external_id,
                         "operation": operation,
@@ -1087,7 +1184,7 @@ def _await_and_collect(
             "persisting candidates failed; keeping external id for resume",
             exc_info=True,
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.candidates_persist_failed",
                     "task_id": str(task.id),
                     "external_id": external_id,
                 }
@@ -1145,7 +1242,7 @@ def _await_and_collect(
         logger.info(
             "provider reported a different billable amount than we would have inferred",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.provider_billing_mismatch",
                     "task_id": str(task.id),
                     "provider": task.provider,
                     "reported_units": usage.units,
@@ -1194,7 +1291,7 @@ def _await_and_collect(
         logger.warning(
             "every candidate download failed; keeping external id for resume",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.all_candidate_downloads_failed",
                     "task_id": str(task.id),
                     "external_id": external_id,
                     "provider_candidates": outcome.provider_count,
@@ -1240,7 +1337,12 @@ def _await_and_collect(
         if leased is None:
             logger.warning(
                 "could not take the scoring lease; another phase lease is still alive",
-                extra={"extra_fields": {"task_id": str(task.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.scoring_lease_unavailable",
+                        "task_id": str(task.id),
+                    }
+                },
             )
         else:
             lease["owner"] = leased
@@ -1335,7 +1437,13 @@ def _score_and_decide(
                 return _reschedule_scoring(session, task, exc, retries=retries, lease=lease)
             logger.error(
                 "scoring still failing after retries, escalating to manual review",
-                extra={"extra_fields": {"task_id": str(task.id), "retries": retries}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.scoring_escalated",
+                        "task_id": str(task.id),
+                        "retries": retries,
+                    }
+                },
             )
         return _escalate_to_review(session, task, exc, candidates=len(stored))
     # 落结论之前再确认一次租约还在自己手上。
@@ -1385,7 +1493,7 @@ def _reschedule_scoring(
     logger.warning(
         "rescheduling scoring after a transient evaluator failure",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "gen.scoring_rescheduled",
                 "task_id": str(task.id),
                 "round": task.current_round,
                 "retry": retries + 1,
@@ -1408,7 +1516,7 @@ def _escalate_to_review(session, task, exc, *, candidates: int) -> dict[str, Any
     logger.error(
         "escalating to manual review without regenerating",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "gen.escalated_without_regeneration",
                 "task_id": str(task.id),
                 "error": type(exc).__name__,
                 **(exc.detail or {}),
@@ -1457,7 +1565,7 @@ def _apply_decision(session, task, attempt, decision, *, candidates: int) -> dic
             result["spot_check"] = True
         logger.info(
             "task auto approved",
-            extra={"extra_fields": {"task_id": str(task.id),
+            extra={"extra_fields": {"event": "gen.task_auto_approved", "task_id": str(task.id),
                                     "candidate_id": decision.selected_key}},
         )
         result["selected_candidate_id"] = decision.selected_key
@@ -1481,8 +1589,14 @@ def _apply_decision(session, task, attempt, decision, *, candidates: int) -> dic
         )
         logger.info(
             "task escalated to manual review",
-            extra={"extra_fields": {"task_id": str(task.id), "round": task.current_round,
-                                    "max_rounds": task.max_rounds}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.task_escalated",
+                    "task_id": str(task.id),
+                    "round": task.current_round,
+                    "max_rounds": task.max_rounds,
+                }
+            },
         )
         result["status"] = task.status
         return result
@@ -1496,7 +1610,7 @@ def _apply_decision(session, task, attempt, decision, *, candidates: int) -> dic
         # 花之前把账记清楚不算苛刻。
         logger.error(
             "cannot record the repair strategy, escalating instead of regenerating",
-            extra={"extra_fields": {"task_id": str(task.id)}},
+            extra={"extra_fields": {"event": "gen.repair_unrecordable", "task_id": str(task.id)}},
         )
         gs.transition(session, task, TaskStatus.MANUAL_REVIEW)
         review_service.open_review(
@@ -1515,8 +1629,14 @@ def _apply_decision(session, task, attempt, decision, *, candidates: int) -> dic
             if alternative is not None:
                 logger.info(
                     "switching provider by repair rule",
-                    extra={"extra_fields": {"task_id": str(task.id), "from": task.provider,
-                                            "to": alternative.provider_name}},
+                    extra={
+                        "extra_fields": {
+                            "event": "gen.repair_switch_provider",
+                            "task_id": str(task.id),
+                            "from": task.provider,
+                            "to": alternative.provider_name,
+                        }
+                    },
                 )
                 attempt.repair_strategy = {
                     **attempt.repair_strategy,
@@ -1556,7 +1676,13 @@ def _format_outputs(
     def _abort(code: str, message: str) -> dict[str, Any]:
         logger.error(
             "formatting aborted",
-            extra={"extra_fields": {"task_id": str(task.id), "reason": code}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.formatting_aborted",
+                    "task_id": str(task.id),
+                    "reason": code,
+                }
+            },
         )
         if not sm.is_terminal(task.status):
             gs.transition(
@@ -1607,7 +1733,12 @@ def _format_outputs(
         # 判成 SOURCE_ASSET_* 会把它错误地挡在重试之外
         logger.warning(
             "cannot verify the selected candidate before formatting",
-            extra={"extra_fields": {"task_id": str(task.id)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.candidate_unverifiable",
+                    "task_id": str(task.id),
+                }
+            },
         )
         problem = None
     if problem is not None:
@@ -1624,7 +1755,13 @@ def _format_outputs(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "output formatting failed",
-            extra={"extra_fields": {"task_id": str(task.id), "candidate_id": candidate_id}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.formatting_failed",
+                    "task_id": str(task.id),
+                    "candidate_id": candidate_id,
+                }
+            },
         )
         task.error_code = ErrorCode.INTERNAL_ERROR.value
         task.error_message = f"多尺寸输出失败:{type(exc).__name__}"[:500]
@@ -1725,7 +1862,13 @@ def _task_plan_angles(session, task: GenerationTask):
         # 方案行被删了。**不拦**:图已经在生成或已经生成完,这里只是标角度
         logger.warning(
             "generation plan row is gone; candidates will not carry a target angle",
-            extra={"extra_fields": {"task_id": str(task.id), "plan_id": str(plan_id)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.plan_row_missing",
+                    "task_id": str(task.id),
+                    "plan_id": str(plan_id),
+                }
+            },
         )
         return ()
     return gp.normalize_angles(row.angles_json)
@@ -1808,7 +1951,7 @@ def _build_request(
             "task has no usable model template; refusing to fall back to the "
             "free-uploaded MODEL_REFERENCE asset (PRD 6.4)",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.model_template_missing",
                     "task_id": str(task.id),
                     "model_template_id": str(template_id or ""),
                 }
@@ -1870,7 +2013,7 @@ def _angle_units_for(session, task: GenerationTask, prompt: str | None):
             "plan angle counts no longer match the task candidate count; "
             "submitting without per-angle work units",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.plan_angle_mismatch",
                     "task_id": str(task.id),
                     "planned": planned,
                     "candidate_count": task.candidate_count,
@@ -1940,7 +2083,12 @@ def _rollback_savepoint(savepoint, task: GenerationTask) -> None:
         logger.warning(
             "could not roll back the candidate savepoint",
             exc_info=True,
-            extra={"extra_fields": {"task_id": str(task.id)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.candidate_savepoint_rollback_failed",
+                    "task_id": str(task.id),
+                }
+            },
         )
 
 
@@ -2016,7 +2164,13 @@ def _abandon_attempt(
         session.rollback()
         logger.exception(
             "could not close out the attempt after an unexpected failure",
-            extra={"extra_fields": {"task_id": str(task.id), "attempt_id": str(attempt.id)}},
+            extra={
+                "extra_fields": {
+                    "event": "gen.attempt_close_failed",
+                    "task_id": str(task.id),
+                    "attempt_id": str(attempt.id),
+                }
+            },
         )
 
 
@@ -2040,7 +2194,7 @@ def _drop_stray_pending_rows(
     logger.error(
         "unexpected pending rows while abandoning an attempt; dropping them",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "gen.stray_pending_rows",
                 "task_id": str(task.id),
                 "attempt_id": str(attempt.id),
                 # 类型名够定位是哪条路径漏了保存点,又不会把业务字段写进日志
@@ -2053,7 +2207,11 @@ def _drop_stray_pending_rows(
         try:
             session.expunge(obj)
         except Exception:  # noqa: BLE001 - 摘不掉就让它去撞保存点/约束,别在这里抛
-            logger.warning("could not expunge a stray pending row", exc_info=True)
+            logger.warning("could not expunge a stray pending row", exc_info=True, extra={
+                "extra_fields": {
+                    "event": "gen.stray_pending_rows",
+                }
+            })
 
 
 def _partial_ids(exc: ProviderError) -> list[str]:
@@ -2196,7 +2354,7 @@ def _drop_shrunk_tail(
     logger.warning(
         "provider returned fewer candidates than the previous round; trimming the tail",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "gen.provider_fewer_candidates",
                 "task_id": str(task.id),
                 "now": kept,
                 "before": len(existing),
@@ -2211,7 +2369,7 @@ def _drop_shrunk_tail(
         logger.error(
             "a previously downloaded candidate fell out of the provider result set",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "gen.provider_result_missing",
                     "task_id": str(task.id),
                     "candidate_indexes": sorted(r.candidate_index for r in kept_back),
                 }
@@ -2357,7 +2515,13 @@ def _persist_candidates(session, task, attempt, candidates) -> _PersistOutcome:
             logger.warning(
                 "candidate download failed",
                 exc_info=True,
-                extra={"extra_fields": {"task_id": str(task.id), "index": index}},
+                extra={
+                    "extra_fields": {
+                        "event": "gen.candidate_download_failed",
+                        "task_id": str(task.id),
+                        "index": index,
+                    }
+                },
             )
         touched.append(row)
 

@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from app.core.logging import get_logger
+from app.llm import payload_store
 from app.llm.images import PreparedImage
 from app.llm.redaction import safe_payload_for_log, safe_request_summary
 from app.providers.errors import (
@@ -360,6 +361,7 @@ class MultimodalClient:
         call_id = uuid4().hex[:12]
         request_bytes = _json_bytes(request.body)
         request_fields: dict[str, Any] = {
+            "event": "llm.request_prepared",
             "llm_call_id": call_id,
             "request_body_bytes": len(request_bytes),
             "request_sha256_16": sha256(request_bytes).hexdigest()[:16],
@@ -369,6 +371,25 @@ class MultimodalClient:
         }
         if _payload_logging_enabled():
             request_fields["request_body"] = safe_payload_for_log(request.body)
+        # 旁挂库是**另一个去向**,不是这个开关的另一半:上面那行进 stdout
+        # (归档面,默认关),下面这次进本机 Redis(诊断窗口,默认开、有 TTL)。
+        # 两者的脱敏是同一个函数,两者的图片正文都永不落盘 —— 见 payload_store。
+        payload_store.capture_request(
+            call_id,
+            provider=self.name,
+            model=self.config.model,
+            endpoint=request.url,
+            headers=request.headers,
+            body=request.body,
+            request_sha256_16=request_fields["request_sha256_16"],
+            request_body_bytes=len(request_bytes),
+            # 用 `describe()` 而不是另写一份摘要:那个方法已经是"可以安全写进
+            # 日志"的那一份,刻意不含 url 与 base64。图片的 sha256_16 不在这里 ——
+            # 它在脱敏后的 body 里(`safe_payload_for_log` 把 data URL 换成了
+            # `{redacted, mime_type, base64_chars, sha256_16}`),那才是真正
+            # 发出去的那一份的摘要。
+            images=[one.describe() for one in request.images],
+        )
         logger.info(
             "llm request prepared",
             extra={"extra_fields": request_fields},
@@ -388,7 +409,7 @@ class MultimodalClient:
                     logger.info(
                         "llm request attempt started",
                         extra={
-                            "extra_fields": {
+                            "extra_fields": {"event": "llm.attempt_started",
                                 "llm_call_id": call_id,
                                 "attempt": attempt_number,
                                 "max_attempts": self.config.max_retries + 1,
@@ -401,7 +422,7 @@ class MultimodalClient:
                     logger.info(
                         "llm request completed",
                         extra={
-                            "extra_fields": {
+                            "extra_fields": {"event": "llm.request_completed",
                                 "llm_call_id": call_id,
                                 "attempt": attempt_number,
                                 "http_status": status,
@@ -416,7 +437,7 @@ class MultimodalClient:
                     logger.warning(
                         "llm request attempt failed",
                         extra={
-                            "extra_fields": {
+                            "extra_fields": {"event": "llm.attempt_failed",
                                 "llm_call_id": call_id,
                                 "attempt": attempt_number,
                                 "max_attempts": self.config.max_retries + 1,
@@ -434,7 +455,7 @@ class MultimodalClient:
                     logger.warning(
                         "llm request retrying",
                         extra={
-                            "extra_fields": {
+                            "extra_fields": {"event": "llm.retrying",
                                 "attempt": attempt + 1,
                                 "max_retries": self.config.max_retries,
                                 "delay_seconds": round(delay, 2),
@@ -524,6 +545,7 @@ class MultimodalClient:
             body = response.text
 
         response_fields: dict[str, Any] = {
+            "event": "llm.response_received",
             "llm_call_id": _llm_call_id.get(),
             "attempt": _llm_attempt.get(),
             "http_status": status,
@@ -538,6 +560,18 @@ class MultimodalClient:
         }
         if _payload_logging_enabled():
             response_fields["response_body"] = safe_payload_for_log(body)
+        # 非 JSON 的那一次恰恰是最需要原文的那一次:上游返回网关 HTML 错误页、
+        # 一段散文、被截断的 JSON —— 那时摘要里只剩 http_status 和 content_type,
+        # finish_reason 与 usage 全是空。所以这次留痕不看 body 是什么形状。
+        payload_store.capture_attempt(
+            _llm_call_id.get(),
+            attempt=_llm_attempt.get(),
+            http_status=status,
+            duration_ms=None,
+            content_type=response.headers.get("content-type"),
+            upstream_request_id=response_fields["upstream_request_id"],
+            body=body,
+        )
         logger.info(
             "llm http response received",
             extra={"extra_fields": response_fields},

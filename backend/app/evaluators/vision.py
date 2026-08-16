@@ -666,7 +666,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             logger.warning(
                 "vision response parse failed",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "eval.response_parse_failed",
                         "response_id": meta.get("response_id"),
                         "model": meta.get("model"),
                         "http_status": status,
@@ -729,7 +729,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             logger.warning(
                 "reference images truncated to the configured limit",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "eval.reference_images_truncated",
                         "provided": len(assets),
                         "sent": len(selected),
                         "limit": limit,
@@ -913,7 +913,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
                 logger.info(
                     "vision request fitted to endpoint body budget",
                     extra={
-                        "extra_fields": {
+                        "extra_fields": {"event": "llm.request_fitted",
                             "original_body_bytes": original_size,
                             "fitted_body_bytes": fitted_size,
                             "limit_bytes": self.config.max_request_bytes,
@@ -1159,7 +1159,7 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
         logger.info(
             "vision evaluation completed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "eval.completed",
                     "model": actual_model or self.config.model,
                     "api_style": self.config.api_style,
                     "depth": meta.get("depth"),
@@ -1244,7 +1244,12 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             # 「探针把可达服务报成不可达」这种故障在日志里和真的不可达长得一样
             logger.exception(
                 "vision test_connection failed with an unexpected error",
-                extra={"extra_fields": {"error": type(exc).__name__}},
+                extra={
+                    "extra_fields": {
+                        "event": "eval.test_connection_failed",
+                        "error": type(exc).__name__,
+                    }
+                },
             )
         return base
 

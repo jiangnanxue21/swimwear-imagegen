@@ -7,6 +7,7 @@ import {
   HistoryOutlined, CheckSquareOutlined, HomeOutlined, WalletOutlined,
   CloudUploadOutlined,
   ExperimentOutlined,
+  FileSearchOutlined,
 } from '@ant-design/icons'
 import AppLayout, { type NavGroup } from './components/AppLayout'
 import NotFoundPage from './pages/NotFoundPage'
@@ -40,6 +41,7 @@ const AITestPage = lazy(() => import('./pages/AITestPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const MediaLibraryPage = lazy(() => import('./pages/MediaLibraryPage'))
 const ModelTemplatesPage = lazy(() => import('./pages/ModelTemplatesPage'))
+const OpsLogPage = lazy(() => import('./pages/OpsLogPage'))
 const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'))
 const ProductListPage = lazy(() => import('./pages/ProductListPage'))
 const PromptsPage = lazy(() => import('./pages/PromptsPage'))
@@ -161,6 +163,13 @@ export const NAV: NavGroup[] = [
       { key: '/prompts', label: '提示词', icon: <FileTextOutlined /> },
       { key: '/settings', label: '设置', icon: <SettingOutlined /> },
       { key: '/audit', label: '操作审计', icon: <HistoryOutlined /> },
+      /*
+       * 运行日志(docs/LOG-CONSOLE.md)。**紧挨着操作审计,但不合并**:
+       * 审计答"谁改了什么"(合规),这一页答"系统怎么跑的"(排障)。
+       * 相邻是因为出事时两页要来回看;分开是因为合并的结果是运营在合规页里
+       * 看见租约让位。
+       */
+      { key: '/ops-logs', label: '运行日志', icon: <FileSearchOutlined /> },
       { key: '/system', label: '系统状态', icon: <HeartOutlined /> },
     ],
   },
@@ -240,6 +249,9 @@ export const router = createBrowserRouter(
         {/* B-02:发布链路的前端入口。`?product_id=` 会直接打开提交弹窗 */}
         <Route path="/publish" element={<PublishPage />} />
         <Route path="/audit" element={<AuditLogPage />} />
+        {/* 运行日志。路径刻意不挂在 /audit 下:它们是两种视角(合规 vs 排障),
+            共用一个前缀会让人以为后者是前者的一个页签 */}
+        <Route path="/ops-logs" element={<OpsLogPage />} />
         <Route path="/products" element={<ProductListPage />} />
         <Route path="/products/:id" element={<ProductDetailPage />} />
         <Route path="/media" element={<MediaLibraryPage />} />

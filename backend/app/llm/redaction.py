@@ -31,6 +31,12 @@ _BEARER_SECRET = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 MAX_LOG_STRING_CHARS = 12_000
 MAX_LOG_ITEMS = 100
 
+#: 截断标记。**必须显形** —— 界面要能画出"这里被截了",不能让人误以为
+#: 看到的是全文。做成常量是因为旁挂库要反过来认它,好列出 `truncated` 字段名;
+#: 两处各写一份字面量的话,改了措辞的那天,列表会安静地变空。
+TRUNCATION_MARK = "…[truncated {omitted} chars]"
+_TRUNCATION_SUFFIX = "…[truncated "
+
 
 def _safe_url(value: str) -> str:
     """保留可排障的地址，同时去掉签名查询串和 fragment。"""
@@ -43,23 +49,43 @@ def _safe_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def safe_payload_for_log(value: Any) -> Any:
+def safe_payload_for_log(value: Any, *, max_string_chars: int | None = None) -> Any:
     """保留请求/响应 JSON 的结构，但移除密钥、图片正文和签名 URL。
 
     这和 :func:`safe_request_summary` 的用途不同：摘要默认一直记；完整结构只在
     ``LLM_LOG_PAYLOADS=true`` 时记。图片 base64 即使打开完整日志也永不落盘，
     只留下 MIME、编码字符数和摘要，足够核对到底发送的是哪一份数据。
+
+    ## ``max_string_chars``:两个去向,同一套脱敏
+
+    诊断旁挂库(`llm/payload_store.py`)要的字符串上限比归档面宽:系统提示词
+    本身就有几千字,截在 12k 会把"输出要求"那一段切掉 —— 而那段正是排查
+    格式问题要看的。
+
+    宽的那一档做成**参数**而不是第二个函数,是刻意的:图片正文、密钥键、
+    签名 URL 三条规矩对两个去向完全一样,而复制一份脱敏逻辑出去意味着
+    以后每加一条规矩都要记得改两处。**新开一个去向,最容易漏的就是在新去向上
+    把老规矩忘了**,所以这里只让"截多长"可配,别的一个字不让改。
+
+    不传时逐字维持原行为(``MAX_LOG_STRING_CHARS``),归档面因此没有任何变化。
     """
+    limit = MAX_LOG_STRING_CHARS if max_string_chars is None else max(1, int(max_string_chars))
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
             if index >= MAX_LOG_ITEMS:
                 result["__truncated_fields__"] = len(value) - MAX_LOG_ITEMS
                 break
-            result[str(key)] = "***" if _SECRET_KEY.search(str(key)) else safe_payload_for_log(item)
+            result[str(key)] = (
+                "***"
+                if _SECRET_KEY.search(str(key))
+                else safe_payload_for_log(item, max_string_chars=limit)
+            )
         return result
     if isinstance(value, (list, tuple)):
-        items = [safe_payload_for_log(item) for item in value[:MAX_LOG_ITEMS]]
+        items = [
+            safe_payload_for_log(item, max_string_chars=limit) for item in value[:MAX_LOG_ITEMS]
+        ]
         if len(value) > MAX_LOG_ITEMS:
             items.append({"__truncated_items__": len(value) - MAX_LOG_ITEMS})
         return items
@@ -84,10 +110,19 @@ def safe_payload_for_log(value: Any) -> Any:
         value = _BEARER_SECRET.sub("Bearer ***", value)
         if value.startswith(("http://", "https://")):
             return _safe_url(value)
-        if len(value) > MAX_LOG_STRING_CHARS:
-            omitted = len(value) - MAX_LOG_STRING_CHARS
-            return value[:MAX_LOG_STRING_CHARS] + f"…[truncated {omitted} chars]"
+        if len(value) > limit:
+            omitted = len(value) - limit
+            return value[:limit] + TRUNCATION_MARK.format(omitted=omitted)
     return value
+
+
+def was_truncated(value: Any) -> bool:
+    """这个值是不是被 :func:`safe_payload_for_log` 截过。
+
+    判据只有一条,而且和产出截断的那一行共用同一个常量。旁挂库靠它列出
+    `truncated`,界面靠 `truncated` 告诉人"你看到的不是全文"。
+    """
+    return isinstance(value, str) and _TRUNCATION_SUFFIX in value
 
 
 def safe_request_summary(

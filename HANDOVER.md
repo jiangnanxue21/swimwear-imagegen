@@ -1,3 +1,82 @@
+# 2026-08-16 a53 交接:运行日志控制台 —— 归类、展示、原文
+
+> 决策记在 `docs/DECISIONS.md` §3.80,设计在 `docs/LOG-CONSOLE.md`
+> (第十章记着落地时对设计的五处订正)。下方 a51 交接紧接着,保留为历史记录。
+
+## 这一轮动的是"采集之后",不是采集
+
+采集面是健康的:210 个调用点、190 个带结构化字段、脱敏有测试钉着。
+不满意的是三件事,逐条对上一个交付物:
+
+```
+归类  唯一的机器可读分类是 logger(代码结构)与 message(自由英文句子)
+      -> app/core/log_events.py:15 个域 + 194 个事件码 + logger 前缀兜底
+展示  唯一的查看工具是一条只看 AI 调用的命令行
+      -> /api/ops/logs 三件套 + 「运行日志」页 + watch_logs.py
+原文  模型的请求与响应默认不留;留了也只能在那条命令行里看
+      -> ops:llm:{call_id} 旁挂库(TTL 24h,管理员闸,默认开)
+```
+
+## 三件必须知道的事
+
+**一、加一条日志现在是两步,少一步就红。** 登记事件码 + 调用点写
+`extra_fields={"event": ...}`。守卫**双向**比对 —— 登记了没人写也会红,
+因为那会在筛选下拉里摆出一个永远筛不出东西的选项。
+
+**二、`LLM_LOG_PAYLOADS` 一个字没动。** 它默认关是对的(归档面不该躺着
+一份受授权约束的商品数据)。新增的 `OPS_LLM_PAYLOAD_CAPTURE` 默认**开**,
+是**另一个去向**:有 TTL、有管理员闸、不出本机 Redis。两者共用同一个脱敏函数。
+
+**三、捡到一个缺陷:14 个调用点的结构化字段从来没进过日志。**
+`extra={"key": ...}` 少了 `extra_fields` 那一层包裹,而 `JsonFormatter` 只读
+`record.extra_fields`。不报错、不提示。最贵的一条是
+`batch.billed_result_unknown_refusing_paid_retry`(已计费但结果未知,拒绝付费重试)
+—— 它记的 `key` / `action` 一个都没落地。全部补上了,并加了守卫。
+
+## 改了什么
+
+```
+backend/app/core/log_events.py       新增。注册表:DOMAINS / EVENTS / LOGGER_DOMAIN_FALLBACK
+backend/app/core/log_ring.py         新增。RingHandler + read_ring,fire-and-forget
+backend/app/core/logging.py          JsonFormatter 拆出 build_payload;event/domain 提顶层
+backend/app/llm/payload_store.py     新增。模型载荷旁挂库
+backend/app/llm/redaction.py         safe_payload_for_log 加 max_string_chars 参数;截断标记提常量
+backend/app/llm/transport.py         两处接线(请求 / 每次尝试)
+backend/app/api/ops_logs.py          新增。三个只读端点,管理员闸
+backend/app/core/config.py           +6 项 OPS_* 配置(.env.example 同步)
+backend/tools/watch_logs.py          新增,取代 watch_ai_logs.py(已删)
+frontend/src/api/ops.ts              新增
+frontend/src/pages/OpsLogPage.tsx    新增。流视角 / 域轨道 / 链路模式 / 三个页签
+frontend/src/App.tsx                 +路由 /ops-logs,+「系统管理」菜单项
+206 个调用点                          补 event= 码(+ 14 处补 extra_fields 包裹)
+docs/LOG-CONSOLE.md                  设计落位 + 第十章落地记录
+docs/DECISIONS.md                    §3.80;顺手删掉了被整节贴了两遍的 §3.78
+```
+
+## 验了什么,**没验什么**
+
+```
+跑绿   make check-offline(19/19 + 10/10)、纯测试 2740 条、ruff、
+       前端 typecheck / lint / Vitest 159 条 / build / syntax-check
+验红   前端「不许持有分类表」那条守卫做过变异(塞一个事件码进去 -> 当场红);
+       后端双向注册守卫做过变异(改一个码 -> 两个方向同时红)
+```
+
+**没验的三件,别读成"应该没问题":**
+
+1. **真 Redis 一次都没连过。** 环形写入、旁挂库读写、TTL 到期,全部只有
+   假客户端覆盖。而日志写失败是**静默吞掉**的 —— 出问题时唯一的信号是
+   `/api/ops/logs/meta` 里的 `dropped_since_boot`。
+2. **浏览器一次都没打开过。** 前端四条门禁全绿 ≠ 这一页能用。Playwright 在任务 24。
+3. **`pytest` / `make test-nodb` 没跑**(这台机器没装 fastapi / sqlalchemy),
+   所以三个新端点没有被 TestClient 打过。判定层有纯测试,接口层没有。
+
+第一次连真 Redis 时按这个顺序看:`/api/ops/logs/meta` 的 `held` 涨不涨 ->
+`dropped_since_boot` 是不是 0 -> 随便点一条带 `llm_call_id` 的日志,
+「模型载荷」页签打不打得开 -> 等 24 小时后再点一次,是不是如实说"已过期"。
+
+---
+
 # 2026-08-15 a51 交接:建档的四类失败提前到"下一步",SPU 停用补上一个到不了的状态
 
 > 决策记在 `docs/DECISIONS.md` §3.77。下方 a48 交接紧接着,保留为历史记录。

@@ -209,9 +209,9 @@ def _ask(probe: _Probe, *, options: Mapping[str, Any]) -> policy.PollOutcome:
     except Exception as exc:  # noqa: BLE001 - 见 docstring
         # 只记异常类型,不记原文:客户端库的异常原文常常整条带着 URL 与凭证
         logger.warning(
-            "publish.poll_transport_failed",
+            "the poll request itself failed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "publish.poll_transport_failed",
                     "listing_id": str(probe.listing_id),
                     "channel": probe.channel,
                     "error": type(exc).__name__,
@@ -284,9 +284,9 @@ def apply_poll_outcome(
 
     if outcome.needs_human:
         logger.warning(
-            "publish.poll_needs_attention",
+            "the poll came back with something a human should look at",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "publish.poll_needs_attention",
                     "listing_id": str(listing.id),
                     "external_spu_id": listing.external_spu_id,
                     "local_status": listing.status,
@@ -329,9 +329,9 @@ def apply_poll_outcome(
         # `PLATFORM_REJECTED` 例外放行:平台明确拒了,这不是「你的请求还没
         # 处理完」能解释的,而且 `_reflow_rejection` 必须跑起来。
         logger.info(
-            "publish.poll_deferred_to_delivery",
+            "a delivery is in flight; deferring this poll",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "publish.poll_deferred_to_delivery",
                     "listing_id": str(listing.id),
                     "local_status": listing.status,
                     "polled_status": outcome.listing_status,
@@ -373,9 +373,9 @@ def apply_poll_outcome(
     session.flush()
 
     logger.info(
-        "publish.poll_status_changed",
+        "the platform side status changed",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "publish.poll_status_changed",
                 "listing_id": str(listing.id),
                 "from": previous,
                 "to": listing.status,
@@ -440,9 +440,9 @@ def _reflow_rejection(
     product = session.get(Product, listing.product_id)
     if draft is None or product is None:
         logger.warning(
-            "publish.rejection_reflow_skipped",
+            "skipped the rejection reflow",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "publish.rejection_reflow_skipped",
                     "listing_id": str(listing.id),
                     "draft_id": str(listing.draft_id) if listing.draft_id else None,
                     "reason": "草稿或商品行缺失,驳回记不进台账",

@@ -258,7 +258,7 @@ def run_extraction(
             logger.info(
                 "extraction request reused an existing run",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "attr.extraction_reused",
                         "product_id": str(product.id),
                         "extraction_id": str(existing.id),
                         "verdict": verdict,
@@ -273,7 +273,7 @@ def run_extraction(
         logger.info(
             "extraction run has no idempotency key",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "attr.no_idempotency_key",
                     "product_id": str(product.id),
                     "reason": identity.no_key_reason,
                 }
@@ -332,7 +332,7 @@ def run_extraction(
             logger.info(
                 "extraction run lost the idempotency race and reused the winner",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "attr.idempotency_race_resolved",
                         "product_id": str(product.id),
                         "extraction_id": str(winner.id),
                         "idempotency_key": identity.key,
@@ -439,7 +439,7 @@ def run_extraction(
                 fields.update(exc.detail)
             logger.warning(
                 "extraction failed for one image",
-                extra={"extra_fields": fields},
+                extra={"extra_fields": {"event": "attr.extraction_image_failed", **fields}},
             )
             attempted = call_accounting.attempts_from(getattr(exc, "detail", None))
             fields["network_attempts"] = call_accounting.describe_attempts(attempted)
@@ -494,7 +494,7 @@ def run_extraction(
         for name in plan.fabricated_names:
             logger.warning(
                 "model returned a field outside the requested targets",
-                extra={"extra_fields": {"field": name}},
+                extra={"extra_fields": {"event": "attr.field_out_of_scope", "field": name}},
             )
         for item in plan.evidence:
             session.add(
@@ -590,7 +590,7 @@ def run_extraction(
         logger.warning(
             "every image of one or more colour scopes failed",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "attr.scope_all_images_failed",
                     "extraction_id": str(row.id),
                     "failed_scopes": list(outcome.failed_scopes),
                     # 重试范围**跟着一起报**:少了它,读日志的人得自己拼一次,
@@ -603,7 +603,7 @@ def run_extraction(
     logger.info(
         "extraction finished",
         extra={
-            "extra_fields": {
+            "extra_fields": {"event": "attr.extraction_finished",
                 "product_id": str(product.id),
                 "extraction_id": str(row.id),
                 "images": len(assets),
@@ -1299,7 +1299,7 @@ def apply_evidence(
             logger.info(
                 "merge produced no usable value",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "attr.merge_no_value",
                         "field": field_name,
                         "outcome": result.outcome.value,
                         "reasons": list(result.reasons)[:2],
@@ -1312,7 +1312,12 @@ def apply_evidence(
             # 而"人工值永不被覆盖"要防的正是这个
             logger.warning(
                 "merge conflicts with a manual value; keeping the manual one",
-                extra={"extra_fields": {"field": field_name}},
+                extra={
+                    "extra_fields": {
+                        "event": "attr.merge_conflict_manual_wins",
+                        "field": field_name,
+                    }
+                },
             )
             continue
 
@@ -1361,7 +1366,7 @@ def apply_evidence(
             logger.warning(
                 "merged value rejected by the field contract",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "attr.merge_rejected_by_contract",
                         "product_id": str(product.id),
                         "field": field_name,
                         "reason": exc.reason,
@@ -1409,7 +1414,7 @@ def apply_evidence(
             logger.warning(
                 "AI divergence detected",
                 extra={
-                    "extra_fields": {
+                    "extra_fields": {"event": "attr.divergence_detected",
                         "product_id": str(product.id),
                         "field": field_name,
                         "value": result.value,
@@ -1951,7 +1956,7 @@ def repair_projections(session: Session, *, limit: int = 500) -> int:
         session.flush()
         logger.warning(
             "repaired attribute projections",
-            extra={"extra_fields": {"count": fixed}},
+            extra={"extra_fields": {"event": "attr.projections_repaired", "count": fixed}},
         )
     return fixed
 

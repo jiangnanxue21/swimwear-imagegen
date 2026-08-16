@@ -125,7 +125,12 @@ def _backfill_product_assets(session, *, batch: int) -> int:
             # 真发生了说明有人手工删过数据,跳过并记一笔
             logger.warning(
                 "orphan product asset skipped",
-                extra={"extra_fields": {"asset_id": str(asset.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "ops.backfill_skipped_orphan",
+                        "asset_id": str(asset.id),
+                    }
+                },
             )
             continue
         media_service.shadow_from_product_asset(session, product, asset)
@@ -145,7 +150,12 @@ def _backfill_candidates(session, *, batch: int) -> int:
         if product is None:
             logger.warning(
                 "orphan candidate skipped",
-                extra={"extra_fields": {"candidate_id": str(candidate.id)}},
+                extra={
+                    "extra_fields": {
+                        "event": "ops.backfill_skipped_orphan",
+                        "candidate_id": str(candidate.id),
+                    }
+                },
             )
             continue
         media_service.shadow_from_candidate(session, product, candidate)

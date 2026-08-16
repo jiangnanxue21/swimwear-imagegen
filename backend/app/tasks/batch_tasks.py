@@ -87,9 +87,9 @@ def run_batch_task(self, batch_id: str, actor: str = "system") -> dict:  # noqa:
         job = bs.get_job(session, UUID(batch_id))
         counts = bs.run_batch(session, job, actor=actor, commit_each=True)
         logger.info(
-            "batch.async_finished",
+            "async batch run finished",
             extra={
-                "extra_fields": {
+                "extra_fields": {"event": "batch.async_finished",
                     "batch_id": batch_id,
                     "succeeded": counts.succeeded,
                     "failed": counts.failed,
@@ -113,14 +113,19 @@ def run_batch_task(self, batch_id: str, actor: str = "system") -> dict:  # noqa:
         session.rollback()
         logger.error(
             "database unavailable during batch run; will retry",
-            extra={"extra_fields": {"batch_id": batch_id}},
+            extra={"extra_fields": {"event": "batch.db_unavailable", "batch_id": batch_id}},
         )
         raise
     except Exception:  # noqa: BLE001
         # 每件已经各自提交过,这里回滚的只是最后一段没提交的部分。
         # 已经跑完的条目和回执留在库里 —— 那正是拆事务的目的
         session.rollback()
-        logger.exception("batch run failed", extra={"extra_fields": {"batch_id": batch_id}})
+        logger.exception("batch run failed", extra={
+            "extra_fields": {
+                "event": "batch.run_failed",
+                "batch_id": batch_id,
+            }
+        })
         return {"batch_id": batch_id, "error": True}
     finally:
         session.close()

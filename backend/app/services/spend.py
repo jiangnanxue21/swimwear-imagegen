@@ -265,7 +265,7 @@ def _warn_once(raw: str, reason: str) -> None:
     """
     logger.error(
         "price book is unparseable; calls will be recorded as unpriced",
-        extra={"extra_fields": {"reason": reason}},
+        extra={"extra_fields": {"event": "settings.price_book_unparseable", "reason": reason}},
     )
 
 

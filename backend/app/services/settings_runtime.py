@@ -89,7 +89,10 @@ def overrides(force: bool = False) -> dict[str, str]:
             _loaded_at = time.monotonic()
             if (time.monotonic() - _warned_at) > 60:
                 _warned_at = time.monotonic()
-                logger.warning("cannot read settings overrides; falling back to environment")
+                logger.warning(
+                    "cannot read settings overrides; falling back to environment",
+                    extra={"extra_fields": {"event": "settings.overrides_unreadable"}},
+                )
         return _cache
 
 

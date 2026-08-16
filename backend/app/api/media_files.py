@@ -81,7 +81,7 @@ def get_media(
     if not verify_local_signature(path, exp, sig):
         logger.warning(
             "rejected a media request with a bad or expired signature",
-            extra={"extra_fields": {"path": path}},
+            extra={"extra_fields": {"event": "auth.media_signature_rejected", "path": path}},
         )
         raise _reject()
 

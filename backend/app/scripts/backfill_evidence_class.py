@@ -204,7 +204,12 @@ def _backfill(session, *, batch: int, recompute: bool) -> int:
         pending += 1
         if pending >= batch:
             session.commit()
-            logger.info("evidence_class 回填进度", extra={"written": written})
+            logger.info("evidence_class 回填进度", extra={
+                "extra_fields": {
+                    "event": "ops.backfill_progress",
+                    "written": written,
+                }
+            })
             pending = 0
 
     if pending:

@@ -160,6 +160,40 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = ""
     CELERY_TASK_ALWAYS_EAGER: bool = False
 
+    # --- 运行日志控制台(docs/LOG-CONSOLE.md) ---
+    #
+    # ## 这一组和 `LLM_LOG_PAYLOADS` 不是一件事,别合并
+    #
+    # `LLM_LOG_PAYLOADS` 管的是**归档面**:开了之后完整载荷进 stdout,
+    # 而 stdout 会被采集、被复制到别处、按采集方的规矩长期留存。它默认关,
+    # 那个决定到今天依然成立(一份受授权约束的商品数据不该躺在一个没人管的
+    # 地方),**本轮一个字都不动**。
+    #
+    # 下面这一组管的是**诊断窗口**:有 TTL、有管理员闸、不出本机 Redis。
+    # 风险面不同,所以默认值可以不同 —— 这是整组唯一需要点头的地方。
+    #
+    # 错的从来不是"默认关"这个决定,是"要么进归档面、要么不留"这个二选一。
+
+    #: 环形缓冲总开关。关掉之后 stdout 照旧,只是 Web 的运行日志页没有数据。
+    #: 留这个旋钮是因为有一类部署会把 Redis 让给 Celery 独占。
+    OPS_LOG_RING_ENABLED: bool = True
+    #: 环形容量。5000 条 ≈ 一次繁忙的批量任务加上它前后的上下文。
+    #: 调大之前先算内存:一条结构化日志 0.5~2KB,5000 条约 2~10MB。
+    OPS_LOG_RING_CAP: int = 5000
+
+    #: 模型载荷旁挂库。**默认开**,理由见上面那段。
+    #: 关掉之后 `/api/ops/llm/{id}` 一律 404,界面会说"未开启捕获"而不是空面板。
+    OPS_LLM_PAYLOAD_CAPTURE: bool = True
+    #: 旁挂库的存活时间。24 小时:值得排查的失败要么当天查,要么它已经变成
+    #: 一个统计问题而不是一次调用的问题。到期自灭,不需要有人记得清理。
+    OPS_LLM_PAYLOAD_TTL_SECONDS: int = 86400
+    #: 单次调用在旁挂库里的上限。超出按字段截断,并把截断的字段名列进 `truncated`。
+    OPS_LLM_PAYLOAD_MAX_BYTES: int = 256 * 1024
+    #: 旁挂库的字符串上限。**刻意比归档面的 `MAX_LOG_STRING_CHARS`(12k)宽**:
+    #: 系统提示词本身就有几千字,截在 12k 会把"输出要求"那段切掉 ——
+    #: 而那段正是排查格式问题要看的。
+    OPS_PAYLOAD_STRING_CHARS: int = 40_000
+
     # --- 费用与预算(A23) ---
     #
     # 这一组回答的是「这个月在付费模型上花了多少、会不会花超」。

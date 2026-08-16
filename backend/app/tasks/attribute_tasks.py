@@ -120,7 +120,7 @@ def run_attribute_extraction(self, extraction_id: str) -> dict[str, str]:
         _persist_failure(run_id, exc)
         logger.exception(
             "attribute extraction worker failed",
-            extra={"extra_fields": {"extraction_id": extraction_id}},
+            extra={"extra_fields": {"event": "attr.worker_failed", "extraction_id": extraction_id}},
         )
         return {"id": extraction_id, "status": S.FAILED.value}
     finally:
