@@ -218,9 +218,10 @@ def test_the_round_covers_exactly_the_angles_the_plan_requires(session):
     # 角度集合:逐个都进了送给 Provider 的那句话
     for angle in gp.required_angles(wanted):
         assert angle in (task.prompt or ""), f"提示词里没有 {angle}"
-    # 场景与姿势同理(§5.2「scene / pose 参与 prompt 构建」)
+    # 场景与姿势同理(§5.2「scene / pose 参与 prompt 构建」)。姿势预设会从
+    # 稳定别名展开为可验收约束,所以这里验证展开后的正文,不要求别名原样残留。
     assert plan.scene in (task.prompt or "")
-    assert plan.pose in (task.prompt or "")
+    assert gp.POSE_PROMPT_PROFILES[gp.DEFAULT_POSE_KEY] in (task.prompt or "")
 
 
 def test_the_fingerprint_column_finally_has_a_writer_that_means_something(session):
