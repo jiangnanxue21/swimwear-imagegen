@@ -96,7 +96,6 @@ GATED_ENDPOINTS: Mapping[str, NextActionCode] = {
     # 属性步
     "attributes:extract_attributes": NextActionCode.RUN_EXTRACTION,
     "attributes:create_spu_extraction_run": NextActionCode.RUN_EXTRACTION,
-    "attributes:confirm_attributes": NextActionCode.CONFIRM_ATTRIBUTES,
     # 方案步(SPU 级)
     "generation_plans:create_plan": NextActionCode.CHOOSE_PLAN,
     "generation_plans:activate_plan": NextActionCode.CHOOSE_PLAN,
@@ -118,6 +117,10 @@ GATED_ENDPOINTS: Mapping[str, NextActionCode] = {
 #: 空着比写错更危险:一个没有理由的豁免下次会被当成"以前就这样"。
 UNGATED_ENDPOINTS: Mapping[str, str] = {
     # ---- 往回走 / 纠错。闸只拦"往前",拦住纠错等于把人锁在错误状态里 ----
+    "attributes:confirm_attributes": (
+        "确认建议、裁决冲突与人工填缺失值共用此端点;后两者是解阻编辑,"
+        "若按属性步前置拦截会让缺失字段永远填不进去"
+    ),
     "image_sets:reject": "快审退回是往回走;拦住它,一版有问题的图就退不回去",
     "image_sets:rollback": "回滚到旧版本是往回走",
     "workbench:reject_copy": "快审退回是往回走",
@@ -220,8 +223,11 @@ ACTIONS_WITHOUT_ENDPOINT: Mapping[NextActionCode, str] = {
     NextActionCode.RELEASE_QUARANTINE: "同上",
     NextActionCode.CONFIRM_ASSET_ROLE: "同上",
     NextActionCode.CONFIRM_AUDIENCE: "受众确认走 products:update_product(改的是商品字段)",
-    NextActionCode.RESOLVE_CONFLICT: "解决冲突走 attributes:confirm_attributes(已过闸)",
-    NextActionCode.FILL_ATTRIBUTES: "人工填写走 attributes:confirm_attributes(已过闸)",
+    NextActionCode.RESOLVE_CONFLICT: "解决冲突走 attributes:confirm_attributes(解阻编辑,明确豁免)",
+    NextActionCode.CONFIRM_ATTRIBUTES: (
+        "确认建议走 attributes:confirm_attributes(与解阻编辑共用端点)"
+    ),
+    NextActionCode.FILL_ATTRIBUTES: "人工填写走 attributes:confirm_attributes(解阻编辑,明确豁免)",
     NextActionCode.FIX_IMAGE_SET: "修图片集走 image_sets:derive(已过闸)",
     NextActionCode.FIX_COPY: "修文案走 workbench:save_copy,它是改不是前进",
     NextActionCode.FIX_DRAFT: "修草稿字段走 workbench:build_draft(已过闸,手填字段一并提交)",

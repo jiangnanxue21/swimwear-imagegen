@@ -121,6 +121,20 @@ def test_every_ungated_endpoint_says_why(write_routes):
         assert len(reason.strip()) >= 6, f"{key} 的豁免理由太短,说不清:{reason!r}"
 
 
+def test_attribute_repairs_are_not_locked_behind_the_step_they_repair():
+    """人工填缺失值与裁决冲突必须能解开属性步,不能被它反锁。
+
+    真库接缝曾经拿同款另一颜色缺图造出这个死锁:属性表给了 material 输入框,
+    提交却因「等素材」返回 409。只靠真库用例守会让本地门禁看不见回归,
+    所以这里把豁免归属与调用点一起钉住。
+    """
+    key = "attributes:confirm_attributes"
+    assert key in action_gate.UNGATED_ENDPOINTS
+    assert key not in action_gate.GATED_ENDPOINTS
+    body = _module_functions("attributes")["confirm_attributes"]
+    assert "ensure_allowed" not in body, "表里说是解阻编辑,调用点却仍会被上游闸拒绝"
+
+
 # ======================================================== 二、表里的都真的接了线
 
 

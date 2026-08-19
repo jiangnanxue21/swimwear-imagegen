@@ -210,11 +210,14 @@ def confirm_attributes(
 ) -> list[AttributeValueOut]:
     """人工确认。写入 `MANUAL`,**从此不被任何自动流程覆盖**。"""
     product = _product(session, product_id)
-    # AC-05(F-2):确认属性属于属性步。人工填写与解决冲突走的也是这个端点,
-    # 三者同一道闸 —— 它们在 `ACTION_STEP` 里同属 ATTRIBUTE
-    action_gate.ensure_allowed(
-        session, product, action_gate.NextActionCode.CONFIRM_ATTRIBUTES
-    )
+    # 这一个端点同时承载三种动作:确认模型建议、裁决冲突、给 MISSING 字段
+    # 人工填值。后两种是**解阻动作**,不能拿「属性步是否已开放」反过来拦它。
+    #
+    # 真库接缝暴露过这个死锁:同款蓝色还缺正面图时,红色 SKU 的 material
+    # 已经在表里给出「人工填写」入口,提交却被向导闸以「等素材」拒成 409。
+    # 运营既补不了这个字段,也消不掉 ATTR_NOT_CONFIRMED。AC-05 拦的是绕过
+    # 前置直接执行**后续动作**;人工修正当前事实不是后续动作,与 save_copy
+    # 等编辑端点同样列在 action_gate.UNGATED_ENDPOINTS 并写明理由。
     actor = current_actor(request)
     written = []
     for item in payload.items:

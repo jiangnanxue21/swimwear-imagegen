@@ -304,7 +304,11 @@ def test_a_naive_timestamp_no_longer_crashes_the_stream():
     try:
         ops_logs.read_ring = lambda *_a, **_k: (rows, None)  # type: ignore[assignment]
         ops_logs.ring_length = lambda *_a, **_k: len(rows)  # type: ignore[assignment]
-        page = _call_list_logs(since="2026-08-18T08:00:00")  # 手打,无时区
+        # 这条只验 naive 与 aware 能共存,不验服务器本机时区。边界放在两条
+        # 记录之前:UTC runner 与东八区开发机都应命中两条;原来的 08:00
+        # 在 UTC runner 上晚于 09:00+0800 的绝对时刻,正确过滤成 1 条,
+        # 反而把测试目的写成了依赖机器时区的结论。
+        page = _call_list_logs(since="2026-08-18T00:00:00")  # 手打,无时区
     finally:
         ops_logs.read_ring = original_read  # type: ignore[assignment]
         ops_logs.ring_length = original_len  # type: ignore[assignment]
