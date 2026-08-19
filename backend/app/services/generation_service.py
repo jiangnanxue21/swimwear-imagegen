@@ -13,7 +13,6 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.prompts.versioning import content_version
 from app.attributes import scope_fingerprint
 from app.core import audience as audience_rules
 from app.core.clock import utc_now
@@ -48,6 +47,7 @@ from app.models.generation import (
 from app.models.model_template import ModelTemplate
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
+from app.prompts.versioning import content_version
 from app.providers._config import provider_setting
 from app.providers.base import GenerationMode
 from app.providers.registry import resolve

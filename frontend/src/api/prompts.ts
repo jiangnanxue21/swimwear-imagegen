@@ -1,4 +1,4 @@
-import { apiClient} from './client'
+import { apiClient } from './client'
 import type {
   PromptOverview,
   PromptPreview,
@@ -37,11 +37,20 @@ export const promptsApi = {
    * 也不报错,只是**静默无效**。一个不报错的假契约比一个报错的坏契约更贵:
    * 下一个人会照着它去传,然后花半天查"为什么署名没生效"。
    */
-  save: async (key: string, content: string, note?: string) =>
+  save: async (
+    key: string,
+    content: string,
+    note?: string,
+    expectedVersion?: number | null,
+  ) =>
     (
       await apiClient.put<PromptOverview>(
         `/prompts/${key}`,
-        { content, note: note || null },
+        {
+          content,
+          note: note || null,
+          expected_version: expectedVersion ?? null,
+        },
       )
     ).data,
 
@@ -53,11 +62,20 @@ export const promptsApi = {
       )
     ).data,
 
-  activate: async (key: string, version: number) =>
+  activate: async (
+    key: string,
+    version: number,
+    note?: string,
+    expectedVersion?: number | null,
+  ) =>
     (
       await apiClient.post<PromptOverview>(
         `/prompts/${key}/activate`,
-        { version },
+        {
+          version,
+          note: note || null,
+          expected_version: expectedVersion ?? null,
+        },
       )
     ).data,
 

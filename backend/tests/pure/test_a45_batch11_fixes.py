@@ -450,7 +450,11 @@ def test_the_line_ending_policy_has_exactly_one_implementation():
         # **锚定清单行的缩进形状**,不裸搜文件名:两个脚本里 `Join-Path` /
         # `EOL_CHECKER=` 那行也含同一个路径,裸搜会让"从清单里摘掉"仍然绿 ——
         # 变异验证抓到过这一洞(摘掉 $Required 里那份,守卫没红)。
-        listed = "\n  'tools/normalize_eol.py'" if script == "pack.sh" else "\n    'tools/normalize_eol.py'"
+        listed = (
+            "\n  'tools/normalize_eol.py'"
+            if script == "pack.sh"
+            else "\n    'tools/normalize_eol.py'"
+        )
         assert listed in body, (
             f"tools/{script} 的必备文件清单里没有 tools/normalize_eol.py —— "
             "收包方从解出来的树重打时会找不到它(门禁会 fail-closed,"

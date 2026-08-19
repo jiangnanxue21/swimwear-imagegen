@@ -402,6 +402,7 @@ export default function OpsLogPage() {
               上一版后端、类型、URL 三处都支持 `event`,唯独没有任何界面
               能设它,只能手改地址栏 */}
           <Select
+            aria-label="按事件精筛"
             allowClear
             showSearch
             optionFilterProp="label"

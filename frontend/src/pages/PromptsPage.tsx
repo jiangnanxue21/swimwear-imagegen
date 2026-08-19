@@ -113,7 +113,7 @@ export default function PromptsPage() {
 
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['prompts', promptKey] })
-  }, [queryClient])
+  }, [promptKey, queryClient])
 
   /**
    * 三个动作都会改变**在线上生效的评分口径**(BLOCK-05)。

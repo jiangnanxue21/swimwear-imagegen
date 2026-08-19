@@ -94,7 +94,7 @@ function failedAttempt(): EvaluationAttempt {
     response_id: 'resp-safe',
     http_status: 429,
     finish_reason: null,
-    prompt_version: 3,
+    prompt_version: '3',
     prompt_tokens: 100,
     completion_tokens: 0,
     total_tokens: 100,

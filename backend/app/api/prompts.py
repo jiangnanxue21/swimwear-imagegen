@@ -8,16 +8,15 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import db_session, require_admin
 from app.core.enums import AuditAction
 from app.core.errors import NotFoundError
-from app.services import audit, prompt_service
 from app.prompts import registry
-from fastapi import HTTPException
+from app.services import audit, prompt_service
 
 router = APIRouter(tags=["prompts"])
 

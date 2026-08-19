@@ -1103,8 +1103,8 @@ def _archive_copy_test(
     两条分支返回同一套键,靠的就是这份对称;在这里再各拆一遍等于把它拆散,
     而"某个分支少一个键"正是那份对称一直在防的事故。
     """
-    from app.workflows.ai_test_record import record_for_copy
     from app.services import ai_test_archive
+    from app.workflows.ai_test_record import record_for_copy
 
     ai_test_archive.archive(
         session,

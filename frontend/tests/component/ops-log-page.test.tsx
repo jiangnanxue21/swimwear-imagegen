@@ -40,8 +40,11 @@ function entry(over: Partial<LogEntry>): LogEntry {
   return {
     seq: '1-1',
     ts: '2026-08-16T10:00:00+0000',
+    ts_unparsed: false,
     level: 'INFO',
     logger: 'app.services.publish_service',
+    service: 'api',
+    pid: 1234,
     domain: 'publish',
     domain_label: '发布上架',
     event: null,
@@ -62,6 +65,7 @@ const META: LogMeta = {
     { key: 'publish', label: '发布上架' },
     { key: 'gen', label: '生成流水线' },
   ],
+  services_seen: { api: 3 },
   events: [],
   routine_groups: [{ key: 'lease', label: '租约让位' }],
   levels: ['INFO', 'WARNING', 'ERROR'],
@@ -83,6 +87,10 @@ function page(
     items,
     ring,
     oldest_ts: items.length ? items[items.length - 1].ts : null,
+    shown_oldest_ts: items.length ? items[items.length - 1].ts : null,
+    matched: items.length,
+    truncated: false,
+    services_seen: items.length ? { api: items.length } : {},
     domain_counts: domainCounts,
   }
 }
@@ -262,7 +270,7 @@ describe('运行日志页(a54 修复)', () => {
     })
     renderPage()
 
-    const picker = await screen.findByPlaceholderText('按事件精筛')
+    const picker = await screen.findByRole('combobox', { name: '按事件精筛' })
     await userEvent.click(picker)
     expect(await screen.findByText('某件事')).toBeInTheDocument()
   })
@@ -282,7 +290,8 @@ describe('运行日志页(a54 修复)', () => {
     renderPage('/ops-logs?trace_kind=task&trace_id=t-1')
 
     expect(await screen.findByText(/第 1 轮/)).toBeInTheDocument()
-    expect(screen.getByText('4 张候选 · B 档')).toBeInTheDocument()
+    // 一处是段头摘要,另一处是原始日志行;只剩一处说明段头没有取里程碑。
+    expect(screen.getAllByText('4 张候选 · B 档')).toHaveLength(2)
   })
 
   it('call 芯片一步打开载荷页签', async () => {

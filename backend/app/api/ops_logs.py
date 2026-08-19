@@ -51,9 +51,9 @@ from app.core.log_events import (
     level_at_least,
     normalize_level,
     parse_ts,
-    seq_sort_key,
     resolve_domain,
     routine_group_of,
+    seq_sort_key,
 )
 from app.core.log_ring import STATS, read_ring, ring_length
 from app.llm import payload_store

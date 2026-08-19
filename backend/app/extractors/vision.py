@@ -45,8 +45,6 @@ from typing import Any
 from app.core.logging import get_logger
 from app.extractors import call_accounting
 from app.extractors.base import ImageExtractionResult
-from app.prompts.versioning import content_version
-
 from app.extractors.schema import (
     EXTRACTION_SCHEMA_VERSION,
     ExtractionParseError,
@@ -68,6 +66,7 @@ from app.llm.transport import (
     find_refusal,
     normalize_endpoint,
 )
+from app.prompts.versioning import content_version
 from app.providers._config import provider_flag, provider_float, provider_int, provider_setting
 from app.providers.errors import (
     NotConfiguredError,

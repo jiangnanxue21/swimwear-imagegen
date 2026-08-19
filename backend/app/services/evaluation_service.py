@@ -518,8 +518,8 @@ def _archive_diagnostic(
     `prompt_key` 按受众现推 —— 键的推导只有 `vision_schema.prompt_key_for`
     一处(见 `_prompt_context` 里那段注释),这里调它而不是抄一份判断。
     """
-    from app.workflows.ai_test_record import record_for_evaluation
     from app.services import ai_test_archive
+    from app.workflows.ai_test_record import record_for_evaluation
 
     try:
         from app.core.audience import coerce as _coerce_audience

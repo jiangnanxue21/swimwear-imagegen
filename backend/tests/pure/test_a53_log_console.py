@@ -159,7 +159,7 @@ def test_every_module_with_a_logger_is_in_the_fallback_table():
         # `log_events.py` 自己算进来 —— 它在文档字符串里引用了这个调用形状。
         if not _calls_get_logger(tree):
             continue
-        module = "app." + str(path.relative_to(APP).with_suffix("")).replace("/", ".")
+        module = "app." + path.relative_to(APP).with_suffix("").as_posix().replace("/", ".")
         module = module.removesuffix(".__init__")
         if not any(module == p or module.startswith(p + ".") for p in prefixes):
             missing.append(module)
@@ -596,11 +596,15 @@ def test_the_access_filter_defaults_to_keeping_the_window_usable():
     keep = AccessNoiseFilter(mode="errors")
     for status in (200, 204, 302):
         assert not keep.filter(
-            _access_record({"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status})
+            _access_record(
+                {"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status}
+            )
         ), f"{status} 的访问日志在默认档不该占用诊断窗口 —— 它照常进 stdout"
     for status in (401, 404, 500, 503):
         assert keep.filter(
-            _access_record({"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status})
+            _access_record(
+                {"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status}
+            )
         ), f"{status} 是诊断信息,不是噪音 —— 两个档位下都必须放行"
     assert keep.filter(_access_record({"event": "gen.round_evaluated"})), (
         "非访问日志一律放行 —— 这个过滤器只认那一个事件码"

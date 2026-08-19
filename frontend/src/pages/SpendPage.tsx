@@ -35,7 +35,7 @@ import { brandVars, fontScale, space } from '../theme'
 
 export default function SpendPage() {
   useDocumentTitle('付费调用花费')
-  const { data, isLoading, isError, error, refetch } = useQuery({
+  const { data, isLoading, isError, isFetching, error, refetch } = useQuery({
     queryKey: ['usage', 'spend'],
     queryFn: usageApi.spend,
     refetchInterval: 5 * 60_000,

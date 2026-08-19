@@ -135,7 +135,7 @@ def list_templates(
             audience=audience,
             for_product_audience=for_product_audience,
         )
-    except ValueError as exc:
+    except ValueError:
         # 受众取值不认识。这里必须报错而不是"忽略这个筛选返回全部"——
         # 后者会让一个拼错参数的前端拿到女装模特去配男装商品(§10.5)
         #

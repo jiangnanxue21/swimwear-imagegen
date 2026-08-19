@@ -27,10 +27,10 @@ from __future__ import annotations
 import sys
 
 from tests.pure._helpers import (
-    offline_gate_targets,
     BACKEND_ROOT,
     braced_block,
     expect_raises,
+    offline_gate_targets,
     only_line,
     window,
 )

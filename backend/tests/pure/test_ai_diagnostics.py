@@ -103,7 +103,18 @@ def test_scoring_diagnostic_records_a_diagnostic_attempt_without_mutating_candid
             return result
 
     captured = {}
-    fake_attempt = SimpleNamespace(id=uuid4())
+    fake_attempt = SimpleNamespace(
+        id=uuid4(),
+        outcome="SUCCEEDED",
+        prompt_version=None,
+        evaluator="test-evaluator",
+        model_name="test-model",
+        depth=EvaluationDepth.FULL,
+        error_code=None,
+        error_message=None,
+        duration_ms=18,
+        total_tokens=None,
+    )
     originals = {
         "load_active_rule_set": service.load_active_rule_set,
         "product_metadata": service.product_metadata,

@@ -34,9 +34,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from app.prompts.versioning import content_version
 from app.core.errors import ErrorCode, ValidationError
 from app.core.logging import get_logger
+from app.prompts.versioning import content_version
 
 logger = get_logger(__name__)
 
