@@ -57,7 +57,83 @@ SPU_DEFAULT: None = None
 #: 方案指纹版本。算法或元素集合有任何改动都要动它 —— 不动的话新旧指纹
 #: 会被直接比较,结果是**全库图片集一次性集体过期**,而运营看到的是
 #: "所有颜色同时要求重出图",查不出原因。
-PLAN_FINGERPRINT_VERSION = "v1"
+PLAN_FINGERPRINT_VERSION = "v2"
+
+#: 方案页提供的稳定场景键。数据库列仍允许自由文本:运营自定义场景不能因为
+#: 不在这张表里就被拒绝；只有命中稳定键/别名时，才展开成经过审阅的默认提示词。
+#:
+#: 这里不使用「高质量、专业、8K」一类空泛形容词。对商品图真正可验收的是
+#: 背景是否抢主体、服装是否被遮挡、颜色与材质是否被风格化、画面里有没有
+#: 路人/文字/水印。把 token 花在这些可见约束上，比堆审美词更稳定。
+DEFAULT_SCENE_KEY = "STUDIO_CLEAN"
+DEFAULT_POSE_KEY = "NATURAL_STANDING"
+
+SCENE_PROMPT_PROFILES: dict[str, str] = {
+    "STUDIO_CLEAN": (
+        "商业电商影棚，纯净浅灰无缝背景，柔和均匀布光；准确呈现服装颜色、"
+        "轮廓与材质，不使用道具，不出现文字、水印或额外品牌标识"
+    ),
+    "BEACH_DAYLIGHT": (
+        "自然海滩日光场景，背景简洁并轻微虚化，无人群干扰；主体服装边缘清楚，"
+        "颜色准确，不被沙、水花或道具遮挡"
+    ),
+    "POOLSIDE_DAYLIGHT": (
+        "干净现代的泳池边自然日光场景，背景克制且无路人；避免强烈反光和杂乱道具，"
+        "完整清楚地呈现服装剪裁、颜色与材质"
+    ),
+    "LIFESTYLE_OUTDOOR": (
+        "自然户外生活方式场景，环境真实但不过度抢镜，光线柔和；不遮挡服装主体，"
+        "不改变商品颜色、图案、结构或覆盖面积"
+    ),
+}
+
+_SCENE_ALIASES: dict[str, str] = {
+    "STUDIO": "STUDIO_CLEAN",
+    "影棚": "STUDIO_CLEAN",
+    "影棚白底": "STUDIO_CLEAN",
+    "白底": "STUDIO_CLEAN",
+    "BEACH": "BEACH_DAYLIGHT",
+    "海边": "BEACH_DAYLIGHT",
+    "海滩": "BEACH_DAYLIGHT",
+    "沙滩": "BEACH_DAYLIGHT",
+    "POOLSIDE": "POOLSIDE_DAYLIGHT",
+    "泳池": "POOLSIDE_DAYLIGHT",
+    "池畔": "POOLSIDE_DAYLIGHT",
+    "LIFESTYLE": "LIFESTYLE_OUTDOOR",
+    "生活方式": "LIFESTYLE_OUTDOOR",
+    "户外": "LIFESTYLE_OUTDOOR",
+}
+
+POSE_PROMPT_PROFILES: dict[str, str] = {
+    "NATURAL_STANDING": (
+        "自然直立，身体重心稳定，双臂自然放松且不遮挡服装，手脚完整，姿态不过度扭转"
+    ),
+    "RELAXED_WALKING": (
+        "自然轻步行走，动作幅度克制，双臂和头发不遮挡服装主体，肢体完整"
+    ),
+    "CATALOG_SIDE": (
+        "自然侧身站立，身体不过度扭转，手臂不遮挡侧缝与服装轮廓"
+    ),
+}
+
+_POSE_ALIASES: dict[str, str] = {
+    "STANDING": "NATURAL_STANDING",
+    "STANDING_FRONT": "NATURAL_STANDING",
+    "站姿": "NATURAL_STANDING",
+    "自然站立": "NATURAL_STANDING",
+    "WALKING": "RELAXED_WALKING",
+    "行走": "RELAXED_WALKING",
+    "侧身站立": "CATALOG_SIDE",
+}
+
+ANGLE_PROMPT_PROFILES: dict[str, str] = {
+    ImageAngle.FRONT.value: "正面平视全身视角，镜头与身体正面平行，完整展示正面剪裁",
+    ImageAngle.BACK.value: "背面平视全身视角，完整展示背部结构，不回头或扭身遮挡",
+    ImageAngle.SIDE.value: "标准侧面全身视角，清楚展示侧缝、厚度与侧面轮廓",
+    ImageAngle.THREE_QUARTER.value: "四分之三侧全身视角，同时保留正面与侧面结构信息",
+    ImageAngle.DETAIL.value: "商品关键结构与材质的清晰近景，画面只突出服装细节",
+    ImageAngle.FLAT_LAY.value: "服装平整铺放的垂直俯拍，无模特、无人手、无多余道具",
+}
 
 #: 一份方案里所有角度的候选数之和的上限。
 #:
@@ -567,7 +643,11 @@ def unit_prompt(base_prompt: Any, *, angle: Any, count: Any = 1) -> str | None:
         number = max(1, int(count))
     except (TypeError, ValueError):
         number = 1
-    directive = f"本次只出这个拍摄角度:{key}×{number}"
+    angle_instruction = ANGLE_PROMPT_PROFILES.get(key, key)
+    directive = (
+        f"本次只生成这个拍摄角度:{key}×{number}（{angle_instruction}）；"
+        "同批候选必须保持同一件商品的颜色、图案、结构与覆盖面积一致"
+    )
     return f"{head};{directive}" if head else directive
 
 
@@ -672,10 +752,10 @@ def compose_prompt(
         parts.append(head)
     scene_text = _text(scene)
     if scene_text:
-        parts.append(f"场景:{scene_text}")
+        parts.append(_scene_prompt(scene_text))
     pose_text = _text(pose)
     if pose_text:
-        parts.append(f"姿势:{pose_text}")
+        parts.append(_pose_prompt(pose_text))
     wanted = tuple(angles)
     if wanted:
         parts.append(
@@ -691,6 +771,27 @@ def compose_prompt(
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _profile_key(value: str, aliases: Mapping[str, str]) -> str:
+    """稳定键大小写不敏感；中文与自由文本原样参与别名匹配。"""
+    normalized = value.strip()
+    upper = normalized.upper().replace("-", "_").replace(" ", "_")
+    return aliases.get(upper, aliases.get(normalized, upper))
+
+
+def _scene_prompt(scene: str) -> str:
+    key = _profile_key(scene, _SCENE_ALIASES)
+    profile = SCENE_PROMPT_PROFILES.get(key)
+    # 自定义场景不套一个我们猜出来的风格。保留旧行为，保证运营写的内容
+    # 逐字进入最终提示词；只有明确选择预设时才展开经过审阅的约束。
+    return f"场景:{profile}" if profile else f"场景:{scene}"
+
+
+def _pose_prompt(pose: str) -> str:
+    key = _profile_key(pose, _POSE_ALIASES)
+    profile = POSE_PROMPT_PROFILES.get(key)
+    return f"姿势:{profile}" if profile else f"姿势:{pose}"
 
 
 def _text_or_none(value: Any) -> str | None:

@@ -68,6 +68,14 @@ interface Props {
   onSubmit: (values: TaskCreatePayload) => void
 }
 
+/**
+ * 无生成方案时也要有一个守住商品身份的基础提示词。它刻意不写场景、姿势和角度：
+ * 有方案时这些由后端按方案追加；没方案时运营仍可在高级区改写。把白底、海滩等
+ * 风格写进这里，会让所有场景先天互相冲突。
+ */
+const DEFAULT_GENERATION_PROMPT =
+  '保持商品与参考图一致，准确还原颜色、图案、结构和覆盖面积；服装主体完整清晰，不添加不存在的部件、文字、水印或配饰'
+
 export default function TaskCreateModal({
   open, productId, initialValues, title = '创建生成任务', confirmLoading, onCancel, onSubmit,
 }: Props) {
@@ -152,6 +160,7 @@ export default function TaskCreateModal({
         provider: 'mock',
         candidate_count: 4,
         max_rounds: 3,
+        prompt: DEFAULT_GENERATION_PROMPT,
         mock_outcome: 'success',
         mock_evaluator_outcome: 'auto',
         override_plan: false,
@@ -528,7 +537,10 @@ export default function TaskCreateModal({
                           : undefined
                       }
                     >
-                      <Input.TextArea rows={2} placeholder="影棚灯光,白色背景,正面全身" />
+                      <Input.TextArea
+                        rows={3}
+                        placeholder="先写商品一致性要求；场景、姿势与角度由生成方案追加"
+                      />
                     </Form.Item>
 
                     {selectedProvider === 'mock' && (

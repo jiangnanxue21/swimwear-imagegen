@@ -129,7 +129,8 @@ def test_scene_pose_and_angles_reach_the_provider_through_the_prompt():
 
     assert composed is not None
     assert composed.startswith("影棚灯光"), "运营写的那句话必须排在最前"
-    assert "海边" in composed and "站姿" in composed
+    assert "自然海滩日光场景" in composed
+    assert "自然直立" in composed
     assert "FRONT×2" in composed and "BACK×1" in composed
 
 

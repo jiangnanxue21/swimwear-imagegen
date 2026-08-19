@@ -17,7 +17,9 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { App, Button, Empty, Form, InputNumber, Modal, Select, Space, Table, Tag } from 'antd'
+import {
+  App, AutoComplete, Button, Empty, Form, InputNumber, Modal, Select, Space, Table, Tag,
+} from 'antd'
 
 import {
   IMAGE_ANGLE_LABEL,
@@ -63,6 +65,24 @@ const ANGLE_OPTIONS = (Object.keys(IMAGE_ANGLE_LABEL) as ImageAngle[]).map((valu
   value,
   label: IMAGE_ANGLE_LABEL[value],
 }))
+
+/**
+ * 稳定键由后端 `generation_plan.SCENE_PROMPT_PROFILES` 展开成完整提示词。
+ * AutoComplete 仍允许自由输入：业务场景不该被四个预设封死；自由文本在后端
+ * 原样进入 prompt，不会被猜成某个相近场景。
+ */
+const SCENE_OPTIONS = [
+  { value: 'STUDIO_CLEAN', label: '干净影棚（默认）' },
+  { value: 'BEACH_DAYLIGHT', label: '自然日光海滩' },
+  { value: 'POOLSIDE_DAYLIGHT', label: '自然日光池畔' },
+  { value: 'LIFESTYLE_OUTDOOR', label: '户外生活方式' },
+]
+
+const POSE_OPTIONS = [
+  { value: 'NATURAL_STANDING', label: '自然站立（默认）' },
+  { value: 'RELAXED_WALKING', label: '自然行走' },
+  { value: 'CATALOG_SIDE', label: '商品目录侧身' },
+]
 
 export default function GenerationPlanPanel({
   spuId,
@@ -193,6 +213,12 @@ export default function GenerationPlanPanel({
       },
       { title: '出图服务商', dataIndex: 'provider' },
       {
+        title: '场景 / 姿势',
+        key: 'scene-pose',
+        render: (_: unknown, row: GenerationPlan) =>
+          `${row.scene || '未指定'} / ${row.pose || '未指定'}`,
+      },
+      {
         title: '角度',
         dataIndex: 'angles_json',
         render: (angles: GenerationPlan['angles_json']) =>
@@ -277,6 +303,8 @@ export default function GenerationPlanPanel({
         // 夹具写着 `has_model=True` —— 一个前端一天都造不出来的状态。
         model_template_id: values.model_template_id ?? null,
         provider: values.provider,
+        scene: values.scene,
+        pose: values.pose,
         angles: (values.angles ?? []).map((angle: ImageAngle) => ({
           angle,
           count: values[`count_${angle}`] ?? 1,
@@ -377,6 +405,40 @@ export default function GenerationPlanPanel({
             status={providers.isError ? 'error' : undefined}
             notFoundContent={providers.isError ? '没拉到,不是没有' : undefined}
             options={providerOptions}
+          />
+        </Form.Item>
+        <Form.Item
+          name="scene"
+          label="场景"
+          initialValue="STUDIO_CLEAN"
+          extra="选择预设会展开成场景专用提示词；也可以输入自定义场景"
+        >
+          <AutoComplete
+            style={{ minWidth: 190 }}
+            options={SCENE_OPTIONS}
+            placeholder="选择预设或输入自定义场景"
+            filterOption={(input, option) =>
+              String(option?.label ?? option?.value ?? '')
+                .toLowerCase()
+                .includes(input.toLowerCase())
+            }
+          />
+        </Form.Item>
+        <Form.Item
+          name="pose"
+          label="姿势"
+          initialValue="NATURAL_STANDING"
+          extra="用于补充模特动作约束，不替代模特模板本身"
+        >
+          <AutoComplete
+            style={{ minWidth: 180 }}
+            options={POSE_OPTIONS}
+            placeholder="选择预设或输入自定义姿势"
+            filterOption={(input, option) =>
+              String(option?.label ?? option?.value ?? '')
+                .toLowerCase()
+                .includes(input.toLowerCase())
+            }
           />
         </Form.Item>
         <Form.Item name="angles" label="角度" rules={[{ required: true }]}>

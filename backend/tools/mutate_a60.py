@@ -77,8 +77,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         # 直接删掉 except 会留下一个没有处理器的 try —— 那是语法错,
         # 变异脚本会判成"导入期就炸了,这条不算数"。换类型才是等价的坏法:
         # 语法完好、看起来接住了,而真正会抛的那个从这里漏出去
-        "            expected_version=body.expected_version,\n        )\n    except prompt_service.PromptConflict as exc:",
-        "            expected_version=body.expected_version,\n        )\n    except LookupError as exc:",
+        "        row = prompt_service.save_version(\n            session,\n            key,\n            body.content,\n            note=body.note,\n            updated_by=actor,\n            expected_version=body.expected_version,\n        )\n    except prompt_service.PromptConflict as exc:",
+        "        row = prompt_service.save_version(\n            session,\n            key,\n            body.content,\n            note=body.note,\n            updated_by=actor,\n            expected_version=body.expected_version,\n        )\n    except LookupError as exc:",
     ),
     (
         "M8",

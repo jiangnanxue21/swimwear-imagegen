@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import uuid4
 
-import pytest
 from sqlalchemy import text
 
 from app.core.clock import utc_now
@@ -137,7 +136,12 @@ def test_prompt_stats_cross_jsonb_grouping_versions_keys_and_api(admin_client, s
 
 
 def test_recent_window_query_can_use_the_dedicated_index(session):
-    """关闭顺序扫描后,查询计划必须能选择与 WHERE 同序的两列索引。"""
+    """移开旧候选后,两列索引必须能独立承接完整的 WHERE 条件。
+
+    小测试表上两条索引成本几乎相同,规划器可能任选旧三列索引;那不能证明
+    新索引不可用。DROP 在用例事务里,回滚后旧索引自动恢复。
+    """
+    session.execute(text("DROP INDEX ix_evaluation_attempts_prompt"))
     session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = session.execute(
         text(
