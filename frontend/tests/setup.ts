@@ -22,7 +22,7 @@
  * 要临时跳过某条用例，正确做法是**删掉它并在提交信息里说明**，
  * 而不是留一个看起来还在的空壳。
  */
-import { afterAll, afterEach, expect } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect } from 'vitest'
 
 if (typeof window !== 'undefined') {
   await import('@testing-library/jest-dom/vitest')
@@ -60,6 +60,46 @@ if (typeof window !== 'undefined') {
     pseudoElement
       ? nativeGetComputedStyle(element)
       : nativeGetComputedStyle(element)) as typeof window.getComputedStyle
+
+  // ---------------------------------------------------------------- 网络封口
+  //
+  // jsdom 会真的尝试 axios/XHR。以前未 mock 的请求只在 stderr 打 AggregateError,
+  // 用例仍然绿,所以组件新增一个意外请求不会被任何门禁看见。MSW 在这里不提供
+  // 万能成功响应,只记录未声明请求并在每条用例结束时让它失败。
+  const { http, HttpResponse } = await import('msw')
+  const { setupServer } = await import('msw/node')
+  // useIdentity 是横切关注点,大量组件会正常问这两个接口。给它们一份明确的
+  // “后端可用、本机 dev 身份”基线;其它业务接口一律必须由具体用例声明。
+  const server = setupServer(
+    http.get('*/api/health', () => HttpResponse.json({
+      status: 'ok', app: 'frontend-test', env: 'test', auth_mode: 'dev',
+    })),
+    http.get('*/api/auth/whoami', () => HttpResponse.json({
+      name: 'dev', role: 'dev', is_admin: false,
+    })),
+  )
+  const unhandledRequests = new Set<string>()
+
+  server.events.on('request:unhandled', ({ request }) => {
+    const url = new URL(request.url)
+    unhandledRequests.add(`${request.method} ${url.pathname}${url.search}`)
+  })
+
+  beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+  afterEach(() => {
+    server.resetHandlers()
+    // Vitest 的 afterEach 逆序执行;网络守卫比上面注册的 Testing Library cleanup
+    // 先跑。先清 DOM 再抛,否则第一条网络失败会把页面泄漏给后面的全部用例。
+    cleanup()
+    if (unhandledRequests.size > 0) {
+      const details = [...unhandledRequests].sort().join('\n  ')
+      unhandledRequests.clear()
+      throw new Error(
+        `测试发出了未声明的网络请求。请在用例里 mock 对应 API,不要让请求落到本机网络:\n  ${details}`,
+      )
+    }
+  })
+  afterAll(() => server.close())
 }
 
 // `expect` 在这里没有别的用途，但导入它能让 setup 文件本身出错时更早暴露

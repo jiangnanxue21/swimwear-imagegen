@@ -9,10 +9,12 @@ import AITestPage from '../../src/pages/AITestPage'
 const generationMocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn() }))
 const evaluationMocks = vi.hoisted(() => ({ testCandidate: vi.fn() }))
 const workbenchMocks = vi.hoisted(() => ({ list: vi.fn(), testCopy: vi.fn() }))
+const aiTestMocks = vi.hoisted(() => ({ list: vi.fn() }))
 
 vi.mock('../../src/api/generation', () => ({ generationApi: generationMocks }))
 vi.mock('../../src/api/reviews', () => ({ evaluationApi: evaluationMocks }))
 vi.mock('../../src/api/workbench', () => ({ workbenchApi: workbenchMocks }))
+vi.mock('../../src/api/aiTests', () => ({ aiTestsApi: aiTestMocks }))
 vi.mock('antd', async (importOriginal) => {
   const actual = await importOriginal<typeof import('antd')>()
   return {
@@ -78,6 +80,9 @@ describe('AI 能力测试页', () => {
         description: 'A navy one piece swimsuit.', keywords: ['navy', 'swimwear'],
       },
       notes: [], trace: {}, violations: [],
+    })
+    aiTestMocks.list.mockResolvedValue({
+      runs: [], has_more: false, limit: 50, offset: 0, max_limit: 100,
     })
   })
 

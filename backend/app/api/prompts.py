@@ -23,7 +23,13 @@ from app.workflows import prompt_stats
 router = APIRouter(tags=["prompts"])
 
 
-class PromptSaveIn(BaseModel):
+class PromptPreviewIn(BaseModel):
+    """只读体检只需要正文,不参与生效版本的并发控制。"""
+
+    content: str = Field(..., max_length=prompt_service.MAX_PROMPT_CHARS * 2)
+
+
+class PromptSaveIn(PromptPreviewIn):
     """保存提示词的入参。
 
     **没有 `updated_by`**(报告 6.11)。它原来在这里,取自请求体 ——
@@ -34,10 +40,9 @@ class PromptSaveIn(BaseModel):
 
     content: str = Field(..., max_length=prompt_service.MAX_PROMPT_CHARS * 2)
     note: str | None = Field(None, max_length=500)
-    #: 调用方以为的当前生效版本(FE-309)。`None` = 不参与检查,留给脚本与内部调用;
-    #: 页面**必须**传 —— 不传的话 A 保存 v5、B 停在 v4 上点保存会直接落 v6,
-    #: A 的改动无声消失。这一列不做成必填,是因为把既有脚本一起打断的代价更大
-    expected_version: int | None = Field(None, ge=0)
+    #: 调用方以为的当前生效版本(FE-309)。`None` 明确表示内置默认生效中。
+    #: HTTP 调用方必须传;只有服务层内部调用能用专用哨兵明确放弃检查。
+    expected_version: int | None = Field(..., ge=0)
 
 
 class PromptActivateIn(BaseModel):
@@ -45,7 +50,7 @@ class PromptActivateIn(BaseModel):
     #: 为什么退回来(FE-310)。保存有 note 而回滚没有 —— 三个月后看到 v3 生效、
     #: v5 存在,没人知道原因,而回滚连内容 diff 都猜不出来
     note: str | None = Field(None, max_length=500)
-    expected_version: int | None = Field(None, ge=0)
+    expected_version: int | None = Field(..., ge=0)
 
 
 class PromptResetIn(BaseModel):
@@ -56,7 +61,7 @@ class PromptResetIn(BaseModel):
     """
 
     note: str | None = Field(None, max_length=500)
-    expected_version: int | None = Field(None, ge=0)
+    expected_version: int | None = Field(..., ge=0)
 
 
 def _conflict(exc: prompt_service.PromptConflict) -> HTTPException:
@@ -196,7 +201,7 @@ def read_prompt(
 @router.post("/prompts/{key}/preview")
 def preview_prompt(
     key: str,
-    body: PromptSaveIn,
+    body: PromptPreviewIn,
     actor: str = Depends(require_admin),
 ) -> dict:
     """存之前先体检一遍,不写库。
@@ -314,21 +319,20 @@ def activate_prompt(
 @router.post("/prompts/{key}/reset")
 def reset_prompt(
     key: str,
-    body: PromptResetIn | None = None,
+    body: PromptResetIn,
     session: Session = Depends(db_session),
     actor: str = Depends(require_admin),
 ) -> dict:
     """回到代码内置的默认提示词(把所有版本停用,历史仍然留着)。"""
     if key not in prompt_service.KNOWN_KEYS:
         raise NotFoundError(f"未知的提示词用途:{key}")
-    payload = body or PromptResetIn()
     try:
         prompt_service.reset_to_default(
             session,
             key,
             updated_by=actor,
-            note=payload.note,
-            expected_version=payload.expected_version,
+            note=body.note,
+            expected_version=body.expected_version,
         )
     except prompt_service.PromptConflict as exc:
         raise _conflict(exc) from None

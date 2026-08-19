@@ -26,6 +26,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from tools.test_environment import install_provider_test_baseline
+
 # ---------------------------------------------------------------- 主密钥隔离
 #
 # ## 这几行必须在 `from app.core.config import settings` **之前**
@@ -58,6 +60,8 @@ from sqlalchemy.orm import Session, sessionmaker
 _SECRETS_TMPDIR = tempfile.mkdtemp(prefix="swimwear-test-secrets-")
 os.environ.setdefault("SETTINGS_SECRET_KEY", "pytest-fixed-key-do-not-use-in-production")
 os.environ.setdefault("SETTINGS_KEY_DIR", _SECRETS_TMPDIR)
+# 仓库根 .env 属于开发者环境,不能改变纯测试对“未配置 Provider”的定义。
+install_provider_test_baseline()
 
 from app.core.config import settings  # noqa: E402 —— 见上面那段,顺序是刻意的
 

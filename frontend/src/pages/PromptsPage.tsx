@@ -103,7 +103,8 @@ export default function PromptsPage() {
   }, [content])
 
   const preview = useQuery({
-    queryKey: ['prompt-preview', checked],
+    // lint 规则按 key 不同。正文相同不代表结果相同,缓存身份必须带上 promptKey。
+    queryKey: ['prompt-preview', promptKey, checked],
     queryFn: () => promptsApi.preview(promptKey, checked),
     // 空内容也要送体检(FE-308)。上一版 `&& checked.length > 0` 是个 fail-open:
     // 清空文本框 -> 不发请求 -> preview.data 是 undefined -> `?? []` -> 界面上
@@ -134,7 +135,16 @@ export default function PromptsPage() {
    */
   const seenVersion = query.data ? query.data.version : undefined
   const [conflict, setConflict] = useState<unknown>(null)
-  const [rollbackNote, setRollbackNote] = useState('')
+
+  useEffect(() => {
+    // 动态路由复用同一个组件实例。上一条 Prompt 的草稿、理由、409 和弹窗状态
+    // 都不属于下一条;不主动清掉就会在地址已经变化后继续展示或提交旧状态。
+    setDraft(null)
+    setNote('')
+    setChecked('')
+    setConflict(null)
+    setDiffOpen(false)
+  }, [promptKey])
 
   /** 409 单独接住:它不是"失败",是"有人在你之前动过"。 */
   const onConflictOr = useCallback(
@@ -164,8 +174,8 @@ export default function PromptsPage() {
   })
 
   const activate = useMutation({
-    mutationFn: (version: number) =>
-      promptsApi.activate(promptKey, version, rollbackNote, seenVersion),
+    mutationFn: ({ version, reason }: { version: number; reason: string }) =>
+      promptsApi.activate(promptKey, version, reason, seenVersion),
     onSuccess: (data) => {
       message.success(`已切回第 ${data.version} 版`)
       invalidate()
@@ -174,7 +184,7 @@ export default function PromptsPage() {
   })
 
   const reset = useMutation({
-    mutationFn: () => promptsApi.reset(promptKey, rollbackNote, seenVersion),
+    mutationFn: (reason: string) => promptsApi.reset(promptKey, reason, seenVersion),
     onSuccess: () => {
       message.success('已回到内置默认提示词,历史版本仍然保留')
       invalidate()
@@ -268,7 +278,10 @@ export default function PromptsPage() {
             <Button
               size="small"
               loading={activate.isPending}
-              onClick={() =>
+              onClick={() => {
+                // 理由只属于这一次弹窗。放在页面 state 里时,取消弹窗后旧值仍在,
+                // 下一次打开的非受控 Input 看起来为空,确认却会提交那段看不见的旧值。
+                let reason = ''
                 modal.confirm({
                   title: `切回第 ${row.version} 版?`,
                   content: (
@@ -277,13 +290,13 @@ export default function PromptsPage() {
                       <Input
                         placeholder="为什么退回这一版(保存有理由,回滚在此之前没有)"
                         maxLength={500}
-                        onChange={(e) => setRollbackNote(e.target.value)}
+                        onChange={(e) => { reason = e.target.value }}
                       />
                     </Space>
                   ),
-                  onOk: () => activate.mutateAsync(row.version),
+                  onOk: () => activate.mutateAsync({ version: row.version, reason }),
                 })
-              }
+              }}
             >
               切回这版
             </Button>
@@ -434,7 +447,9 @@ export default function PromptsPage() {
             <Button
               disabled={query.data?.is_default}
               loading={reset.isPending}
-              onClick={() =>
+              onClick={() => {
+                // 每次打开都创建新值,取消上一次弹窗不会把理由带到这一次。
+                let reason = ''
                 modal.confirm({
                   title: '回到内置默认提示词?',
                   // 三个动作里它破坏性最强(一次把所有版本停用),
@@ -445,13 +460,13 @@ export default function PromptsPage() {
                       <Input
                         placeholder="为什么退回内置默认(会记进审计,三个月后这是唯一的线索)"
                         maxLength={500}
-                        onChange={(e) => setRollbackNote(e.target.value)}
+                        onChange={(e) => { reason = e.target.value }}
                       />
                     </Space>
                   ),
-                  onOk: () => reset.mutateAsync(),
+                  onOk: () => reset.mutateAsync(reason),
                 })
-              }
+              }}
             >
               恢复默认
             </Button>

@@ -87,9 +87,28 @@ def test_the_default_prompt_is_expressible_as_a_version():
     )
     body = ast.unparse(ast.Module(body=fn.body, type_ignores=[]))
     assert "actual = row.version if row is not None else None" in body
-    # `expected is None` 是"不参与检查",不是"期望内置默认" —— 两者混用的话,
-    # 一个不传参的脚本会被当成"我以为现在是内置默认"
-    assert "if expected is None" in body
+    # None 必须保留给“期望内置默认”。内部脚本不检查走专用哨兵,否则默认态
+    # 会成为 HTTP 页面唯一绕得过乐观锁的状态。
+    assert "if expected is _UNCHECKED_EXPECTED_VERSION" in body
+
+
+def test_http_write_models_require_an_expected_version_even_when_it_is_null():
+    """省略字段与明确传 null 是两件事,Pydantic 模型不能把它们合并。"""
+    source = _app("api/prompts.py")
+    tree = ast.parse(source)
+    for cls in ("PromptSaveIn", "PromptActivateIn", "PromptResetIn"):
+        node = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == cls
+        )
+        field = next(
+            n for n in node.body
+            if isinstance(n, ast.AnnAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == "expected_version"
+        )
+        assert isinstance(field.value, ast.Call)
+        assert field.value.args and isinstance(field.value.args[0], ast.Constant)
+        assert field.value.args[0].value is Ellipsis
 
 
 def test_the_conflict_answer_says_who_and_what_not_just_409():

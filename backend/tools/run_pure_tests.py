@@ -42,6 +42,8 @@ import traceback
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from test_environment import install_provider_test_baseline
+
 # ## 这几行必须在任何用例被导入之前跑(A42)
 #
 # `app.core.secrets._material()` 找不到 `SETTINGS_SECRET_KEY` 时,会走
@@ -60,6 +62,8 @@ from pathlib import Path
 _SECRETS_TMPDIR = tempfile.mkdtemp(prefix="swimwear-pure-secrets-")
 os.environ.setdefault("SETTINGS_SECRET_KEY", "pure-runner-fixed-key-do-not-use-in-production")
 os.environ.setdefault("SETTINGS_KEY_DIR", _SECRETS_TMPDIR)
+# 与 pytest 入口共用一份 Provider 基线,且必须发生在任何 app 模块导入之前。
+install_provider_test_baseline()
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PURE_DIR = BACKEND_ROOT / "tests" / "pure"

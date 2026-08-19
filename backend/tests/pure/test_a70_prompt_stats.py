@@ -31,6 +31,7 @@ import re
 from pathlib import Path
 
 from app.core.enums import EvaluationOutcome
+from app.models.evaluation import EvaluationAttempt
 from app.workflows import prompt_stats
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -216,3 +217,13 @@ def test_the_window_is_a_single_constant():
     没有任何东西会红 —— 界面会理直气壮地用另一个窗口的数字说「近 7 天」。
     """
     assert prompt_stats.RECENT_WINDOW_DAYS == 7
+
+
+def test_recent_window_and_per_version_queries_have_separate_indexes():
+    """中间未限定的 version 不能替列表页承接 created_at 范围查询。"""
+    shapes = {
+        tuple(column.name for column in index.columns)
+        for index in EvaluationAttempt.__table__.indexes
+    }
+    assert ("prompt_key", "created_at") in shapes
+    assert ("prompt_key", "prompt_version", "created_at") in shapes

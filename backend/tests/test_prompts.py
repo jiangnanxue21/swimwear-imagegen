@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import delete
+from sqlalchemy.orm import sessionmaker
 
+from app.models.prompt_template import PromptTemplate
 from app.services import prompt_service
 from app.services.prompt_rules import VISION_SYSTEM_PROMPT
 from tests.conftest import requires_db
@@ -79,6 +82,36 @@ def test_reset_returns_to_the_built_in_default_without_deleting_history(session)
     assert len(prompt_service.list_versions(session, KEY)) == 1  # 历史还在
 
 
+def test_default_state_participates_in_optimistic_lock(engine):
+    """A 读到默认后,B 先保存,A 不能再把 B 静默覆盖掉。"""
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as cleanup:
+        cleanup.execute(delete(PromptTemplate).where(PromptTemplate.key == KEY))
+        cleanup.commit()
+
+    try:
+        with factory() as reader_a, factory() as writer_b:
+            assert prompt_service.get_active_content(reader_a, KEY)[1] is None
+            assert prompt_service.get_active_content(writer_b, KEY)[1] is None
+
+            prompt_service.save_version(
+                writer_b, KEY, "B 先保存", expected_version=None
+            )
+            writer_b.commit()
+
+            with pytest.raises(prompt_service.PromptConflict) as caught:
+                prompt_service.save_version(
+                    reader_a, KEY, "A 的过期内容", expected_version=None
+                )
+            assert caught.value.expected is None
+            assert caught.value.actual == 1
+            reader_a.rollback()
+    finally:
+        with factory() as cleanup:
+            cleanup.execute(delete(PromptTemplate).where(PromptTemplate.key == KEY))
+            cleanup.commit()
+
+
 def test_saving_without_activating_leaves_the_current_one_in_effect(session):
     prompt_service.save_version(session, KEY, "生效版")
     prompt_service.save_version(session, KEY, "草稿版", activate=False)
@@ -117,7 +150,9 @@ def test_prompt_endpoints_require_the_admin_token(guarded_client):
         ("put", f"/api/prompts/{KEY}"),
         ("post", f"/api/prompts/{KEY}/reset"),
     ):
-        kwargs = {} if method == "get" else {"json": {"content": "x"}}
+        kwargs = {} if method == "get" else {
+            "json": {"content": "x", "expected_version": None}
+        }
         response = getattr(guarded_client, method)(path, **kwargs)
         assert response.status_code in (401, 403), f"{method} {path} 没有守卫"
 

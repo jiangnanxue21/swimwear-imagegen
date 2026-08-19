@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Final, TypeAlias
 
 from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -82,6 +82,20 @@ def list_versions(session: Session, key: str, *, limit: int = 50) -> list[Prompt
 #: 保存 / 启用时的重试次数。advisory lock 之外还留一层重试,是因为锁只覆盖
 #: 走这条代码路径的进程 —— 迁移脚本、手工 SQL、别的服务都不会去拿这把锁。
 MAX_VERSION_RETRIES = 3
+
+
+class _UncheckedExpectedVersion:
+    """内部调用明确放弃乐观锁时使用的类型。
+
+    ``None`` 已经有业务含义:调用方看到的是内置默认。再拿它表示“不检查”,
+    默认态就会成为唯一绕得过乐观锁的状态。单独的哨兵把两种语义拆开。
+    """
+
+    __slots__ = ()
+
+
+_UNCHECKED_EXPECTED_VERSION: Final = _UncheckedExpectedVersion()
+ExpectedVersion: TypeAlias = int | None | _UncheckedExpectedVersion
 
 
 def _advisory_key(key: str) -> int:
@@ -171,13 +185,13 @@ class PromptConflict(Exception):
         super().__init__(f"{key} 的生效版本已变为 {actual},不是 {expected}")
 
 
-def _assert_expected_version(session: Session, key: str, expected: int | None) -> None:
-    """乐观锁。`expected` 为 None 表示调用方不参与检查(内部调用、脚本)。
+def _assert_expected_version(session: Session, key: str, expected: ExpectedVersion) -> None:
+    """乐观锁。哨兵表示内部调用不检查,``None`` 表示期望内置默认。
 
     **必须在 `_lock_key()` 之后调用** —— 拿锁之前读到的"当前版本"随时会变,
     检查过了照样能被别人插进来,那种检查只是让人以为有防线。
     """
-    if expected is None:
+    if expected is _UNCHECKED_EXPECTED_VERSION:
         return
     row = session.execute(
         select(PromptTemplate).where(
@@ -217,7 +231,7 @@ def save_version(
     note: str | None = None,
     updated_by: str | None = None,
     activate: bool = True,
-    expected_version: int | None = None,
+    expected_version: ExpectedVersion = _UNCHECKED_EXPECTED_VERSION,
 ) -> PromptTemplate:
     """存一个新版本。默认立即生效。
 
@@ -300,7 +314,7 @@ def activate_version(
     *,
     note: str | None = None,
     updated_by: str | None = None,
-    expected_version: int | None = None,
+    expected_version: ExpectedVersion = _UNCHECKED_EXPECTED_VERSION,
 ) -> PromptTemplate:
     """回滚到某个历史版本。
 
@@ -360,7 +374,7 @@ def reset_to_default(
     *,
     updated_by: str | None = None,
     note: str | None = None,
-    expected_version: int | None = None,
+    expected_version: ExpectedVersion = _UNCHECKED_EXPECTED_VERSION,
 ) -> None:
     """回到代码内置的默认提示词。
 

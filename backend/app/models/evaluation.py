@@ -248,13 +248,18 @@ class EvaluationAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_evaluation_attempts_task_round", "task_id", "round_number"),
         Index("ix_evaluation_attempts_outcome", "outcome"),
         Index("ix_evaluation_attempts_created_at", "created_at"),
-        # BE-302 的两条查询都打这个前缀:列表页按 (key) 收近 7 天,详情页按
-        # (key, version) 逐版收。`created_at` 收尾让时间窗也走索引 —— 这张表
-        # 每次评分都写一行(一轮 4 张 × 最多 3 轮),全表扫会随用量线性变慢
+        # 详情页按 (key, version) 收逐版统计;这一条保留三列顺序服务它。
         Index(
             "ix_evaluation_attempts_prompt",
             "prompt_key",
             "prompt_version",
+            "created_at",
+        ),
+        # 列表页只给 key 与 created_at。把 version 插在中间时,PostgreSQL 16
+        # 只能扫完该 key 的全部版本再过滤时间,历史越长打开列表越慢。
+        Index(
+            "ix_evaluation_attempts_prompt_created_at",
+            "prompt_key",
             "created_at",
         ),
     )

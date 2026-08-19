@@ -24,6 +24,12 @@ def _override(name: str) -> str | None:
     包括另一个进程里的 worker。读不到(数据库没起、表还没迁移、被裁剪的运行环境)
     一律当作没有覆盖,继续走环境变量,绝不因为读配置失败而中断生成。
     """
+    # 纯测试与离线诊断需要一个**明确的环境变量-only 模式**。否则读取一个空的
+    # API Key 也会先连接 app_settings,测试结果和开发者数据库里的覆盖值绑定。
+    if os.environ.get("PROVIDER_SETTINGS_ENV_ONLY", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }:
+        return None
     try:
         from app.services.settings_runtime import override_for
 

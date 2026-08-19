@@ -27,6 +27,20 @@ vi.mock('../../src/api/products', () => ({
   },
 }))
 
+vi.mock('../../src/api/generationPlans', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/api/generationPlans')>()),
+  effectivePlanForProduct: vi.fn().mockResolvedValue({
+    product_id: 'product-123',
+    spu_id: null,
+    color_variant_id: null,
+    plan: null,
+    scope: null,
+    candidates_per_round: null,
+    required_angles: [],
+    problems: [],
+  }),
+}))
+
 describe('创建生成任务弹窗', () => {
   /*
    * ## 这条用例的期望在 2026-08-11 订正过一次
