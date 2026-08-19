@@ -422,13 +422,18 @@ def _validate_enum(spec: AttributeField, value: Any) -> str:
         raise AttributeValueError(spec.name, "枚举字段只接受字符串")
     text = value.strip()
     if not text:
-        raise AttributeValueError(spec.name, "枚举字段不接受空字符串;要清空请传 null")
+        raise AttributeValueError(spec.name, "不能是空白;要清空这一项就把它留空不填")
     allowed = {v.value.upper(): v.value for v in spec.enum}  # type: ignore[union-attr]
     canonical = allowed.get(text.upper())
     if canonical is None:
+        # A69:原来这里是 `{text!r}` + `sorted(...)`,渲染出来是
+        # 「不是合法取值:'花色';允许的是 ['FLORAL', 'SOLID', 'STRIPE']」——
+        # Python 的引号和列表字面量原样进了运营看的那句话。
+        # 这条 reason 会被接口层拼进 422 的 message(`api/attributes.py`),
+        # 所以它就是界面文案,不是日志。
         raise AttributeValueError(
             spec.name,
-            f"不是合法取值:{text!r};允许的是 {sorted(allowed.values())}",
+            f"「{text}」不是允许的取值;可选:{'、'.join(sorted(allowed.values()))}",
         )
     return canonical
 
@@ -443,7 +448,7 @@ def _validate_enum_list(spec: AttributeField, value: Any) -> list[str]:
         canonical = allowed.get(raw.strip().upper())
         if canonical is None:
             raise AttributeValueError(
-                spec.name, f"第 {index + 1} 项不是合法取值:{raw!r}"
+                spec.name, f"第 {index + 1} 项「{raw}」不是允许的取值"
             )
         # 去重保序:同一个值提交两次不是错误,但存两份会让下游的
         # "有几个副色"变成一个取决于提交次数的数
@@ -458,7 +463,7 @@ def _validate_text(spec: AttributeField, value: Any) -> str:
         raise AttributeValueError(spec.name, "文本字段只接受字符串")
     text = value.strip()
     if not text:
-        raise AttributeValueError(spec.name, "文本字段不接受空字符串;要清空请传 null")
+        raise AttributeValueError(spec.name, "不能是空白;要清空这一项就把它留空不填")
     if len(text) > MAX_TEXT_LENGTH:
         raise AttributeValueError(
             spec.name, f"超过 {MAX_TEXT_LENGTH} 字符(实际 {len(text)})"

@@ -1,4 +1,4 @@
-.PHONY: help init up down logs migrate revision seed test test-pure test-nodb smoke-optimized smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-columns audit-doc-refs fe-install fe-dev fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
+.PHONY: help init up down logs migrate revision seed test test-pure test-nodb smoke-optimized smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-guard-windows audit-dataclass-fields audit-migration-chain audit-columns audit-doc-refs fe-install fe-dev fe-test-pure fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
 
 # `core.autocrlf=true` used to turn pack.sh into a mixed-CRLF script on Windows.
 # Route the documented make entrypoint to the native packer there; .gitattributes
@@ -132,6 +132,37 @@ audit-columns: ## 每一列都答得出「谁写它」(落库无写入路径的�
 audit-guards: ## 守卫的窗口封不封闭(反向断言不许吃切窄的源码)
 	cd backend && $(PYTHON) tools/audit_source_guards.py
 
+# a59:同一种缺陷连着四次(batch13-3 M11 / a54 P1 / a57 M10 / a58 M3)——
+# 断言写成「这个文件里有没有出现过这串字」,而它想说的是「这个位置写没写」。
+# 前三次都记在决策日志里"下次注意",而 §3.90 写完那段之后 a58 当轮又犯了一次。
+# 文档拦不住这一类:窗口唯不唯一取决于**被读的那个文件长什么样**,
+# 不在写守卫的人的视野里。这正是该由机器答的问题。
+audit-guard-windows: ## 读源码的守卫,窗口必须唯一(棘轮:这个数只能降)
+	cd backend && $(PYTHON) tools/audit_guard_windows.py
+
+# a61:`make fe-check` 四层全部要 node_modules,而交付机上装不上 —— 从 a54 起
+# 「下一步第一件事就是 fe-check」在交接文档里重复了六遍,而每一轮都在往那条
+# 没有行为验证的路上多写几个文件。Node 22 原生剥类型 + node:test 把成本降到零。
+#
+# **射程只有判定层**:剥类型不做 JSX 变换,`.tsx` 一行都跑不了。
+# 别把这条的绿读成 fe-check 的绿。
+fe-test-pure: ## 前端纯逻辑测试(零依赖,不需要 node_modules)
+	cd frontend && node tools/run-pure-tests.mjs
+
+# a64:`AiTestRecord.prompt_template_version` 声明了、串进了出参、落到了模型那一列上,
+# 而两个构造器一个都没传过它 —— 恒为 NULL,存在六轮,每轮全套门禁都绿。
+# 两道防线都没看见:列审计判「有没有写入点」(有),a57 那条守卫判**键集**(键在、值恒空)。
+# 键在、值恒空是两侧测试之间的一道缝,这条门禁跨的就是它。
+audit-dataclass-fields: ## dataclass 的字段必须有人给过值(棘轮:这个数只能降)
+	cd backend && $(PYTHON) tools/audit_dataclass_fields.py
+
+# a65:「真库那一侧有没有 a61 式的余地」—— 有。迁移是纯声明式的,56 份里只有
+# 9 处 raw execute 且全是索引,所以表与列的演化可以在内存里重放,一行 SQL 都不用跑。
+# 抓两类:步内的目标不存在(a57 手工发现的迁移 0055 就是这个形状),
+# 以及最终 schema 与 ORM 对不上(`prompt_template.py` 顶部记着这个坑的上一次)。
+audit-migration-chain: ## 在内存里重放迁移链,并与 ORM 声明比对(零依赖)
+	cd backend && $(PYTHON) tools/audit_migration_chain.py
+
 # R1-36:开发用 `npm ci` 而不是 `npm install`。
 # 两者装出来的树可以不一样(`install` 会按 semver 悄悄升次版本并改写 lockfile),
 # 于是「本地好的、CI 红的」这类问题没有任何线索。生产镜像一直是 `npm ci`,
@@ -248,7 +279,24 @@ check: check-offline test-nodb fe-check ## 离线子集 + 非真库 pytest + 前
 # 在离线时没有任何东西在看 —— `noUnusedLocals` 归 tsc 管,而 tsc 要
 # node_modules。a46-phase6 自审专门找死 import 都漏了一处,跟着 a47
 # 一起交付了出去。判据与它仍验不到什么,写在那个脚本顶部。
-check-offline: test-pure verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-doc-refs ## 离线子集(不需要 node_modules;缺 pip 工具时大声跳过)
+# 依赖列表**一项一行**(a64)。原来全挤在一行里,后果不是难读:
+# `mutate_batch14_14.py` 的 G1 锚在这一行的一段内容上,而那段内容是
+# **当时的清单**——每加一条门禁就失锚一次。a61 修过一次(改成再往右多带一项),
+# a64 又断了,因为多带的那一项也是清单成员。**锚在会变的清单上,修法不能是
+# 换一段同样会变的清单。** 拆成一项一行之后,每一项自带 `\` 与换行,
+# 插入新项不动任何既有行。
+check-offline: \
+	test-pure \
+	fe-test-pure \
+	verify-delivery \
+	verify-sample-data \
+	verify-imports \
+	audit-anchors \
+	audit-guards \
+	audit-guard-windows \
+	audit-dataclass-fields \
+	audit-migration-chain \
+	audit-doc-refs ## 离线子集(不需要 node_modules;缺 pip 工具时大声跳过)
 ifeq ($(OS),Windows_NT)
 	@powershell -NoProfile -Command "$$tool = 'backend/.venv/Scripts/ruff.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/ruff.exe' check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command ruff -ErrorAction SilentlyContinue) { Push-Location backend; & ruff check app tests; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  lint(ruff 未安装)—— 这一项没有被验证' }"
 	@powershell -NoProfile -Command "$$env:PYTHONUTF8 = '1'; $$tool = 'backend/.venv/Scripts/lint-imports.exe'; if (Test-Path $$tool) { Push-Location backend; & '.venv/Scripts/lint-imports.exe'; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } elseif (Get-Command lint-imports -ErrorAction SilentlyContinue) { Push-Location backend; & lint-imports; $$code = $$LASTEXITCODE; Pop-Location; exit $$code } else { Write-Host 'SKIP  arch-check(lint-imports 未安装)—— 这一项没有被验证' }"

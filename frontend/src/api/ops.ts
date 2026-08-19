@@ -25,8 +25,13 @@ export interface LogEntry {
   /** 进程内单调计数 + 进程标识。只为去重与稳定排序,**不承诺全局连续** */
   seq: string | null
   ts: string | null
+  /** 时间戳解析不出来。这类行排在末尾,界面单独提示 —— 不静默丢,也不假装它在某个位置 */
+  ts_unparsed: boolean
   level: string | null
   logger: string | null
+  /** 哪个进程写的:api / worker / beat / script。三种进程写进同一个环形 */
+  service: string | null
+  pid: number | null
   domain: string
   domain_label: string
   event: string | null
@@ -64,6 +69,15 @@ export interface RingMeta {
   last_error: string | null
   /** 有值 = 环形读不到。此时列表为空**不是**"这段时间没有日志" */
   unavailable_reason?: string
+  /**
+   * 访问日志进不进诊断窗口。**界面必须把它说出来。**
+   *
+   *     errors  只有 4xx/5xx 的访问日志在窗口里
+   *     all     全部在
+   *
+   * 窗口可以少装东西,但不许让人把"我没收"读成"没发生"。
+   */
+  access_mode?: 'errors' | 'all'
 }
 
 /** 一个域在当前窗口里的条数。**不吃 domain 筛选** —— 见 LogPage.domain_counts */
@@ -79,6 +93,19 @@ export interface LogPage {
   /** 全窗最老的一条的时间,与当前筛选无关 */
   oldest_ts: string | null
   /**
+   * **当前这张列表**实际的起点。和 `oldest_ts` 是两个数,谁也不冒充谁。
+   *
+   * 被 `limit` 截断时它比 `oldest_ts` 晚得多 —— 上一版界面只说了 `oldest_ts`,
+   * 于是那行「更早的不是没发生,是滚出窗口了」在此刻是在误导人。
+   */
+  shown_oldest_ts: string | null
+  /** 筛选命中的总条数(**截断前**) */
+  matched: number
+  /** `matched > items.length`。上一版超出就静默停,响应里一个字都没有 */
+  truncated: boolean
+  /** 进程 -> 条数。`worker` 一条都没有,就是 worker 没在写日志 */
+  services_seen: Record<string, number>
+  /**
    * 域 -> 计数。**服务端按全窗算,不受当前选中的域影响。**
    *
    * 上一版是前端按已经筛过的那一屏算的,于是点进一个域之后其余十四格
@@ -89,6 +116,12 @@ export interface LogPage {
 
 export interface LogMeta {
   domains: Array<{ key: string; label: string }>
+  /**
+   * 窗口里**实际出现过**的进程,不是一张写死的表。
+   *
+   * 写死的表会在 worker 没起来的时候依然列出 `worker` —— 而那正是要发现的事。
+   */
+  services_seen: Record<string, number>
   events: Array<{
     key: string
     label: string
@@ -153,9 +186,14 @@ export interface LogQuery {
   event?: string
   /** **最低级别**,不是精确值 —— 选 WARNING 的人要看得见 ERROR */
   level?: string
+  /** 哪个进程写的 */
+  service?: string
   request_id?: string
   task_id?: string
   q?: string
+  /** ISO 8601 带时区。**进 URL 的是绝对时间戳,不是「最近 15 分钟」** */
+  since?: string
+  until?: string
   limit?: number
 }
 

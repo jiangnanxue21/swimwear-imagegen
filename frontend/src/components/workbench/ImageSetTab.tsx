@@ -1029,13 +1029,25 @@ export default function ImageSetTab({
                     <Tag color="error">素材已隔离</Tag>
                   )}
                   <span style={{ flex: 1 }} />
-                  <Button size="small" icon={<ArrowUpOutlined />} disabled={index === 0} onClick={() => move(index, index - 1)} />
-                  <Button
-                    size="small"
-                    icon={<ArrowDownOutlined />}
-                    disabled={index === items.length - 1}
-                    onClick={() => move(index, index + 1)}
-                  />
+                  {/* A69:这一排四个按钮只有图标。隔壁"复制到另一个颜色"早就包了
+                      Tooltip,约定在,只是没铺满 —— 补齐它。顺序影响的是主图之外
+                      的排布,而排布就是平台看到的顺序,所以这两个不是装饰按钮 */}
+                  <Tooltip title="上移一位">
+                    <Button
+                      size="small"
+                      icon={<ArrowUpOutlined />}
+                      disabled={index === 0}
+                      onClick={() => move(index, index - 1)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="下移一位">
+                    <Button
+                      size="small"
+                      icon={<ArrowDownOutlined />}
+                      disabled={index === items.length - 1}
+                      onClick={() => move(index, index + 1)}
+                    />
+                  </Tooltip>
                   <Tooltip title="把这张图再绑到另一个颜色上(同一张素材绑多个颜色是允许的)">
                     <Button
                       size="small"
@@ -1044,7 +1056,16 @@ export default function ImageSetTab({
                       onClick={() => duplicateForVariant(index)}
                     />
                   </Tooltip>
-                  <Button size="small" danger icon={<DeleteOutlined />} onClick={() => remove(index)} />
+                  {/* 只从这一版编排里去掉,不删素材本身 —— 措辞要说清这件事:
+                      运营看到一个红色垃圾桶,默认会以为图没了 */}
+                  <Tooltip title="从这一版编排里移除（不删除素材）">
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => remove(index)}
+                    />
+                  </Tooltip>
                 </div>
               )
             })}

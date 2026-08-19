@@ -84,7 +84,7 @@ def draft_audience_gate(
         # 那样这个错值会静默存在到永远
         return AudienceGateResult(
             problems=(
-                f"商品受众取值不合法:{product_audience!r},请先修正商品资料",
+                f"商品受众取值不合法:「{product_audience}」,请先修正商品资料",
             )
         )
 

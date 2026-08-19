@@ -60,37 +60,69 @@ _SOCKET_TIMEOUT_SECONDS = 0.2
 OPS_API_PREFIX = "/api/ops/"
 
 
-class SelfTrafficFilter(logging.Filter):
-    """**看日志的动作不许冲刷诊断窗口。**(a54 修)
+class AccessNoiseFilter(logging.Filter):
+    """**访问日志不许把诊断窗口冲干净。**(a55 扩,a54 首版)
 
-    上一版没有这个过滤器,于是:`app/main.py` 的中间件对每个请求写一条
+    ## a54 只修了自指那一半
+
+    a54 发现的是:`app/main.py` 的中间件对每个请求写一条
     `http.request_completed`,**包括 `/api/ops/logs` 自己**;而运行日志页的
     跟随模式是 3 秒一拍。一个开着的标签页 = 20 条/分钟 = 1200 条/小时,
-    cap 5000 —— **约四小时后环形里 100% 是"某人在看运行日志"**。
+    cap 5000 —— 约四小时后环形里 100% 是"某人在看运行日志"。
 
-    最难受的是它不可见:这些行标了 routine,在流视角里折进计数条;
-    而 `held/cap` 显示 5000/5000,看起来非常健康。于是排障的人一边盯着页面,
-    一边把自己要找的证据顶出窗口。
+    修法当时是挡住 `/api/ops/` 前缀。**而前端有 17 处 `refetchInterval`:**
 
-    两条边界:
+        TaskDetailPage        三个轮询器,2~3 秒一拍
+        WorkbenchBatchPage    两个,2~3 秒
+        ReviewQueuePage       15 秒 · SystemStatusPage 15 秒 · DashboardPage 30 秒
+
+    打开一个任务详情页 ≈ 90 请求/分钟 = **5400 条/小时**,而 cap 是 5000。
+    一个开着任务详情页的标签,一小时内把整个窗口洗一遍 —— 而排障的人
+    恰恰会开着任务详情页。
+
+    **修了自指那一半比不修更危险**:这些行标了 routine,在流视角里折进
+    计数条;`held/cap` 显示 5000/5000,看起来非常健康,于是没人再怀疑它。
+
+    ## 所以判据从"路径"换成"这条访问日志有没有诊断价值"
+
+        errors(默认)   只有 >=400 的访问日志进环形
+        all             全进(a54 的行为,给"我就是要看请求流水"的场景留着)
+
+    三条边界一条没变:
 
     - **只挡 2xx/3xx。** `/api/ops/logs` 自己 500 了是要看见的,那不是噪音。
     - **只挡环形,不挡 stdout。** 归档面一个字节没动 —— 采集端仍然收到
-      全部访问日志,这里去掉的只是"诊断窗口里的自指部分"。
+      全部访问日志。这里去掉的只是"诊断窗口里没有诊断价值的那部分"。
+    - **界面必须说出来。** `/meta` 报 `ring.access_mode`,页面在 `http` 域上
+      画一行小字。窗口可以少装东西,但不许让人把"我没收"读成"没发生" ——
+      那是这一整页反复申明不许说的那句话。
     """
 
-    def __init__(self, prefix: str = OPS_API_PREFIX) -> None:
+    #: 兼容期别名。a54 的名字,外部若有引用不至于当场 ImportError。
+    def __init__(self, prefix: str = OPS_API_PREFIX, *, mode: str = "errors") -> None:
         super().__init__()
         self.prefix = prefix
+        self.mode = mode if mode in ("errors", "all") else "errors"
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - 覆盖标准库
         fields = getattr(record, "extra_fields", None)
         if not isinstance(fields, dict) or fields.get("event") != ACCESS_EVENT:
             return True
         status = fields.get("status")
+        # 4xx / 5xx 永远放行 —— 两种模式下都一样。出错的请求是诊断信息,
+        # 不是噪音,而"把出错的那一条也一起挡掉"是这个过滤器唯一不可接受的失败。
         if isinstance(status, int) and status >= 400:
             return True
-        return not str(fields.get("path") or "").startswith(self.prefix)
+        if self.mode == "all":
+            # a54 的行为:只挡自指。留着这一档是因为"看请求流水"确实是
+            # 一种真实用法,只是不该是默认 —— 默认那一档要保护窗口。
+            return not str(fields.get("path") or "").startswith(self.prefix)
+        return False
+
+
+#: a54 的名字。改名的理由见 `AccessNoiseFilter` 的文档 —— 语义从"挡自指"
+#: 扩成了"按模式挡访问噪音",而旧名字会让读的人以为它只管 `/api/ops/`。
+SelfTrafficFilter = AccessNoiseFilter
 
 
 class RingStats:
@@ -267,8 +299,25 @@ class RingHandler(logging.Handler):
 
 def read_ring(
     url: str, *, limit: int, key: str = RING_KEY
-) -> tuple[list[dict[str, Any]], str | None]:
-    """读最近 ``limit`` 条,**新在前**。返回 (条目, 错误类型名)。
+) -> tuple[list[tuple[str, dict[str, Any]]], str | None]:
+    """读最近 ``limit`` 条,**新在前**。返回 ([(原始行, 解析后), ...], 错误类型名)。
+
+    ## 为什么把原始行也带出来(a55 改)
+
+    上一版返回的是 `list[dict]` —— LRANGE 拿回来的那个字符串 `json.loads`
+    完就丢了。于是 `api/ops_logs.py` 想做 `q` 子串匹配时,手上只有 dict,
+    只能**重新 `json.dumps` 一遍**,而且是对全窗 5000 条每条都做:
+
+        for row in rows:
+            raw = json.dumps(...)      # ← 无条件,5000 次
+            if not _matches(row, raw=raw): continue
+
+    a54 那一轮把 `_shape()` 挪到了筛选后面并加了一条守卫,但守卫断言的是
+    **`_matches` 的调用行号小于 `_shape` 的** —— 形状对了,而真正贵的那次
+    `dumps` 还留在前面。守卫一直是绿的,开销一次没降。
+
+    `_matches` 的文档字符串当时就写着「`q` 直接匹配 LRANGE 拿回来的那一行
+    原文」。**代码没有这么做,而现在它可以了。**
 
     错误不抛。读不到时界面要说"环形不可用",而不是画一张空列表 ——
     空列表的意思是"这段时间没有日志",那是一句没发生的事(硬规则第 4 条)。
@@ -282,7 +331,7 @@ def read_ring(
         _HOLDER.fail(exc)
         return [], type(exc).__name__
 
-    rows: list[dict[str, Any]] = []
+    rows: list[tuple[str, dict[str, Any]]] = []
     for item in raw or []:
         try:
             parsed = json.loads(item)
@@ -291,7 +340,7 @@ def read_ring(
             # 差里。整批抛掉的话,一条坏行会让整个查看器变空。
             continue
         if isinstance(parsed, dict):
-            rows.append(parsed)
+            rows.append((item if isinstance(item, str) else str(item), parsed))
     return rows, None
 
 

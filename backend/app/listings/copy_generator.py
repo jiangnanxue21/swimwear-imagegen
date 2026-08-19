@@ -34,6 +34,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from app.prompts.versioning import content_version
 from app.core.errors import ErrorCode, ValidationError
 from app.core.logging import get_logger
 
@@ -50,7 +51,9 @@ TEMPLATE_VERSION = "template-1"
 #: LLM 提示词版本。原来 `prompt_version` 里硬写的是字面量 `1`,于是改了
 #: `build_prompt` 的措辞之后,落库的版本号一动不动 —— 「这一版为什么和
 #: 上一版不一样」就没法回答了,幂等指纹也认不出提示词变过(评审第 3 条)。
-PROMPT_VERSION = "llm-1"
+# `PROMPT_VERSION = "llm-1"` 已删除(PRD BE-306):它修过一次「版本号硬写 1」
+# 的坑,但修成了「靠人记得改的常量」—— 同一个坑换了个姿势。LLM 生成器的
+# prompt_version 现在对 `LLM_SYSTEM_PROMPT` 取内容哈希,见 `_LLM_PROMPT_VERSION`。
 
 
 def _require_str(data: Mapping[str, Any], key: str, *, where: str) -> str:
@@ -472,6 +475,11 @@ LLM_SYSTEM_PROMPT = """你是电商文案撰写助手。严格按 JSON 输出,�
 {{"title": "", "bullet_points": [], "description": "", "keywords": [],
   "claims": [{{"field_name": "", "value": "", "text_span": "", "location": ""}}]}}"""
 
+#: 内容派生版本(PRD BE-306 / AC-30)。对**未填充槽位的模板串**取哈希:
+#: {title_max} 这些是运行参数,不是措辞 —— 参数由 CopyRules 注入,改参数
+#: 不该算「换了一版提示词」,改措辞才算。
+_LLM_PROMPT_VERSION = content_version(LLM_SYSTEM_PROMPT)
+
 
 @dataclass
 class LLMCopyGenerator:
@@ -631,7 +639,7 @@ class LLMCopyGenerator:
             keywords=tuple(keywords),
             claims=tuple(claims),
             generator=self.name,
-            prompt_version=f"{self.model}:{PROMPT_VERSION}",
+            prompt_version=f"{self.model}:{_LLM_PROMPT_VERSION}",
         )
 
     def generate(
@@ -800,13 +808,13 @@ def get_generator(name: str | None = None) -> CopyGenerator:
     factory = GENERATOR_FACTORIES.get(chosen)
     if factory is None:
         raise ValidationError(
-            f"未知的文案生成器 {chosen!r};可选:{', '.join(sorted(GENERATOR_FACTORIES))}",
+            f"未知的文案生成器「{chosen}」;可选:{'、'.join(sorted(GENERATOR_FACTORIES))}",
             code=ErrorCode.CONFIG_INVALID,
         )
     generator = factory()
     if not generator.is_configured():
         raise ValidationError(
-            f"文案生成器 {chosen!r} 尚未配置完成,拒绝使用",
+            f"文案生成器「{chosen}」尚未配置完成,拒绝使用",
             code=ErrorCode.CONFIG_INVALID,
             http_status=503,
         )

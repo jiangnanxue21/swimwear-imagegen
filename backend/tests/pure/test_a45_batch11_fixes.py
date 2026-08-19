@@ -23,6 +23,7 @@ import datetime as dt
 import decimal
 import json
 import re
+import types
 import uuid
 
 from app.core import garments
@@ -347,28 +348,45 @@ def test_packaging_entrypoints_are_pinned_to_lf():
         assert b"\r" not in payload, f"{relative} 出现 CRLF/混合换行,Windows 打包会复发"
 
 
-#: 换行符扫描要跳过的目录。与 `tools/pack.sh` 的排除表同向 —— 它们要么不进
-#: 交付包,要么根本不是我们写的代码(`node_modules` 里什么行尾都有,而且合法)。
-_LINE_ENDING_SKIP_DIRS = frozenset(
-    {
-        ".git", ".idea", ".vscode", "__pycache__", ".pytest_cache", ".ruff_cache",
-        ".vite-cache", ".import_linter_cache", ".venv", "venv", "node_modules",
-        "test-results", "playwright-report", "dist", "coverage", "storage",
-        ".secrets", "data",
-    }
-)
+#: 行尾策略的**唯一实现**,从 `tools/normalize_eol.py` 载入。
+#:
+#: ## 为什么改成载入,而不是在这里再写一份
+#:
+#: 这条用例原来自己持有跳过表、豁免表和二进制判据 —— 也就是**第二份策略**。
+#: 而两个打包脚本现在也要用同一套判据去验成包的真实字节(`tools/pack.sh`
+#: 与 `tools/pack.ps1` 的行尾复验),三份手写清单的下场这个仓库已经知道:
+#: `pack.sh` 开头两百行讲的就是它,`verify_delivery.py` 里那条逐项比对七个
+#: 数组的门禁也是为它而写。
+#:
+#: 分叉在这里的具体形状是「这条用例绿着,而打出来的包带 CRLF」,或者反过来
+#: 「包干净而用例红」—— 两种都属于"门禁看起来在跑"。
+#:
+#: 从文件路径载入而不是 `import`:`tools/` 在仓库根,不在 `backend` 的包路径里,
+#: 而这批用例要在**只有 python3**的机器上跑(`tools/run_pure_tests.py`),
+#: 不能靠安装或 PYTHONPATH。载不进来就当场红 —— 策略文件丢了本身就是缺陷,
+#: 那时候两个打包脚本会 fail-closed,而这条用例不该反而变绿。
+_EOL_TOOL_PATH = PROJECT_ROOT / "tools" / "normalize_eol.py"
 
-#: 唯一允许 CRLF 的两类:Windows 原生启动器(`.gitattributes` 同向)。
-_CRLF_ALLOWED_SUFFIXES = (".bat", ".cmd")
 
+def _eol_policy():
+    """从**源码字节**载入策略,不走 loader 的 pyc 缓存。
 
-def _looks_binary(payload: bytes) -> bool:
-    """和 git 的 `text=auto` 同一个判据:头部有 NUL 就当二进制。
-
-    自己判而不是问 git,是因为这批用例要在**只有 python3**的机器上跑
-    (`tools/run_pure_tests.py`),那里不保证有 git,更不保证仓库是个 checkout。
+    `exec_module` 底下的 `get_code` 按 (mtime, size) 校验 `__pycache__` ——
+    而一次"改了又改回来"的编辑(变异验证正是这么干的)如果发生在同一秒内
+    且前后字节数相同,两项都命中,**加载的是改坏的那版**。这条守卫的职责
+    恰恰是验证策略文件,验证器自己读缓存等于没验。compile+exec 每次都
+    从盘上的字节出发,顺带把"策略文件即真相"这件事写死在加载方式里。
     """
-    return b"\x00" in payload[:8000]
+    assert _EOL_TOOL_PATH.exists(), (
+        f"载不进行尾策略:{_EOL_TOOL_PATH} —— 两个打包脚本的行尾复验也依赖它"
+    )
+    module = types.ModuleType("_normalize_eol")
+    module.__file__ = str(_EOL_TOOL_PATH)
+    code = compile(
+        _EOL_TOOL_PATH.read_text(encoding="utf-8"), str(_EOL_TOOL_PATH), "exec"
+    )
+    exec(code, module.__dict__)  # noqa: S102 - 加载的是仓库内的策略文件本身
+    return module
 
 
 def test_no_tracked_text_file_carries_crlf():
@@ -393,25 +411,70 @@ def test_no_tracked_text_file_carries_crlf():
     结论相同 —— 而 `git ls-files` 在纯测试运行器里不保证可用(见 `_looks_binary`)。
     代价是会看到未跟踪的临时文件,所以跳过表要和打包排除表同向。
     """
-    offenders = []
-    for path in PROJECT_ROOT.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        if _LINE_ENDING_SKIP_DIRS & set(path.relative_to(PROJECT_ROOT).parts):
-            continue
-        if path.suffix.lower() in _CRLF_ALLOWED_SUFFIXES:
-            continue
-        payload = path.read_bytes()
-        if _looks_binary(payload) or b"\r\n" not in payload:
-            continue
-        offenders.append(str(path.relative_to(PROJECT_ROOT)))
+    found = _eol_policy().offenders(PROJECT_ROOT)
 
-    assert not offenders, (
-        "以下文本文件带 CRLF —— 打包会把它带进交付物,而 compose 的 env_file、"
+    assert not found, (
+        "以下文本文件行尾不合规 —— 打包会把它带进交付物,而 compose 的 env_file、"
         "Dockerfile 续行、.dockerignore 都会因此出错:\n  "
-        + "\n  ".join(sorted(offenders)[:20])
-        + "\n修法:确认 .gitattributes 的兜底规则还在,然后 `git add --renormalize .`"
+        + "\n  ".join(f"[{kind}] {name}" for name, kind in found[:20])
+        + "\n修法:`python3 tools/normalize_eol.py --write .`;仓库里的树还要"
+        " `git add --renormalize .` 让索引跟上。"
     )
+
+
+def test_the_line_ending_policy_has_exactly_one_implementation():
+    """**判据不许有第二份。** 这条守着上一条的委托关系不被改回手写。
+
+    上一条原来自己持有跳过表、豁免表和二进制判据;而 `tools/pack.sh` 与
+    `tools/pack.ps1` 的行尾复验现在也要用同一套判据去验成包的真实字节。
+    三个入口各写一份的话,分叉出来的表现恰好是「Linux 打的包干净、Windows
+    打的包带 CRLF」,而两台机器各自跑的时候都显示 `==> OK` —— 那正是这道
+    门禁存在的理由。
+
+    两个打包脚本都必须**调用**它,而不是各自实现;并且它必须在两侧的必备
+    文件清单里(`REQUIRED` / `$Required`),否则收包方从解出来的树重打时
+    会找不到它而 fail-closed。
+    """
+    assert _EOL_TOOL_PATH.exists(), "行尾策略的唯一实现不见了"
+    module = _eol_policy()
+    for name in ("offenders", "rewrite", "classify", "normalize_bytes", "SKIP_DIRS"):
+        assert hasattr(module, name), f"tools/normalize_eol.py 少了 {name}"
+
+    for script in ("pack.sh", "pack.ps1"):
+        body = (PROJECT_ROOT / "tools" / script).read_text(encoding="utf-8")
+        assert "normalize_eol.py" in body, (
+            f"tools/{script} 没有调用行尾策略 —— 它会逐字节把 CRLF 复制进包,"
+            "然后打印 OK"
+        )
+        assert "--check" in body, f"tools/{script} 没有对成包做行尾复验"
+        # **锚定清单行的缩进形状**,不裸搜文件名:两个脚本里 `Join-Path` /
+        # `EOL_CHECKER=` 那行也含同一个路径,裸搜会让"从清单里摘掉"仍然绿 ——
+        # 变异验证抓到过这一洞(摘掉 $Required 里那份,守卫没红)。
+        listed = "\n  'tools/normalize_eol.py'" if script == "pack.sh" else "\n    'tools/normalize_eol.py'"
+        assert listed in body, (
+            f"tools/{script} 的必备文件清单里没有 tools/normalize_eol.py —— "
+            "收包方从解出来的树重打时会找不到它(门禁会 fail-closed,"
+            "而这是一个完全可以避免的 fail-closed)"
+        )
+
+
+def test_the_normalizer_folds_crlf_and_lone_cr_without_inventing_blank_lines():
+    """归一化的**顺序**:先 `\r\n` 再 `\r`。反过来会凭空多出空行。
+
+    `b"a\r\nb".replace(b"\r", b"\n")` 得到 `b"a\n\nb"` —— 一次"顺手改一下"
+    就能把整棵树的行数翻倍,而 diff 里看起来只是行尾变了。
+    """
+    module = _eol_policy()
+    assert module.normalize_bytes(b"a\r\nb\r\n") == b"a\nb\n", "CRLF 没折干净或折出了空行"
+    assert module.normalize_bytes(b"a\rb\r") == b"a\nb\n", "孤立 CR 没折成 LF"
+    assert module.normalize_bytes(b"a\nb\n") == b"a\nb\n", "干净的 LF 不许被改动"
+    # 混合与孤立 CR 都要被认出来,否则 `.env.example` 那种 331 行里只有 6 行
+    # 带 `\r` 的文件会漏网 —— 而那 6 行里有真的变量赋值。
+    assert module.classify(b"a\r\nb\n") == "mixed"
+    assert module.classify(b"a\rb") == "cr"
+    assert module.classify(b"a\r\nb\r\n") == "crlf"
+    assert module.classify(b"a\nb\n") == "lf"
+    assert module.classify(b"a\x00\r\nb") == "binary"
 
 
 def test_gitattributes_normalizes_the_whole_tree_not_a_whitelist():

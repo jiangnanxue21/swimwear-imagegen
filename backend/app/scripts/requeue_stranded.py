@@ -100,7 +100,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    setup_logging("INFO")
+    setup_logging("INFO", service="script")
     session = SessionLocal()
     try:
         problems = 0

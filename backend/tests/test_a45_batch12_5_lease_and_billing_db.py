@@ -55,7 +55,7 @@ def _ensure_spu(client) -> None:
     """先建 SPU 档,再往下挂 SKU。理由与 12-4 那份逐字相同。
 
     A45-batch14-26 起 `create_product` 会解析 `spu` 字符串:查 `spus` 表,
-    查不到就 422(「SPU xx 不存在:请先用 POST /spus 建档」)。这批 fixture
+    查不到就 422(「款号 xx 还没有建过:请先在款式列表里新建这个款…」)。这批 fixture
     写在那次契约变更之前,于是 11 条(本文件 + 12-4)统一挂在这一处。
 
     **这两份 helper 是刻意复制的,不抽到 conftest。** 两个文件用的是不同的
@@ -85,7 +85,7 @@ def _product_with_asset(client, sku: str) -> str:
     _ensure_spu(client)
     resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
     # 先断状态码再取 id:原来 `.json()["id"]` 在建品失败时抛 KeyError('id'),
-    # 后端那句「请先用 POST /spus 建档」一个字都到不了报告里
+    # 后端那句「请先在款式列表里新建这个款」一个字都到不了报告里
     assert resp.status_code == 201, resp.text
     pid = resp.json()["id"]
     client.post(

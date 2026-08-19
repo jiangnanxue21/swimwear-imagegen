@@ -66,7 +66,7 @@ _STARLETTE_DEFAULT_DETAIL: dict[tuple[int, str | None], str] = {
 #: 两处各写一份字符串,改一处忘一处的那次就是把私有素材挂上公网。
 PUBLIC_STORAGE_PREFIX = _STORAGE_PUBLIC_PREFIXES[0]
 
-setup_logging(settings.LOG_LEVEL)
+setup_logging(settings.LOG_LEVEL, service="api")
 logger = get_logger(__name__)
 
 #: 允许匿名访问的 API 路径前缀。**读写一视同仁。**

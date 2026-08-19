@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
@@ -11,15 +12,19 @@ import {
   Tag,
   Typography,
   App,
+  Collapse,
 } from 'antd'
 
-import { VISION_SYSTEM_PROMPT, promptsApi } from '../api/prompts'
+import { promptsApi } from '../api/prompts'
 import { isAuthError, readError } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 import type { PromptVersion } from '../api/types'
 import UnsavedGuard from '../components/UnsavedGuard'
 import { formatDateTime } from '../utils/datetime'
 import BrandTag from '../components/BrandTag'
+import ErrorNotice from '../components/ErrorNotice'
+import { runsQueryForVersion } from '../utils/aiTestRuns'
+import TextDiff from '../components/TextDiff'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { fontScale } from '../theme'
 import PageHeader from '../components/PageHeader'
@@ -27,24 +32,46 @@ import PageHeader from '../components/PageHeader'
 const { Paragraph, Text } = Typography
 
 /**
- * 系统提示词编辑页。
+ * 单个提示词的编辑页(`/prompts/:key`)。
  *
  * 全文开放编辑,不做内容拦截 —— 这是明确选择过的。但保存前会跑一遍体检,
  * 把结果显示出来:提示词和 JSON Schema 是同一份约束的两种表达,
  * 手滑删掉一个约束不会当场报错,只会让模型开始间歇性输出解析失败的结果,
  * 而界面上只显示「这张图评分失败」。查这种问题很费劲,提前一行提示成本几乎为零。
+ *
+ * ## 从「写死女装」改成「按 key」(FE-302)
+ *
+ * 这一页原来把 `vision_system_prompt` 写死在四个地方(读、体检、保存、切版本)。
+ * 后果不是不方便,是**男装那份提示词后端全通、前端一个入口都没有** —— 注册表里
+ * 那行 `ui_reachable=False` 就是为这个状态留的记录,而它的解锁条件写着「FE-301
+ * 落地」。key 来自路由之后,两份提示词走的是同一段代码,不存在"男装那条路径没人走过"。
+ *
+ * **`label` 从注册表拿,不在前端写一份键到中文名的映射。** 写一份的话,后端加
+ * 第 9 处提示词时前端会显示一个原始 key,而那正是 a52 收敛过的东西
+ * (「后端枚举不许直接摆在界面上」)。
  */
 export default function PromptsPage() {
-  useDocumentTitle('提示词')
+  const { key: routeKey } = useParams<{ key: string }>()
+  const promptKey = routeKey ?? ''
   const { message, modal } = App.useApp()
   const queryClient = useQueryClient()
+
+  // 列表接口顺带回答了"这个 key 叫什么中文名、能不能改"。它与详情共用
+  // react-query 缓存,从列表点进来时不会多发一次请求
+  const surfaces = useQuery({
+    queryKey: ['prompt-surfaces'],
+    queryFn: () => promptsApi.list(),
+    retry: (count, err) => !isAuthError(err) && count < 2,
+  })
+  const surface = surfaces.data?.surfaces.find((item) => item.key === promptKey)
+  useDocumentTitle(surface ? `提示词 · ${surface.label}` : '提示词')
   const [draft, setDraft] = useState<string | null>(null)
   const [note, setNote] = useState('')
   const [diffOpen, setDiffOpen] = useState(false)
 
   const query = useQuery({
-    queryKey: ['prompts', VISION_SYSTEM_PROMPT],
-    queryFn: () => promptsApi.read(VISION_SYSTEM_PROMPT),
+    queryKey: ['prompts', promptKey],
+    queryFn: () => promptsApi.read(promptKey),
     retry: (count, err) => !isAuthError(err) && count < 2,
   })
   const needsToken = query.isError && isAuthError(query.error)
@@ -75,12 +102,17 @@ export default function PromptsPage() {
 
   const preview = useQuery({
     queryKey: ['prompt-preview', checked],
-    queryFn: () => promptsApi.preview(VISION_SYSTEM_PROMPT, checked),
-    enabled: dirty && checked.length > 0,
+    queryFn: () => promptsApi.preview(promptKey, checked),
+    // 空内容也要送体检(FE-308)。上一版 `&& checked.length > 0` 是个 fail-open:
+    // 清空文本框 -> 不发请求 -> preview.data 是 undefined -> `?? []` -> 界面上
+    // 什么都不显示,保存按钮照常可点 —— 而 lint 对空串的第一条返回值恰恰是
+    // 「提示词是空的」。与本文件 124 行起那段注释批判的是同一个 bug:
+    // isError 那一支修好了,enabled 这一支漏了。
+    enabled: dirty,
   })
 
   const invalidate = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['prompts', VISION_SYSTEM_PROMPT] })
+    queryClient.invalidateQueries({ queryKey: ['prompts', promptKey] })
   }, [queryClient])
 
   /**
@@ -92,33 +124,60 @@ export default function PromptsPage() {
    */
   const onWriteError = useWriteError(invalidate)
 
+  /**
+   * 服务端**此刻**的生效版本,原样回传给写端点(FE-309)。
+   *
+   * `query.data.version` 为 null 表示内置默认生效中 —— 这一支必须能表达出来,
+   * 用 0 之类的哨兵值会让「回到默认」和「第 0 版」长得一样。
+   */
+  const seenVersion = query.data ? query.data.version : undefined
+  const [conflict, setConflict] = useState<unknown>(null)
+  const [rollbackNote, setRollbackNote] = useState('')
+
+  /** 409 单独接住:它不是"失败",是"有人在你之前动过"。 */
+  const onConflictOr = useCallback(
+    (fallback: (err: unknown) => void) => (err: unknown) => {
+      const detail = (err as { response?: { status?: number; data?: unknown } })?.response
+      if (detail?.status === 409) {
+        // 存**原始 error**,不先拍平成一句话 —— 拍平了请求编号与技术详情就没有
+        // 落点,而这正是 `<ErrorNotice>` 存在的理由(A12)。棘轮盯的也是这一点
+        setConflict(err)
+        invalidate()
+        return
+      }
+      fallback(err)
+    },
+    [invalidate],
+  )
+
   const save = useMutation({
-    mutationFn: () => promptsApi.save(VISION_SYSTEM_PROMPT, content, note),
+    mutationFn: () => promptsApi.save(promptKey, content, note, seenVersion),
     onSuccess: (data) => {
       message.success(`已保存为第 ${data.saved_version} 版并生效`)
       setDraft(null)
       setNote('')
       invalidate()
     },
-    onError: onWriteError,
+    onError: onConflictOr(onWriteError),
   })
 
   const activate = useMutation({
-    mutationFn: (version: number) => promptsApi.activate(VISION_SYSTEM_PROMPT, version),
+    mutationFn: (version: number) =>
+      promptsApi.activate(promptKey, version, rollbackNote, seenVersion),
     onSuccess: (data) => {
       message.success(`已切回第 ${data.version} 版`)
       invalidate()
     },
-    onError: onWriteError,
+    onError: onConflictOr(onWriteError),
   })
 
   const reset = useMutation({
-    mutationFn: () => promptsApi.reset(VISION_SYSTEM_PROMPT),
+    mutationFn: () => promptsApi.reset(promptKey, rollbackNote, seenVersion),
     onSuccess: () => {
       message.success('已回到内置默认提示词,历史版本仍然保留')
       invalidate()
     },
-    onError: onWriteError,
+    onError: onConflictOr(onWriteError),
   })
 
   /**
@@ -162,29 +221,117 @@ export default function PromptsPage() {
     },
     {
       title: '操作',
-      width: 100,
-      render: (_: unknown, row: PromptVersion) =>
-        row.is_active ? null : (
-          <Button
-            size="small"
-            loading={activate.isPending}
-            onClick={() =>
-              modal.confirm({
-                title: `切回第 ${row.version} 版?`,
-                content: '当前生效的版本不会被删除,随时可以再切回来。',
-                onOk: () => activate.mutateAsync(row.version),
-              })
-            }
-          >
-            切回这版
-          </Button>
-        ),
+      width: 180,
+      render: (_: unknown, row: PromptVersion) => (
+        <Space>
+          {/* 「想看一眼」和「想让它生效」在这之前是同一个动作:唯一能看到 v3
+              正文的办法是把它切成生效版,而那会立刻改掉线上每一张图的评分口径 */}
+          <Link to={`/prompts/${promptKey}/versions/${row.version}`}>查看</Link>
+          {/* FE-314 正向互链:这一版跑过哪些测试。
+              **口径在 a63 才定下来**(§3.96):评分链路落的是
+              `prompt_templates.version` 自增序号,文案落的是 `模型:哈希` ——
+              两类值形状不同,按 `prompt_version` 查必然对不上。这一页管的是
+              评分那两份,所以按 `prompt_template_version` 查。
+              `runsQueryForVersion` 判不出参数时返回 null,这里就不画入口 ——
+              一个点进去永远是空的链接,会被读成「这一版没跑过测试」 */}
+          {runsQueryForVersion(promptKey, row.version) && (
+            <Link
+              to={`/ai-tests?prompt_key=${promptKey}&prompt_template_version=${row.version}`}
+            >
+              跑过的测试
+            </Link>
+          )}
+          {!row.is_active && (
+            <Button
+              size="small"
+              loading={activate.isPending}
+              onClick={() =>
+                modal.confirm({
+                  title: `切回第 ${row.version} 版?`,
+                  content: (
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <span>当前生效的版本不会被删除,随时可以再切回来。</span>
+                      <Input
+                        placeholder="为什么退回这一版(保存有理由,回滚在此之前没有)"
+                        maxLength={500}
+                        onChange={(e) => setRollbackNote(e.target.value)}
+                      />
+                    </Space>
+                  ),
+                  onOk: () => activate.mutateAsync(row.version),
+                })
+              }
+            >
+              切回这版
+            </Button>
+          )}
+        </Space>
+      ),
     },
   ]
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-    <PageHeader title="提示词" subtitle="生成与评分用的提示词模板,改动会落新版本" />
+      <PageHeader
+        title={surface ? surface.label : '提示词'}
+        subtitle="改动会落一个新版本,旧版本永远保留"
+      />
+      <Link to="/prompts">← 回到提示词列表</Link>
+
+      {/* 路由上的 key 不在注册表里(手敲地址、或后端删了一处)。
+          不显示一个空编辑框 —— 空框看起来像"这份提示词是空的",
+          而它实际是"这份提示词不存在" */}
+      {/* 这条查询失败时**不能静默**:失败 -> surfaces.data 是 undefined ->
+          上面那句 `surfaces.data && !surface` 不成立 -> 界面什么都不说,
+          而页头会显示"提示词"而不是这份提示词的名字。与本页 124 行起批判的
+          fail-open 是同一个形状 */}
+      {surfaces.isError && !isAuthError(surfaces.error) && (
+        <ErrorNotice
+          title="拉不到提示词清单,页头与可编辑性可能显示不全"
+          type="warning"
+          error={surfaces.error}
+          onRetry={() => surfaces.refetch()}
+          retrying={surfaces.isFetching}
+        />
+      )}
+      {surfaces.data && !surface && (
+        <Alert
+          type="error"
+          showIcon
+          message={`没有名为 ${promptKey} 的提示词`}
+          description="它可能已经被移除,或者地址敲错了。回到列表看看现在有哪些。"
+        />
+      )}
+      {/* 409 不是"失败",是"有人在你之前动过"。所以它不走 ErrorNotice 那条
+          「重试」话术 —— 重试正是这里最不该做的事:它会覆盖对方 */}
+      {conflict != null && (
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          {/* **不给 `onRetry`。** 409 不是"失败",是"有人在你之前动过" ——
+              而重试正是这里最不该做的事:它会覆盖对方。`<ErrorNotice>` 只在
+              给了 onRetry 时才画重试按钮,所以这里靠不给来表达 */}
+          <ErrorNotice
+            type="warning"
+            title="这条提示词在你编辑期间被别人改过"
+            error={conflict}
+            kind="write"
+          />
+          <Text type="secondary">
+            下面的编辑框里仍然是<b>你写的那一版</b>,没有被覆盖。版本表已经刷新到最新,
+            先点「查看」看看对方改了什么,再决定要不要按你的版本再存一次。
+          </Text>
+          <Button size="small" onClick={() => setConflict(null)}>
+            我知道了
+          </Button>
+        </Space>
+      )}
+      {surface && !surface.editable && (
+        <Alert
+          type="warning"
+          showIcon
+          message="这处提示词的正文由代码拼装,存进库里不会生效"
+          description="所以这里不提供保存入口。要改它,改代码。"
+        />
+      )}
       <UnsavedGuard dirty={dirty} what="提示词" />
       <Alert
         type="info"
@@ -209,12 +356,40 @@ export default function PromptsPage() {
         <Alert
           type="warning"
           showIcon
-          message="需要口令才能查看提示词"
-          description="在「设置」页顶部填入后端 ADMIN_TOKEN 里的口令并点「记住」。"
+          message="需要管理员身份才能查看提示词"
+          description="请登录管理员账号。旧版「在设置页填口令」的入口已随 localStorage 口令链一起移除(api/client.ts 382 行是现行口径),这里不再指路到一个不存在的输入框。"
         />
       )}
       {query.isError && !needsToken && (
         <Alert type="error" showIcon message="读取失败" description={readError(query.error)} />
+      )}
+
+      {/* FE-305:防注入段。它在编辑框**上方**而不是里面 —— 这一段是代码拼进
+          默认提示词的,运营改了正文之后它可能已经不在编辑框里了,而
+          `lint_prompt` 的 `no_anti_injection` 会在保存前告警。
+          把它单独摆出来,是为了让「我删了什么」这件事在告警响之前就看得见 */}
+      {query.data?.anti_injection_block && (
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'anti-injection',
+              label: '防注入段(这段来自代码,删掉会告警)',
+              children: (
+                <Input.TextArea
+                  value={query.data.anti_injection_block}
+                  readOnly
+                  autoSize={{ minRows: 4, maxRows: 14 }}
+                  spellCheck={false}
+                  style={{
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    fontSize: fontScale.body,
+                  }}
+                />
+              ),
+            },
+          ]}
+        />
       )}
 
       <Card
@@ -239,7 +414,18 @@ export default function PromptsPage() {
               onClick={() =>
                 modal.confirm({
                   title: '回到内置默认提示词?',
-                  content: '历史版本仍然保留,之后可以再切回任意一版。',
+                  // 三个动作里它破坏性最强(一次把所有版本停用),
+                  // 而在 FE-310 之前它是唯一不必解释自己的
+                  content: (
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <span>历史版本仍然保留,之后可以再切回任意一版。</span>
+                      <Input
+                        placeholder="为什么退回内置默认(会记进审计,三个月后这是唯一的线索)"
+                        maxLength={500}
+                        onChange={(e) => setRollbackNote(e.target.value)}
+                      />
+                    </Space>
+                  ),
                   onOk: () => reset.mutateAsync(),
                 })
               }
@@ -313,6 +499,23 @@ export default function PromptsPage() {
       </Card>
 
       <Card title="版本历史" loading={query.isLoading}>
+        {/* 内置默认在版本表里原本没有位置:它不是一行记录,而"当前生效的是它"
+            却是版本表最该回答的事。钉一行虚拟的(FE-306),`version` 用 0 只作
+            React key —— 它不会被传给任何接口,后端的 `expected_version`
+            走 `query.data.version`(null),两者不混用 */}
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Space>
+            <Text strong>内置默认</Text>
+            {query.data?.is_default ? (
+              <BrandTag tone="success">生效中</BrandTag>
+            ) : (
+              <Text type="secondary">未生效(库里有版本正生效)</Text>
+            )}
+            <Button size="small" onClick={() => setDiffOpen(true)}>
+              与当前编辑中的内容对比
+            </Button>
+          </Space>
+        </Space>
         {query.data?.versions.length ? (
           <Table
             rowKey="version"
@@ -346,14 +549,18 @@ export default function PromptsPage() {
             </Button>
           </Space>
         }
-        title="内置默认提示词"
-        width={900}
+        title="内置默认 对 当前编辑中的内容"
+        width={1000}
       >
-        <Input.TextArea
-          value={query.data?.default_content ?? ''}
-          readOnly
-          autoSize={{ minRows: 16, maxRows: 30 }}
-          style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: fontScale.body }}
+        {/* 这个状态从第一版起就叫 `diffOpen`,而里面只有一个只读 textarea ——
+            **没有任何对比**。名字先承认了这件事(FE-307)。
+            右边取的是编辑框里的内容而不是已保存的版本:运营点开它,想知道的是
+            "我现在写的这段和内置默认差在哪",不是"上一次保存的和默认差在哪" */}
+        <TextDiff
+          left={query.data?.default_content ?? ''}
+          right={content}
+          leftLabel="内置默认"
+          rightLabel="当前编辑中"
         />
       </Modal>
     </Space>

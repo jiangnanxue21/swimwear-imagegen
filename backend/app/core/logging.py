@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import sys
 from contextvars import ContextVar
@@ -11,6 +12,23 @@ from contextvars import ContextVar
 from app.core.log_events import resolve_domain
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+#: 这个进程是谁。`setup_logging(service=...)` 设一次,formatter 每条读一次。
+#:
+#: ## 为什么必须有这个字段(a55 加)
+#:
+#: API、Celery worker、beat 全部 LPUSH 进同一个 `ops:log_ring` 键,而
+#: `build_payload` 产出的顶层字段里没有任何一个能区分它们。于是运行日志页上
+#: 「`gen` 域为什么是空的」这个问题**答不出来** —— 是没跑任务,还是 worker
+#: 挂了?这两件事的下一步完全相反。
+#:
+#: a54 修的是「worker 的日志一条都没进过环形」;修完之后的新问题是
+#: 「进来了但认不出是谁」,而排障的第一个问题恰恰是「哪个进程」。
+#:
+#: `seq` 里本来就有 pid(`f"{os.getpid():x}-{n}"`),但它没被解析、没暴露成
+#: 可读字段、更不能筛 —— 一个只有写日志的人看得懂的编码不算答案。
+_service_name: str = "api"
+_process_id: int = os.getpid()
 
 #: 命中这些片段的键名,其值在日志中一律替换为 ***
 _SECRET_KEY_PATTERN = re.compile(
@@ -86,6 +104,11 @@ class JsonFormatter(logging.Formatter):
             "domain": resolve_domain(event, record.name),
             "message": record.getMessage(),
             "request_id": request_id_var.get(),
+            # 进程身份。**归档面也带**(这是本轮唯一一处动 stdout 的地方,
+            # 而它是加字段不是改字段):采集端把 api 与 worker 的日志收进
+            # 同一个索引时,同样需要这一列才分得开。
+            "service": _service_name,
+            "pid": _process_id,
         }
         if event:
             payload["event"] = event
@@ -123,7 +146,7 @@ class ContextLoggerAdapter(logging.LoggerAdapter):
         return msg, kwargs
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: str = "INFO", *, service: str = "api") -> None:
     # 日志流必须是 UTF-8,而且必须 errors="replace"。
     #
     # `JsonFormatter` 用 `ensure_ascii=False`,也就是中文原样写进流里。开发机
@@ -135,6 +158,13 @@ def setup_logging(level: str = "INFO") -> None:
     # 优先用 reconfigure(3.7+,不换对象、不影响别处已持有的 sys.stdout 引用);
     # 拿不到就退回包一层 TextIOWrapper。两条路都失败就用裸 stdout ——
     # 日志编码不对是缺陷,起不来是事故,这里不赌。
+    # 进程身份先定下来 —— 它要被下面挂上去的两个 handler 共用,而
+    # `_attach_ring_handler` 里那条"当前访问日志模式"的自述日志本身
+    # 就需要它。
+    global _service_name, _process_id  # noqa: PLW0603 - 进程级单例,见字段文档
+    _service_name = (service or "api").strip() or "api"
+    _process_id = os.getpid()
+
     stream = sys.stdout
     try:
         stream.reconfigure(encoding="utf-8", errors="replace")
@@ -176,18 +206,77 @@ def _attach_ring_handler(root: logging.Logger) -> None:
 
         if not settings.OPS_LOG_RING_ENABLED:
             return
-        from app.core.log_ring import RingHandler, SelfTrafficFilter
+        from app.core.log_ring import AccessNoiseFilter, RingHandler
 
         ring = RingHandler(url=settings.REDIS_URL, cap=settings.OPS_LOG_RING_CAP)
         ring.setFormatter(JsonFormatter())
-        # 控制台自己的访问日志不进环形。挂在 handler 上而不是 logger 上:
+        # 访问噪音不进环形。挂在 handler 上而不是 logger 上:
         # stdout 那一份必须原样保留(归档面一个字节没动),被挡掉的只有
-        # "诊断窗口里的自指部分"。理由全文见 SelfTrafficFilter。
-        ring.addFilter(SelfTrafficFilter(f"{settings.API_PREFIX}/ops/"))
+        # "诊断窗口里没有诊断价值的那部分"。理由全文见 AccessNoiseFilter。
+        mode = settings.OPS_LOG_RING_ACCESS
+        ring.addFilter(AccessNoiseFilter(f"{settings.API_PREFIX}/ops/", mode=mode))
         root.addHandler(ring)
+        # **当前模式必须留一条痕。** 少了它,一个"http 域怎么这么空"的问题
+        # 只能靠去读 `.env` 才答得出,而读 `.env` 的前提是先想到这里有个旋钮。
+        # 这条日志自己是 `ops` 域的,不会被自己挡掉。
+        logging.getLogger("app.core.logging").info(
+            "ops log ring access mode resolved",
+            extra={
+                "extra_fields": {
+                    "event": "ops.log_ring_access_filtered",
+                    "access_mode": mode,
+                    "cap": settings.OPS_LOG_RING_CAP,
+                }
+            },
+        )
     except Exception:  # noqa: BLE001 - 见 docstring 最后一段
         return
 
 
 def get_logger(name: str) -> logging.LoggerAdapter:
     return ContextLoggerAdapter(logging.getLogger(name), {})
+
+
+def log(
+    logger: logging.Logger | logging.LoggerAdapter,
+    level: str,
+    message: str,
+    *,
+    event: str | None = None,
+    exc_info: bool = False,
+    **fields: object,
+) -> None:
+    """写一条结构化日志。**把 `extra={"extra_fields": {...}}` 那层包裹收进来。**
+
+    ## 为什么值得加这个函数(a55)
+
+    调用点的正确写法是双层包裹:
+
+        logger.warning("...", extra={"extra_fields": {"event": "...", "key": ...}})
+
+    少写 `extra_fields` 那一层,`JsonFormatter` 就看不见这些字段 ——
+    `logging` 会把它们挂到 record 上,然后**没有任何人去看**。不报错、
+    不提示,那条日志只是比作者以为的少了一半,而作者是在出事时才会去读它的。
+
+    a54 抓到 **14 处**这么写的。最贵的一条是
+    `batch.billed_result_unknown_refusing_paid_retry`(已计费但结果未知,
+    拒绝付费重试):它记的 `key` / `action` / `status` 一个都没落地,于是
+    "到底是哪一件被拒了"在日志里查不到答案。
+
+    修法当时是加一条 AST 守卫。**守卫留着,但守卫挡的是"已经写错了",
+    这个函数挡的是"写得出错"。** 两者不冲突,后者更早。
+
+    ## 本轮不迁移任何现有调用点
+
+    217 处的机械改动会把这一轮的 diff 淹掉,而收益是逐步的:新写的调用点
+    用它,老的等各自模块下次被碰到时顺手换。守卫两边都认。
+    """
+    payload: dict[str, object] = dict(fields)
+    if event:
+        payload["event"] = event
+    logger.log(
+        logging.getLevelName(level.upper()) if isinstance(level, str) else level,
+        message,
+        exc_info=exc_info,
+        extra={"extra_fields": payload},
+    )

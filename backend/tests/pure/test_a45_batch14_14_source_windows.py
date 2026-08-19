@@ -27,6 +27,7 @@ from __future__ import annotations
 import sys
 
 from tests.pure._helpers import (
+    offline_gate_targets,
     BACKEND_ROOT,
     braced_block,
     expect_raises,
@@ -287,12 +288,14 @@ def test_the_new_gate_is_registered_in_all_three_places():
     makefile = (PROJECT / "Makefile").read_text(encoding="utf-8")
     assert "audit-guards:" in makefile, "Makefile 里没有这个目标"
     assert "audit_source_guards.py" in makefile
-    # 地标要挑真的唯一的那一段:`check-offline:` 与 `check-offline: test-pure`
-    # 在 Makefile 里**都出现两次** —— 第二处是一句引用旧写法的注释。
-    # 写这条守卫的时候连着被 `window()` 挡回来两次,而挡回来的正是
-    # 「注释抢先命中」这个形状本身(和 14-13 那条 `),` 一模一样)。
-    assert "audit-guards" in only_line(
-        makefile, "check-offline: test-pure verify-delivery", what="check-offline"
+    # 依赖项集合由 `_helpers.offline_gate_targets` 现算。
+    #
+    # 这一条断过两次,病因一样:地标锚在**当时的清单**上(第一版编进前六项;
+    # a61 的修法是"再往右多带一项",而那一项也是清单成员)。a64 把清单拆成
+    # 一项一行,并把"读清单"这件事收敛到一处 —— **锚在会变的东西上时,
+    # 修法不能是换一段同样会变的东西。**
+    assert "audit-guards" in offline_gate_targets(
+        makefile
     ), "check-offline 不跑它 —— 本地跑门禁的人看不到这一条"
 
     ci = (PROJECT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

@@ -307,8 +307,61 @@ for (const [label, root] of ROOTS) {
   }
 }
 
-const failures = parseErrors + deadImports + brokenImports
-console.log(`\n${checked - failures}/${checked} files clean  (语法 + 死 import + 断 import)`)
+// ---------------------------------------------------------------- 四  调色板 token
+//
+// a61 新增。`brandVars` 是 `Object.fromEntries(...)` 出来的
+// `Record<BrandToken, string>` —— **取一个不存在的键得到 `undefined`,而 CSS
+// 收到 undefined 只是不上色**。类型上 TS 会拦(键是 `keyof typeof lightTokens`),
+// 但这台机器跑不了 typecheck,而 a60 当轮就写出过 `brandVars.successBg` /
+// `brandVars.dangerSoft` 两个不存在的键 —— 它们不报错、不变红,只是那一格
+// 没有背景色,而"这里本来该有颜色"没有人记得。
+//
+// 判据是 `theme.ts` 里 `lightTokens` 的键。那份表是唯一事实来源
+// (`brandVars` 与暗色表都从它派生),所以这里读它而不是维护第二份清单。
+function paletteTokens(themeSource) {
+  const start = themeSource.indexOf('const lightTokens')
+  if (start < 0) return null
+  const block = themeSource.slice(start)
+  const end = block.indexOf('\n}')
+  if (end < 0) return null
+  return new Set(
+    [...block.slice(0, end).matchAll(/^ {2}([a-zA-Z]+):/gm)].map((m) => m[1]),
+  )
+}
+
+let badTokens = 0
+{
+  const themePath = join(SRC_ROOT, 'theme.ts')
+  const tokens = paletteTokens(readFileSync(themePath, 'utf-8'))
+  if (tokens === null || tokens.size === 0) {
+    // 读不出来就**红**,不是静静跳过 —— 静静跳过等于这一格自己变成一句空话
+    console.log('  BROKEN src/theme.ts 解析不出 lightTokens,调色板检查失去了判据')
+    badTokens += 1
+  } else {
+    const allFiles = ROOTS.flatMap(([, root]) =>
+      walk(root).filter((f) => EXTS.has(extname(f))),
+    )
+    for (const file of allFiles) {
+      const rel = file.slice(file.indexOf(`${sep}frontend${sep}`) + 10) || file
+      if (rel.endsWith('theme.ts')) continue
+      const text = readFileSync(file, 'utf-8')
+      for (const m of text.matchAll(/brandVars\.([a-zA-Z]+)/g)) {
+        if (!tokens.has(m[1])) {
+          const line = text.slice(0, m.index).split('\n').length
+          console.log(
+            `  TOKEN ${rel}:${line} brandVars.${m[1]} 不在调色板里 —— 取到 undefined,那一格不会上色`,
+          )
+          badTokens += 1
+        }
+      }
+    }
+  }
+}
+
+const failures = parseErrors + deadImports + brokenImports + badTokens
+console.log(
+  `\n${checked - failures}/${checked} files clean  (语法 + 死 import + 断 import + 调色板 token)`,
+)
 if (deadImports > 0) {
   console.log(
     `\n死 import ${deadImports} 处。tsconfig 开着 noUnusedLocals,` +
@@ -319,6 +372,12 @@ if (brokenImports > 0) {
   console.log(
     `\n断 import ${brokenImports} 处。这一类 typecheck 一样会红,` +
       '而它多半意味着某处改名/删除漏了调用点 —— 先去看那个模块最近改了什么。',
+  )
+}
+if (badTokens > 0) {
+  console.log(
+    `\n调色板 token ${badTokens} 处。这一类**运行时完全静默** —— ` +
+      'undefined 传给 CSS 只是不上色,而"这里本来该有颜色"没有人记得。',
   )
 }
 process.exit(failures ? 1 : 0)

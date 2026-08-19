@@ -60,7 +60,7 @@ def _ensure_spu(client) -> None:
 
     A45-batch14-26 关掉了 §4.2 那条 NULL 兼容缝:`product_service.create_product`
     现在**解析** `spu` 字符串 —— 查 `spus` 表,查不到就 422
-    (「SPU xx 不存在:请先用 POST /spus 建档,再往下挂 SKU」)。
+    (「款号 xx 还没有建过:请先在款式列表里新建这个款…」)。
     在那之前这个函数从不写 `spu_id`,于是走 `POST /api/products` 建出来的商品
     不属于任何 SPU、`audience` 可空,绕过了「受众必填」。
 

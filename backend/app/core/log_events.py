@@ -56,6 +56,7 @@ formatter 在任何异常处理路径上都会跑,多一条跨层导入就多一
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 # ============================================================ 域
 
@@ -284,6 +285,12 @@ EVENTS: dict[str, LogEvent] = dict(
         _e("eval.prompt_fallback", "回落到内置评分提示词"),
         _e("eval.reference_images_truncated", "参考图超限已截断"),
         _e("eval.mock_fallback", "评分器不可用,回落 Mock"),
+        # AI 测试留档(PRD §12.5)。归 eval 而不是 settings:运营查它的
+        # 场景是「这次测试跑出了什么」,而不是「谁改了设置」。
+        # 文案测试也走这两个码 —— 域按**业务领域**分,不按哪条链路产生的
+        _e("eval.ai_test_recorded", "AI 测试已留档"),
+
+        _e("eval.ai_test_record_failed", "AI 测试留档失败"),
         _e("eval.unusable", "评分器不可用且不允许回落"),
         _e("eval.test_connection_failed", "评分连通性自检异常"),
         _e("eval.outputs_rebuilt", "换图后已重出成品"),
@@ -377,6 +384,11 @@ EVENTS: dict[str, LogEvent] = dict(
         _e("settings.prompt_activated", "提示词已启用"),
         _e("settings.prompt_reset", "提示词已恢复默认"),
         _e("settings.prompt_version_collision", "提示词版本号相撞,重试", "idempotent"),
+        # FE-309 / FE-310(a60)。两条都不是"失败":前者是有人在你之前动过,
+        # 后者是一次带理由的退回 —— 而运营查"上周谁把口径改回去了"时,
+        # 靠的正是能按事件码筛出这一条
+        _e("settings.prompt_save_conflict", "提示词保存版本冲突"),
+        _e("settings.prompt_rolled_back", "提示词已回滚"),
         _e("settings.key_generated", "生成了设置加密密钥文件"),
         _e("settings.key_migrated", "密钥已迁出对外目录"),
         _e("settings.legacy_key_readable", "旧密钥文件仍可被下载"),
@@ -392,10 +404,18 @@ EVENTS: dict[str, LogEvent] = dict(
         _e("ops.stale_draft_refresh_failed", "过期草稿刷新失败"),
         _e("ops.stale_draft_refresh_pass_failed", "草稿刷新巡检异常"),
         _e("ops.dispatch_relay_failed", "补投巡检异常"),
+        # 留档清理(a62)。归 ops 而不是 eval:运营查它的场景是
+        # 「这张表为什么这么大」,那是运维视角 —— 与 spend 归 ops 同一条判据
+        _e("ops.ai_test_purge_pass", "AI 测试留档清理巡检"),
+        _e("ops.ai_test_purge_failed", "AI 测试留档清理失败"),
         _e("ops.stalled_task_reaper_failed", "搁浅任务回收异常"),
         _e("ops.backfill_progress", "回填进度"),
         _e("ops.backfill_skipped_orphan", "回填跳过一条孤儿记录"),
         _e("ops.requeue_failed", "重新入队失败"),
+        # 启动时一条,记下这个进程的诊断窗口收不收 2xx/3xx 访问日志。
+        # 少了它,"http 域怎么这么空"只能靠去读 `.env` 才答得出 ——
+        # 而读 `.env` 的前提是先想到这里有个旋钮。
+        _e("ops.log_ring_access_filtered", "访问日志进环形的模式"),
     )
 )
 
@@ -411,6 +431,7 @@ EVENTS: dict[str, LogEvent] = dict(
 #: **新模块不进这张表就红**(守卫二)。这条是"查看器里永远不出现未分类"
 #: 的全部保障:少一行不会报错,只会让那个模块的日志静静地落进兜底域。
 LOGGER_DOMAIN_FALLBACK: tuple[tuple[str, str], ...] = (
+    ("app.prompts", "settings"),  # 提示词注册表与版本机制(PRD §11.2 v2.0)
     # app.main 同时产出访问日志(http)与启动/停止(app)。兜底给 `app`,
     # 访问日志那三个调用点自己写了 `event="http.request_completed"` ——
     # **event 优先于 logger**,这正是它要解决的形状:一个模块两个域。
@@ -432,6 +453,7 @@ LOGGER_DOMAIN_FALLBACK: tuple[tuple[str, str], ...] = (
     ("app.scripts", "ops"),
     ("app.services.cleanup_service", "ops"),
     ("app.services.dispatch_service", "gen"),
+    ("app.services.ai_test_archive", "eval"),
     ("app.services.evaluation_service", "eval"),
     ("app.services.generation_service", "gen"),
     ("app.services.output_service", "output"),
@@ -522,6 +544,47 @@ def level_at_least(level: str | None, minimum: str | None) -> bool:
     return level_rank(level) >= level_rank(minimum)
 
 
+def normalize_level(name: str | None) -> str | None:
+    """把**筛选条件**里的级别名规整成注册档位。空返回 None(不筛),打错抛 ValueError。
+
+    与 `level_rank` 的未知兜底是两回事,方向相反,不许混用:那条兜底服务的
+    是**日志行自己的级别** —— 第三方 logger 会写自定义级别名,按 INFO 算是
+    合理的容错;筛选条件走同一条兜底的话,`level=WARN` 静默变成 rank 20,
+    等于"不筛",整窗全回来,而打错的人以为自己看的是 WARNING 以上。
+
+    CLI 对 `--domain` 与 `--event` 早就写明了口径:打错一个名字不该表现成
+    "这段时间没有日志" —— 它的反面同样成立:也不该表现成"全都是日志"。
+    API 与 CLI 的级别校验都调这一份。
+    """
+    if name is None or not str(name).strip():
+        return None
+    upper = str(name).strip().upper()
+    if upper not in LEVEL_ORDER:
+        ordered = "/".join(sorted(LEVEL_ORDER, key=LEVEL_ORDER.__getitem__))
+        raise ValueError(f"未知的级别:{name!r};可用(不分大小写):{ordered}")
+    return upper
+
+
+def seq_sort_key(seq: object) -> tuple[str, int]:
+    """``seq`` 的排序键。**数值序,不是字符串序。**
+
+    `seq` 形如 ``{pid:x}-{n}``,n 是进程内单调计数。日志的 ts 只有秒级精度
+    (`_TS_FORMAT` 里没有毫秒),同一秒内的先后**全靠它** —— 而字符串比较里
+    ``"10" < "7"``,同一进程一秒内发第 7~10 条时展示顺序会倒置,链路模式的
+    横幅上正写着「按时间顺读」。`RingHandler` 的文档说 seq 管"同一毫秒内的
+    稳定排序",而 ts 根本没有毫秒:这个键要扛的其实是整整一秒。
+
+    解析不出来的(空、没有 ``-``、计数不是数字)排在同秒最前(计数 -1),
+    并保留原文本作次序键 —— 不猜、不炸,与 `parse_ts` 同一个姿势。
+    """
+    text = str(seq or "")
+    proc, _, counter = text.rpartition("-")
+    try:
+        return (proc, int(counter))
+    except (TypeError, ValueError):
+        return (text, -1)
+
+
 def folds_away(event: str | None, level: str | None) -> bool:
     """这条日志在流视角里能不能折进计数条。
 
@@ -530,6 +593,60 @@ def folds_away(event: str | None, level: str | None) -> bool:
     日志"是一条业务规则,规则有两份就等于没有。
     """
     return is_routine(event) and level_rank(level) < NEVER_FOLD_FROM
+
+
+#: `JsonFormatter` 写出来的时间格式(`%Y-%m-%dT%H:%M:%S%z`)。
+#: 解析放在这里而不是各自的调用点,和 `level_at_least` 同一个理由 ——
+#: 「什么算一条日志的时间」有两份实现就等于没有。
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+
+
+def parse_ts(value: str | None) -> datetime | None:
+    """一条日志的时间。解析不出来返回 None,**不猜、不抛**。
+
+    ## 为什么需要它(a55)
+
+    环形是多个进程 LPUSH 进同一个键的,列表顺序 = **到达顺序**,不是
+    时间顺序:worker 与 API 各自 fire-and-forget 写入(0.2 秒超时),
+    排队与网络抖动都会打乱先后。而链路模式的横幅上写着
+    「按时间顺读,旧在上」—— 一条 API 领取、worker 执行、API 回写的任务链路,
+    展示顺序可能是错的,**而界面正在向你保证它是对的**。
+
+    解析失败的返回 None 而不是一个兜底时间:兜底会让那条日志安静地
+    落在某个位置上,而"它到底该排哪"恰恰是答不出来的。调用方把它们
+    单独标出来 —— 不静默丢,也不假装它在某个位置。
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, _TS_FORMAT)  # `%z` 匹配到才成功,恒为 aware
+    except (TypeError, ValueError):
+        pass
+    # 容一手 ISO 8601 的其他写法(第三方 handler 偶尔会写别的格式)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        # `astimezone()` 对极端时间(平台 time_t 范围之外)可能抛 OSError/
+        # OverflowError —— 契约是"不猜、不抛",所以补不上时区就当解析失败:
+        # 返回 None 的意思正是"不知道它在哪段时间里"。
+        # **返回值永远带时区。** 上一版这条兜底路径把无时区输入原样返回
+        # naive,而调用方拿它和主格式解析出的 aware 做比较与排序 —— Python
+        # 对 naive×aware 直接抛 TypeError:`?since=2026-08-18T09:30:00`
+        # 让 `/ops/logs` 整个 500;第三方 handler 往环形写一条无时区 ts,
+        # **整页挂掉**。也就是说"容一手第三方写法"的那条路径,恰恰是让
+        # 调用方崩溃的路径 —— 容忍的姿势自己成了事故源。
+        #
+        # 无时区按**本机时区**解释,不按 UTC、也不拒绝:写入端 `formatTime`
+        # 用的就是本机墙上钟,在 URL 里手打 `since` 不带时区的人指的也是它;
+        # 按 UTC 解释会让东八区的查询悄悄偏 8 小时 —— 偏了没人报错,
+        # 而 500 至少会被看见,这里两个都不要。
+        try:
+            parsed = parsed.astimezone()
+        except (OSError, OverflowError, ValueError):
+            return None
+    return parsed
 
 
 def routine_group_of(event: str | None) -> str | None:

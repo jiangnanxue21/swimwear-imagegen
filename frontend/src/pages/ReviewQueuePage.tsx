@@ -336,6 +336,13 @@ export default function ReviewQueuePage() {
           <Alert type="error" showIcon message="读不到审核队列" description={readError(query.error)} />
         ) : (
           <Table<Review>
+            /* A69:八个定宽列合计 950px,加"商品"列(无定宽,SKU + 款名 + 颜色
+               三段挤在一起,给它 220 才读得下)= 1170。窄屏上不给 scroll 的话
+               antd 会压缩列宽让文字折行 —— 而运营在这一页只做一件事:照着
+               "硬错误"和"最佳候选"两列按 A 或 R。折了行的表读起来比横向滚
+               更慢,也更容易看错行。
+               口径同 WorkbenchListPage:按实际列宽算,不拍一个整数 */
+            scroll={{ x: 1170 }}
             rowKey="id"
             size="small"
             bordered

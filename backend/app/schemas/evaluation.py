@@ -66,7 +66,8 @@ class EvaluationAttemptOut(BaseModel):
     response_id: str | None
     http_status: int | None
     finish_reason: str | None
-    prompt_version: int | None
+    #: 迁移 0055 起是字符串(BE-307)。前端只透传不做算术,见 types.ts 同名字段
+    prompt_version: str | None
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None

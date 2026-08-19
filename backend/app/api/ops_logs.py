@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -48,6 +49,9 @@ from app.core.log_events import (
     folds_away,
     label_of,
     level_at_least,
+    normalize_level,
+    parse_ts,
+    seq_sort_key,
     resolve_domain,
     routine_group_of,
 )
@@ -63,23 +67,37 @@ MAX_LIMIT = 1000
 _PROMOTED = {"ts", "level", "logger", "domain", "event", "message", "request_id", "seq"}
 
 
-def _shape(row: dict[str, Any], *, raw: str | None = None) -> dict[str, Any]:
+def _shape(row: dict[str, Any]) -> dict[str, Any]:
     """一条日志给前端的形状。**判定全在这里,前端只展示。**
 
     `raw` 是这条记录在 stdout 上逐字的样子。它存在是一次态度表达:
     分类法是索引,不是转述 —— 控制台把事件码和中文标签摆在前面是为了让人
     快速定位,一旦定位到了,原文必须零成本可得,否则这套分类就变成了一层遮挡。
+
+    ## 这次 `json.dumps` 现在只对入选的 `limit` 条做(a55)
+
+    上一版调用方在循环里无条件 dumps 全窗 5000 条,因为 `q` 匹配需要一行原文。
+    现在原文由 `read_ring` 一路带下来(它本来就在手上),`q` 直接匹配那一行;
+    这里这次 dumps 只为**剥掉 `seq`** —— stdout 上没有那个键,而这一块的
+    承诺是"stdout 上逐字的样子"。
     """
     event = row.get("event")
     domain = row.get("domain") or resolve_domain(event, row.get("logger"))
     fields = {k: v for k, v in row.items() if k not in _PROMOTED}
-    if raw is None:
-        raw = json.dumps({k: v for k, v in row.items() if k != "seq"}, ensure_ascii=False)
+    raw = json.dumps({k: v for k, v in row.items() if k != "seq"}, ensure_ascii=False)
     return {
         "seq": row.get("seq"),
         "ts": row.get("ts"),
+        # 时间戳解析不出来的行不许被静默安放:它排在末尾,并且**说出来**。
+        # 兜底一个时间会让它安静地落在某个位置上,而"它到底该排哪"
+        # 恰恰是答不出来的那件事。
+        "ts_unparsed": parse_ts(row.get("ts")) is None,
         "level": row.get("level"),
         "logger": row.get("logger"),
+        # 哪个进程写的。API / worker / beat / script 全部 LPUSH 进同一个键,
+        # 在此之前没有任何顶层字段区分它们(`seq` 里藏着 pid,但那是给去重用的)。
+        "service": row.get("service"),
+        "pid": row.get("pid"),
         "domain": domain,
         "domain_label": DOMAINS.get(domain, domain),
         "event": event,
@@ -107,22 +125,36 @@ def _matches(
     domain: str | None,
     event: str | None,
     level: str | None,
+    service: str | None,
     request_id: str | None,
     task_id: str | None,
     needle: str,
     raw: str,
+    since: datetime | None,
+    until: datetime | None,
+    stamp: datetime | None,
 ) -> bool:
     """一条**未成形**的记录过不过筛。
 
-    ## 为什么筛在 `_shape` 之前(a54 改)
+    ## 筛在 `_shape` 之前,而且这次真的省下了那笔开销(a55 改)
 
-    上一版是先 `_shape()` 再筛,而 `_shape` 里有一次 `json.dumps` 生成 `raw`。
-    也就是说:无论 `limit` 是多少,每次请求都要对**全窗 5000 条**做一遍
-    loads + dumps,而跟随模式是 3 秒一拍。一个开着的标签页 ≈ 每秒
-    1.7MB 的编解码,全部花在最终会被丢掉的行上。
+    a54 已经把 `_shape()` 挪到了筛选后面,并加了一条守卫。但那条守卫断言的是
+    **`_matches` 的调用行号小于 `_shape` 的** —— 形状对了,而真正贵的那次
+    `json.dumps` 还留在调用方的循环里,无条件对全窗 5000 条各做一遍,
+    因为 `q` 匹配需要一行原文。**守卫一直是绿的,开销一次没降。**
 
-    现在先在原始 dict 上判,只有入选的那 `limit` 条才成形。`q` 直接匹配
-    LRANGE 拿回来的那一行原文 —— 它和 `_shape` 产出的 `raw` 只差一个 `seq` 键。
+    现在 `raw` 由 `read_ring` 从 LRANGE 一路带下来(它本来就在手上,
+    上一版 `json.loads` 完就丢了),`q` 直接匹配那一行。这正是上一版
+    这段文档字符串已经写着、而代码没有做到的事。
+
+    `raw` 与 `_shape` 产出的 `raw` 只差一个 `seq` 键 —— 拿它做子串匹配,
+    差别是搜一串十六进制时可能多命中 `seq`,代价可以忽略。
+
+    ## 时间窗
+
+    `stamp` 由调用方解析好传进来,不在这里解析:命中的行随后还要按它排序,
+    解析两遍是白费;而解析不出来的行**不被时间窗挡掉** —— 挡掉等于说
+    "它不在这段时间里",而真相是"不知道它在哪段时间里"。
     """
     event_of_row = row.get("event")
     if domain and (row.get("domain") or resolve_domain(event_of_row, row.get("logger"))) != domain:
@@ -131,13 +163,38 @@ def _matches(
         return False
     if not level_at_least(row.get("level"), level):
         return False
+    if service and str(row.get("service") or "") != service:
+        return False
     if request_id and row.get("request_id") != request_id:
         return False
     if task_id and str(row.get("task_id") or "") != task_id:
         return False
+    if stamp is not None:
+        if since is not None and stamp < since:
+            return False
+        if until is not None and stamp > until:
+            return False
     if needle and needle not in raw.lower():
         return False
     return True
+
+
+def _parse_bound(value: str | None, name: str) -> datetime | None:
+    """时间窗的一端。**解析不出来就 400,不当没填。**
+
+    当没填的话,调用方会拿到一整窗的结果并以为"那就是那段时间里发生的全部事"
+    —— 而这一页反复申明的那句话正是:界面不许说一件没发生的事。一个被
+    静默忽略的时间窗说的恰好是这种话。
+    """
+    if not value or not value.strip():
+        return None
+    parsed = parse_ts(value.strip())
+    if parsed is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} 不是可识别的时间。要 ISO 8601 带时区,例如 2026-08-18T09:30:00+08:00",
+        )
+    return parsed
 
 
 def _ring_meta(held_hint: int | None = None) -> dict[str, Any]:
@@ -154,6 +211,9 @@ def _ring_meta(held_hint: int | None = None) -> dict[str, Any]:
         "enabled": settings.OPS_LOG_RING_ENABLED,
         "dropped_since_boot": stats["dropped_since_boot"],
         "last_error": stats["last_error"],
+        # 诊断窗口收不收 2xx/3xx 访问日志。**界面必须把它说出来** ——
+        # 窗口可以少装东西,但不许让人把"我没收"读成"没发生"。
+        "access_mode": settings.OPS_LOG_RING_ACCESS,
     }
 
 
@@ -162,9 +222,12 @@ def list_logs(
     domain: str | None = Query(default=None),
     event: str | None = Query(default=None),
     level: str | None = Query(default=None, description="最低级别,含它自己以上"),
+    service: str | None = Query(default=None, description="哪个进程写的:api/worker/beat/script"),
     request_id: str | None = Query(default=None),
     task_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
+    since: str | None = Query(default=None, description="ISO 8601,含时区。这个时刻之后"),
+    until: str | None = Query(default=None, description="ISO 8601,含时区。这个时刻之前"),
     limit: int = Query(default=200, ge=1, le=MAX_LIMIT),
 ) -> dict:
     """事件流,新在前。
@@ -191,18 +254,49 @@ def list_logs(
             "ring": {**_ring_meta(held_hint=0), "unavailable_reason": "ring_disabled"},
             "oldest_ts": None,
             "domain_counts": {},
+            "matched": 0,
+            "truncated": False,
+            "shown_oldest_ts": None,
+            "services_seen": {},
         }
 
     rows, error = read_ring(settings.REDIS_URL, limit=settings.OPS_LOG_RING_CAP)
-    meta = _ring_meta(held_hint=len(rows) if not error else None)
+    # `held` 是 Redis 里真实的 LLEN,**不是解析成功的条数**。`read_ring` 的
+    # 文档承诺坏行"会体现在 held 与实际条数的差里" —— 上一版这里把 held
+    # 填成 len(rows),那个差恒为 0,承诺在 `/logs` 上是句空话;而 `/logs/meta`
+    # 给的又是真实 LLEN:同名字段,两个端点,两种含义。多付的这一次 LLEN
+    # 往返,买的是"held − items 条数 = 坏行数"这条等式真的成立。
+    meta = _ring_meta()
     if error:
         # 读不到就明说。**不许画一张空列表** —— 那等于说"这段时间没有日志",
         # 而那是一句没发生的事(硬规则第 4 条)。
         meta["unavailable_reason"] = error
-        return {"items": [], "ring": meta, "oldest_ts": None, "domain_counts": {}}
+        return {
+            "items": [],
+            "ring": meta,
+            "oldest_ts": None,
+            "domain_counts": {},
+            "matched": 0,
+            "truncated": False,
+            "shown_oldest_ts": None,
+            "services_seen": {},
+        }
 
     needle = (q or "").lower().strip()
-    wanted_level = (level or "").upper().strip() or None
+    # 级别打错 = 400,不是"当没填"。与 `_parse_bound` 同一个口径,也与 CLI 对
+    # `--domain`/`--event` 的口径同向:打错一个名字要当场说出来。上一版这里
+    # 只做 `.upper()`,`level=WARN` 会被 `level_rank` 的未知兜底按 INFO 算 ——
+    # 静默变成"不筛",整窗全回来;而那条兜底只属于**日志行自己的级别**
+    # (第三方 logger 的自定义级别名),不属于筛选条件。
+    try:
+        wanted_level = normalize_level(level)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    wanted_service = (service or "").strip() or None
+    # 时间窗解析失败 = 400,不是"当没填"。当没填的话调用方会拿到一整窗的
+    # 结果并以为那就是那段时间里发生的全部事 —— 又一次"界面说了没发生的话"。
+    since_at = _parse_bound(since, "since")
+    until_at = _parse_bound(until, "until")
 
     # 域计数**不受 domain 筛选影响**,其余筛选照吃(a54 改)。
     #
@@ -210,18 +304,26 @@ def list_logs(
     # 恰好在最需要"别处还有没有事"的时候把这个信息拿掉了。它得在服务端算,
     # 因为服务端手上才有全窗。
     counts: dict[str, dict[str, int]] = {}
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        raw = json.dumps({k: v for k, v in row.items() if k != "seq"}, ensure_ascii=False)
+    services_seen: dict[str, int] = {}
+    # 命中的行先全收下来,排完序再截 —— 上一版是"边扫边填到 limit 为止",
+    # 而扫描顺序是 LPUSH 到达顺序,于是截出来的既不是最新的 limit 条,
+    # 也不是任何一个说得清的集合。
+    picked: list[tuple[datetime | None, str, dict[str, Any]]] = []
+    for raw, row in rows:
+        stamp = parse_ts(row.get("ts"))
         if not _matches(
             row,
             domain=None,
             event=event,
             level=wanted_level,
+            service=wanted_service,
             request_id=request_id,
             task_id=task_id,
             needle=needle,
             raw=raw,
+            since=since_at,
+            until=until_at,
+            stamp=stamp,
         ):
             continue
         key = row.get("domain") or resolve_domain(row.get("event"), row.get("logger"))
@@ -232,22 +334,72 @@ def list_logs(
             seen["warn"] += 1
         elif level_name in ("ERROR", "CRITICAL"):
             seen["error"] += 1
+        # 进程分布**不吃 domain 筛选**,与域计数同一个理由:它回答的是
+        # "这台机器上现在有哪几个进程在写日志",而那正是"gen 域为什么空着"
+        # 的答案所在 —— worker 一条都没有,就是 worker 没在写。
+        who = str(row.get("service") or "?")
+        services_seen[who] = services_seen.get(who, 0) + 1
         if domain and key != domain:
             continue
-        if len(items) < limit:
-            items.append(_shape(row, raw=raw))
+        # tie-break 走注册表里的 `seq_sort_key`:数值序,不是字符串序 ——
+        # ts 只有秒级精度,同一秒内 "10" < "7" 的字符串比较会把同进程的
+        # 第 7~10 条倒过来,而链路横幅正保证着「按时间顺读」。
+        picked.append((stamp, seq_sort_key(row.get("seq")), row))
+
+    # **按时间排序,不按到达顺序。**
+    #
+    # 环形是多个进程 LPUSH 进同一个键的,列表顺序是到达顺序;而链路模式的
+    # 横幅上写着「按时间顺读,旧在上」。一条 API 领取、worker 执行、API 回写的
+    # 任务链路,展示顺序可能是错的,**而界面正在向你保证它是对的**。
+    #
+    # 解析不出时间的排在末尾(`_shape` 会给它们打上 `ts_unparsed`):
+    # 不静默丢,也不假装它在某个位置。
+    picked.sort(key=lambda one: (one[0] is not None, one[0], one[1]), reverse=True)
+    matched = len(picked)
+    items = [_shape(row) for _, _, row in picked[:limit]]
 
     # 窗口边界取的是**全窗**最老的一条,不是筛完之后最老的那条:
     # 它回答的是"这个环形能看到多早",与当前筛选无关。
-    oldest = rows[-1].get("ts") if rows else None
-    return {"items": items, "ring": meta, "oldest_ts": oldest, "domain_counts": counts}
+    oldest = rows[-1][1].get("ts") if rows else None
+    return {
+        "items": items,
+        "ring": meta,
+        "oldest_ts": oldest,
+        # 当前这张列表实际的起点。**和 `oldest_ts` 是两个数,谁也不冒充谁** ——
+        # 被 limit 截断时它比 `oldest_ts` 晚得多,而上一版界面只说了后者,
+        # 于是那行"更早的不是没发生,是滚出窗口了"在此刻是在误导人。
+        "shown_oldest_ts": items[-1]["ts"] if items else None,
+        "domain_counts": counts,
+        # 截断显形。上一版是 `if len(items) < limit: append`,超出就停,
+        # 响应里没有任何字段说明这件事 —— 而 a54 刚把域计数改成按全窗算,
+        # 于是左边显示 800、右边显示 200,两个数字互相矛盾且无人解释。
+        "matched": matched,
+        "truncated": matched > len(items),
+        "services_seen": services_seen,
+    }
 
 
 @router.get("/logs/meta")
 def logs_meta() -> dict:
-    """域与事件注册表。**前端下拉的唯一来源。**"""
+    """域与事件注册表。**前端下拉的唯一来源。**
+
+    ## `services_seen` 为什么是"窗口里数出来的",不是一张写死的表
+
+    写死的表会在 worker 没起来的时候依然列出 `worker` —— 而"worker 在不在写
+    日志"正是要发现的那件事。`LOG-CONSOLE.md` 第十二章第 1 条留下的自检顺序是
+    「跑一个生成任务,看 `gen` / `batch` 域出不出条目」;有了这个数,自检
+    第一步变成**打开页面看有没有 `worker`**,不用先跑任务。
+    """
+    services: dict[str, int] = {}
+    if settings.OPS_LOG_RING_ENABLED:
+        rows, error = read_ring(settings.REDIS_URL, limit=settings.OPS_LOG_RING_CAP)
+        if not error:
+            for _raw, row in rows:
+                who = str(row.get("service") or "?")
+                services[who] = services.get(who, 0) + 1
     return {
         "domains": [{"key": key, "label": label} for key, label in DOMAINS.items()],
+        "services_seen": services,
         "events": [
             {
                 "key": e.key,

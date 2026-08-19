@@ -577,6 +577,7 @@ class CopyDiagnosticIn(BaseModel):
 def test_copy_generation(
     product_id: UUID,
     payload: CopyDiagnosticIn,
+    request: Request,
     session: Session = Depends(db_session),
 ) -> dict[str, Any]:
     product = _product(session, product_id)
@@ -591,6 +592,7 @@ def test_copy_generation(
         session,
         product,
         generator_name=payload.generator,
+        actor=current_actor(request),
     )
     session.commit()
     return result

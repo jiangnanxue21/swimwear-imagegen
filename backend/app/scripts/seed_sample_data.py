@@ -60,7 +60,7 @@ VIEW_TO_ASSET_TYPE = {
 
 
 def main() -> int:
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(settings.LOG_LEVEL, service="script")
 
     csv_path = SAMPLE_DIR / "products.csv"
     if not csv_path.exists():

@@ -104,6 +104,11 @@ $Required = @(
     '.github/workflows/ci.yml'
     'backend/tools/verify_delivery.py'
     'Makefile'
+    'tools/normalize_eol.py'
+    # The one implementation of the line-ending policy. It must travel with the
+    # package: when the receiver repacks from the unpacked tree, the gate below
+    # has to find it -- and "it was not in the package" is an avoidable
+    # fail-closed.
 )
 
 function ConvertTo-ArchivePath {
@@ -309,10 +314,73 @@ try {
             Write-Error "Required file missing from delivery package: $path" -ErrorAction Continue
             Write-Host "   diagnostic: listing had $($listing.Count) entries"
             Write-Host "   diagnostic: listing saved to $listingFile (the package gets deleted, this file does not)"
-            if (Test-Path (Join-Path $RepoRoot $path)) {
+            if (Test-Path (Join-Path $Root $path)) {
                 Write-Host "   note: the file DOES exist in the work tree -- it was excluded, or the listing was short"
             }
             $failed = $true
+        }
+    }
+
+    # ---------------------------------------------------------------- line endings
+    #
+    # Third application of the same idea as the two checks above: verify the
+    # bytes that actually shipped, not the declaration in the repo.
+    #
+    # `.gitattributes` opens with `* text=auto eol=lf`, yet the measured a55
+    # delivery package had 711 of 832 files on CRLF or mixed endings --
+    # including `.github/workflows/ci.yml`, which is explicitly on that
+    # whitelist. The packing scripts were not at fault: `.gitattributes` is a
+    # checkout-time rule, git does not rewrite a work tree that predates it,
+    # and both scripts copy the work tree byte for byte. The rule was declared,
+    # never took effect, and nothing noticed -- the package still printed OK.
+    #
+    # Three things genuinely break: compose `env_file` reads `\r` into a
+    # password, Dockerfile backslash continuations snap, `.dockerignore`
+    # entries stop matching. Full reasoning at the top of `.gitattributes`.
+    #
+    # The judgement itself lives in `tools/normalize_eol.py`. Rewriting it here
+    # in PowerShell is exactly the list-divergence this repo has been bitten by
+    # twice, and this particular divergence would show up as "the Linux package
+    # is clean, the Windows one carries CRLF" -- the very scenario the gate
+    # exists to prevent.
+    $eolChecker = Join-Path $Root 'tools/normalize_eol.py'
+    $python = $null
+    foreach ($candidate in @('python3', 'python', 'py')) {
+        $found = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($found) { $python = $found.Source; break }
+    }
+
+    if (-not $python -or -not (Test-Path -LiteralPath $eolChecker)) {
+        # Fail closed, do not skip. Skipping ships a CRLF package that prints
+        # OK, while "this machine has no python" stays invisible -- which is
+        # the "a gate that looks like it is running" failure this whole script
+        # was written to prevent. The repo already requires Python for tests
+        # and the delivery self-check; missing it on the packing box is an
+        # environment problem, not grounds for silent passage.
+        Write-Error 'Cannot run the line-ending check; refusing to emit a package.' -ErrorAction Continue
+        if (-not $python) { Write-Host '   no python3/python/py on PATH' }
+        if (-not (Test-Path -LiteralPath $eolChecker)) { Write-Host "   missing $eolChecker" }
+        $failed = $true
+    }
+    else {
+        $eolDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+        try {
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($Out, $eolDir)
+            & $python $eolChecker --check $eolDir --quiet
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host '   the files above came from the freshly built package, not the work tree.'
+                Write-Host "   run `"$python tools/normalize_eol.py --write .`" in the work tree, then repack."
+                $failed = $true
+            }
+        }
+        catch {
+            Write-Error "Line-ending check could not read the package: $_" -ErrorAction Continue
+            $failed = $true
+        }
+        finally {
+            if (Test-Path -LiteralPath $eolDir) {
+                Remove-Item -LiteralPath $eolDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 

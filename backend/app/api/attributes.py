@@ -20,7 +20,7 @@ from app.api import action_gate
 from app.api.deps import current_actor, db_session, require_operator
 from app.attributes import missing_summary, run_state
 from app.attributes import service as attr_service
-from app.attributes.registry import field_spec_out, fields_for
+from app.attributes.registry import field_label, field_spec_out, fields_for
 from app.attributes.validation import AttributeValueError
 from app.core import audience as audience_rules
 from app.core.errors import ErrorCode, NotFoundError, ValidationError
@@ -235,8 +235,21 @@ def confirm_attributes(
             #
             # 指名字段:一次可以提交多个,只说"格式不对"等于让人挨个试
             session.rollback()
+            # A69:**指名要指运营认识的那个名字。** 原来这里拼的是 `str(exc)`,
+            # 而 `AttributeValueError.__str__` 是 `f"{field_name}: {reason}"` ——
+            # 于是运营看到的是「garment_type: 枚举字段不接受空字符串」。
+            #
+            # 中文名注册表里一直有(`AttributeField.label`,那一行注释写着
+            # 「忘了给中文名会让 waistband_type 这种词悄悄出现在运营的属性表、
+            # 颜色维明细和缺失清单里」)—— 它只是没走到报错这条路上来。
+            # `field_label` 对注册表里没有的名字回落成原名,不抛,所以历史字段
+            # 仍然说得出话。
+            #
+            # `detail` 里照旧带原始 `field_name`:界面要靠它定位是哪一行输入框,
+            # 而那个用途要的正是机器名。**给人看的和给机器用的分两个位置放**,
+            # 不是二选一。
             raise ValidationError(
-                f"属性值不合字段定义 —— {exc}",
+                f"「{field_label(exc.field_name)}」不合字段定义:{exc.reason}",
                 code=ErrorCode.INPUT_INVALID,
                 http_status=422,
                 detail={"field_name": exc.field_name, "reason": exc.reason},

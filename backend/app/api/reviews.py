@@ -415,6 +415,7 @@ class EvaluationDiagnosticIn(BaseModel):
 def test_candidate_evaluation(
     candidate_id: UUID,
     payload: EvaluationDiagnosticIn,
+    request: Request,
     session: Session = Depends(db_session),
 ) -> EvaluationDiagnosticOut:
     """拿既有候选图真实跑一次评分，但不覆盖正式分数或候选图状态。"""
@@ -440,6 +441,9 @@ def test_candidate_evaluation(
         task,
         candidate,
         evaluator=evaluator,
+        # 留档要答得出"谁跑的"。actor 是 api 层的事实,所以它从这里传进去 ——
+        # 而写入点留在 service 里(漏接一个入口 = 台账不完整,见 ai_test_archive 顶部)
+        actor=current_actor(request),
     )
     session.commit()
     return EvaluationDiagnosticOut(

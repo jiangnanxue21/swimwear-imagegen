@@ -24,10 +24,10 @@
  * 账户里还剩多少;共用同一把 Key 的其他系统、赠送额度、失败但仍计费的调用
  * 都不在其中。
  */
-import { Alert, Button, Card, Progress, Skeleton, Space, Statistic, Table, Tooltip, Typography } from 'antd'
+import { Alert, Card, Progress, Skeleton, Space, Statistic, Table, Tooltip, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { BUDGET_LABEL, usageApi, type ProviderSpend } from '../api/usage'
-import { readError } from '../api/client'
+import ErrorNotice from '../components/ErrorNotice'
 import BrandTag from '../components/BrandTag'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -96,18 +96,14 @@ export default function SpendPage() {
       />
 
       {isError && (
-        <Alert
-          type="error"
-          showIcon
-          message="拿不到花费数据"
-          description={readError(error)}
-          action={
-            // 纯动作,没有目标地址 —— 用按钮而不是无 href 的锚点:
-            // 后者不进 Tab 序列,键盘用户到不了这颗"重试"
-            <Button type="link" size="small" onClick={() => void refetch()}>
-              重试
-            </Button>
-          }
+        <ErrorNotice
+          title="拿不到花费数据"
+          error={error}
+          // 重试按钮由 ErrorNotice 自己画 —— 原来这里手写了一颗,连同
+          // 「用按钮而不是无 href 的锚点」那条无障碍理由;统一出口之后
+          // 那条理由归组件管,调用点不必各自记得(A12 的全部意义)
+          onRetry={() => void refetch()}
+          retrying={isFetching}
         />
       )}
 

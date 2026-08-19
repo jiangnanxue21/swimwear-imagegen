@@ -1,12 +1,12 @@
 import { Link } from 'react-router-dom'
 import {
-  Alert, Button, Card, Col, Empty, Progress, Row, Skeleton, Space, Statistic, Table, Tag, Tooltip,
+  Button, Card, Col, Empty, Progress, Row, Skeleton, Space, Statistic, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { dashboardApi } from '../api/exports'
-import { readError } from '../api/client'
+import ErrorNotice from '../components/ErrorNotice'
 import GradeTag from '../components/GradeTag'
 import { GRADE_LABEL, type DashboardSummary, type Grade } from '../api/types'
 import { brandVars, fontScale } from '../theme'
@@ -81,7 +81,14 @@ export default function DashboardPage() {
 
   if (query.isLoading) return <Skeleton active paragraph={{ rows: 8 }} />
   if (query.isError) {
-    return <Alert type="error" showIcon message="读不到仪表盘数据" description={readError(query.error)} />
+    return (
+      <ErrorNotice
+        title="读不到仪表盘数据"
+        error={query.error}
+        onRetry={() => query.refetch()}
+        retrying={query.isFetching}
+      />
+    )
   }
 
   const data = query.data!

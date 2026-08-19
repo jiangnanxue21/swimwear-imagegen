@@ -313,6 +313,10 @@ REQUIRED=(
   '.github/workflows/ci.yml'
   'backend/tools/verify_delivery.py'
   'Makefile'
+  # 行尾门禁的**唯一实现**。它必须跟着包走:收包方从解出来的这棵树重新打包
+  # 时,下面那道门禁要能找到它 —— 找不到就 fail-closed,而"包里没带"是一个
+  # 完全可以避免的 fail-closed。
+  'tools/normalize_eol.py'
 )
 # 这一条报出来的时候,有两种完全不同的可能,而报错必须能分开它们:
 #
@@ -345,6 +349,59 @@ for path in "${REQUIRED[@]}"; do
     FAILED=1
   fi
 done
+
+# ---------------------------------------------------------------- 行尾复验
+#
+# 这一道和上面两道是同一个思路的第三次应用:**验产物的真实字节,不验声明**。
+#
+# `.gitattributes` 第一行写着 `* text=auto eol=lf`,而实测 a55 那个交付包
+# 832 个文件里 711 个是 CRLF 或混合 —— 包括 `.github/workflows/ci.yml`,
+# 它**明明在白名单里**。原因不在打包脚本:`.gitattributes` 是检出期规则,
+# 工作树比规则老的时候 git 不回头重写,而这两个脚本逐字节复制工作树。
+# 于是规则声明了、没有生效、也没有任何东西发现这件事,包照样打印 `==> OK`。
+#
+# 所以判据只能是**解开包之后那些字节到底长什么样**,而不是仓库里那份声明。
+# 三处会真的坏掉:compose 的 `env_file` 把 `\r` 读进密码、Dockerfile 的
+# 反斜杠续行断掉、`.dockerignore` 的条目失配。理由全文在 `.gitattributes` 顶部。
+#
+# 判定本身在 `tools/normalize_eol.py` 里,不在这里重写一遍 —— 这个脚本
+# 开头两百行讲的就是清单分叉,而"行尾判定在 bash 和 PowerShell 里各写一份"
+# 分叉出来的表现恰好是「Linux 打的包干净、Windows 打的包带 CRLF」,
+# 正是这道门禁要防的场景本身。
+EOL_CHECKER="$ROOT/tools/normalize_eol.py"
+PYTHON_BIN=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    PYTHON_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$PYTHON_BIN" ] || [ ! -f "$EOL_CHECKER" ]; then
+  # **fail-closed,不是跳过。**
+  #
+  # 跳过的代价是一个带 CRLF 的包被打出来、打印 OK、发出去,而"这台机器上
+  # 没有 python3"这件事没有任何人会看见 —— 那正是这个脚本存在的理由:
+  # 一个看起来在跑的门禁比没有门禁更糟。仓库本来就要求 Python 才能跑测试
+  # 与交付自检,打包机上没有它是环境问题,不是可以静默放行的理由。
+  echo "!! 无法执行行尾复验,包不予生成:"
+  [ -z "$PYTHON_BIN" ] && echo "     找不到 python3/python"
+  [ ! -f "$EOL_CHECKER" ] && echo "     缺少 $EOL_CHECKER"
+  FAILED=1
+else
+  EOL_DIR="$(mktemp -d)"
+  trap 'rm -f "$LISTING_WITHOUT_ENV_EXAMPLES_FILE"; rm -rf "$EOL_DIR"' EXIT
+  if unzip -q -o "$OUT" -d "$EOL_DIR"; then
+    if ! "$PYTHON_BIN" "$EOL_CHECKER" --check "$EOL_DIR" --quiet; then
+      echo "!! 上面这些文件是**从刚打好的包里解出来的**,不是工作树里的。"
+      echo "   工作树先跑一次 \`$PYTHON_BIN tools/normalize_eol.py --write .\`,再重打。"
+      FAILED=1
+    fi
+  else
+    echo "!! 行尾复验解不开这个包 —— 包本身有问题,重打一次"
+    FAILED=1
+  fi
+fi
 
 if [ "$FAILED" -ne 0 ]; then
   rm -f "$OUT"

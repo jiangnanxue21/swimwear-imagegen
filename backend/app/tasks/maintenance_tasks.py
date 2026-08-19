@@ -13,6 +13,9 @@ Celery beat 需要单独起进程:
 """
 from __future__ import annotations
 
+from sqlalchemy import select
+
+from app.core.clock import utc_now
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.tasks.celery_app import celery_app
@@ -238,5 +241,82 @@ def refresh_stale_drafts(limit: int = 200) -> dict:
             }
         })
         return {"scanned": scanned, "marked_stale": marked, "error": True}
+    finally:
+        session.close()
+
+
+@celery_app.task(name="maintenance.purge_ai_test_runs")
+def purge_ai_test_runs(limit: int = 500, apply: bool = False) -> dict:
+    """清理超期的 AI 测试留档(PRD §11.4 / §14.3 决议)。
+
+    ## 两道闸,顺序不能换
+
+    判定全在 `workflows/ai_test_record.purgeable()`(零依赖,可穷举):先判年龄,
+    再判**引用还活着吗**。第二条是不变量 —— 引用着当前生效版本的记录多老都不删。
+    删掉生效那一版的唯一证据,等于在它最会被查的时候把它清掉。
+
+    ## `active_versions` 必须现查
+
+    缓存一份"当时的生效版本"去做删除决定,是这条不变量最容易被绕开的方式:
+    页面上刚切了版本,这一拍就按旧集合把新生效那版的证据删了。
+
+    ## 默认干跑
+
+    与 `cleanup_service.purge_superseded_exports` 同一条规矩(4.1 节 H):
+    删除不可逆,默认只报告。**beat 上排的就是干跑那一档** —— 它负责让
+    「有多少该清了」这个数出现在运行日志里,真删要人显式触发。
+    自动删一张带完整模型输出的档案表,风险高于它省下的磁盘。
+    """
+    from app.models.ai_test_run import AiTestRun
+    from app.models.prompt_template import PromptTemplate
+    from app.workflows.ai_test_record import DEFAULT_RETENTION_DAYS, purgeable
+
+    session = SessionLocal()
+    try:
+        active = {
+            str(v)
+            for v in session.scalars(
+                select(PromptTemplate.version).where(PromptTemplate.is_active.is_(True))
+            )
+            if v is not None
+        }
+        rows = list(
+            session.scalars(
+                select(AiTestRun).order_by(AiTestRun.created_at).limit(limit)
+            )
+        )
+        doomed = purgeable(rows, active_versions=active, now=utc_now())
+        if apply:
+            for row in doomed:
+                session.delete(row)
+            session.commit()
+        logger.info(
+            "ai test run purge pass",
+            extra={
+                "extra_fields": {
+                    "event": "ops.ai_test_purge_pass",
+                    "scanned": len(rows),
+                    "purgeable": len(doomed),
+                    "deleted": len(doomed) if apply else 0,
+                    "retention_days": DEFAULT_RETENTION_DAYS,
+                    "applied": apply,
+                }
+            },
+        )
+        return {
+            "scanned": len(rows),
+            "purgeable": len(doomed),
+            "deleted": len(doomed) if apply else 0,
+            "applied": apply,
+        }
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception(
+            "ai test run purge failed",
+            extra={"extra_fields": {"event": "ops.ai_test_purge_failed"}},
+        )
+        # 键集与成功路径一致(§7.8 第四条):读它做看板的一侧在出错时
+        # 拿到另一种形状,而那正是最需要它稳定的时候
+        return {"scanned": 0, "purgeable": 0, "deleted": 0, "applied": apply, "error": True}
     finally:
         session.close()

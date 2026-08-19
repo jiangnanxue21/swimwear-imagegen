@@ -62,7 +62,7 @@ def _product_with_asset(client, sku: str) -> str:
     _ensure_spu(client)
     resp = client.post("/api/products", json={**PRODUCT, "sku": sku})
     # 先断状态码再取 id:原来 `.json()["id"]` 在建品失败时抛 KeyError('id'),
-    # 后端那句「请先用 POST /spus 建档」一个字都到不了报告里
+    # 后端那句「请先在款式列表里新建这个款」一个字都到不了报告里
     assert resp.status_code == 201, resp.text
     pid = resp.json()["id"]
     client.post(

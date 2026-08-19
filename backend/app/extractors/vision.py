@@ -45,6 +45,8 @@ from typing import Any
 from app.core.logging import get_logger
 from app.extractors import call_accounting
 from app.extractors.base import ImageExtractionResult
+from app.prompts.versioning import content_version
+
 from app.extractors.schema import (
     EXTRACTION_SCHEMA_VERSION,
     ExtractionParseError,
@@ -89,13 +91,13 @@ RESPONSE_FORMATS = (FORMAT_JSON_SCHEMA, FORMAT_JSON_OBJECT, FORMAT_PROMPT_ONLY)
 #: 有的端点按这个名字缓存 Schema,同名不同形状会拿到旧缓存。
 EXTRACTION_FORMAT_NAME = f"attribute_extraction_v{EXTRACTION_SCHEMA_VERSION}"
 
-#: 识别提示词版本。校准分箱按 (字段 × 模型 × Prompt) 查(§6.3:未校准的组合
-#: 一律不自动确认),所以**改一次提示词必须 bump 一次** —— 不 bump 的话,
-#: 新提示词下的置信度会被旧提示词攒出来的分箱校准,数字看着有依据,依据是错的。
-# v2.1 把 json_object / prompt_only 档位缺失的输出信封与数组形状写进提示词。
-# 只改 Schema 文件里的文字而不 bump 的话,新提示词会继续使用 v2 的校准分箱,
-# 也会让幂等身份无法回答“这次调用到底用了哪版提示词”。
-EXTRACTION_PROMPT_VERSION = f"vision-{EXTRACTION_SCHEMA_VERSION}.1"
+#: 识别提示词版本:**内容派生**(PRD BE-306)。校准分箱按 (字段 × 模型 × Prompt)
+#: 查(§6.3),所以版本必须跟着措辞走。上一版是 `f"vision-{schema}.1"`,
+#: 「改一次提示词必须 bump 一次」全靠人记得 —— 这个坑在文案链路已经踩过
+#: 一次(copy_generator 旧注释),识别这边是同款。现在对默认拼装取内容哈希:
+#: 改一个字,版本必变;没改,恒等(AC-30 / AC-30b)。字段子集不进版本,
+#: 与旧行为一致 —— 旧常量同样不随 fields 变。
+_EXTRACTION_PROMPT_VERSION = content_version(build_extraction_prompt())
 
 #: 传进 `extract(options=...)` 的受众键。识别目标已按受众过滤(§18.3),
 #: 这个键让 Schema 与提示词里的**枚举取值**也按受众收窄 —— 泳裤的请求体里
@@ -430,7 +432,7 @@ class VisionAttributeExtractor:
         但没配 `EXTRACTOR_MODEL_NAME` 时,第一次调用本来就会以
         `NotConfiguredError` 失败,幂等在那之前就没有意义了。
         """
-        return str(self.config.model or ""), EXTRACTION_PROMPT_VERSION
+        return str(self.config.model or ""), _EXTRACTION_PROMPT_VERSION
 
     @property
     def usage_provider(self) -> str:
@@ -595,7 +597,7 @@ class VisionAttributeExtractor:
         return replace(
             parsed,
             model_name=actual_model or None,
-            prompt_version=EXTRACTION_PROMPT_VERSION,
+            prompt_version=_EXTRACTION_PROMPT_VERSION,
             duration_ms=elapsed_ms,
             meta=meta,
         )

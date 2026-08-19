@@ -1,20 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Checkbox, Col, Descriptions, Empty, Image, Row, Select,
-  Radio, Space, Spin, Tag, Typography,
+  Radio, Space, Spin, Table, Tag, Typography,
 } from 'antd'
 import { ClockCircleOutlined, ExperimentOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { generationApi } from '../api/generation'
 import { evaluationApi } from '../api/reviews'
-import { readWriteError } from '../api/client'
+import { isAuthError, readWriteError } from '../api/client'
+import { aiTestsApi } from '../api/aiTests'
 import { workbenchApi } from '../api/workbench'
-import { CANDIDATE_STATUS_LABEL, type Evaluation } from '../api/types'
+import { CANDIDATE_STATUS_LABEL, type AiTestRun, type Evaluation } from '../api/types'
 import EvaluationDetail from '../components/EvaluationDetail'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { formatDateTime } from '../utils/datetime'
+import {
+  durationLabel,
+  engineLabel,
+  outcomeLabel,
+  subjectLabel,
+  versionLabel,
+} from '../utils/aiTestRuns'
 import { brandVars, fontScale, space } from '../theme'
 
 /**
@@ -23,6 +33,8 @@ import { brandVars, fontScale, space } from '../theme'
  * 这里测试的是生产评分器与生产文案生成器,而不是重新跑完整业务流程。
  * 评分结果只写 diagnostic 调用留痕;文案结果只回显,不创建正式版本。
  */
+const { Text } = Typography
+
 export default function AITestPage() {
   useDocumentTitle('AI 能力测试')
   const { message } = App.useApp()
@@ -48,6 +60,31 @@ export default function AITestPage() {
     queryFn: () => workbenchApi.list({ page: 1, page_size: 100, sort: 'updated_at', order: 'desc' }),
   })
 
+  /**
+   * FE-312 历史记录。**这一查询是那句「请保持页面打开,不要刷新」的替代品** ——
+   * 在留档之前,文案测试的输出关掉页面就没了。
+   *
+   * 不做筛选表单:这一页是"跑一发看看"的地方,要按提示词版本翻档案该去提示词页
+   * (FE-314)。多一个筛选面板会让这一页变成第二个查询入口,而两个入口迟早分叉。
+   */
+  /** FE-314 的落点:提示词页带着 key + 序号跳过来时,历史表只显示那一版。 */
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusKey = searchParams.get('prompt_key')
+  const focusVersion = searchParams.get('prompt_template_version')
+
+  const runs = useQuery({
+    // 筛选参数进 queryKey —— 不进的话换一版之后 react-query 会拿缓存,
+    // 界面显示的是上一版的记录而地址栏说的是这一版
+    queryKey: ['ai-test-runs', focusKey, focusVersion],
+    queryFn: () =>
+      aiTestsApi.list({
+        limit: 20,
+        ...(focusKey ? { prompt_key: focusKey } : {}),
+        ...(focusVersion ? { prompt_template_version: focusVersion } : {}),
+      }),
+    retry: (count, err) => !isAuthError(err) && count < 2,
+  })
+
   useEffect(() => {
     setCandidateId('')
   }, [taskId])
@@ -66,6 +103,14 @@ export default function AITestPage() {
     onSuccess: (result) => {
       if (result.success) message.success('评分能力测试完成,正式评分未被覆盖')
       else message.warning(result.message)
+    },
+    // FE-315:**每一次测试之后都要重新勾。** 这个勾的全部意义是「这一次可能真的
+    // 花钱」—— 勾上之后一直勾着,等于第二次点击不再需要任何确认,而它同样会计费。
+    // 原来换任务时调了 `scoreTest.reset()`,但确认状态没跟着重置:换一个候选图
+    // 之后那个勾还在,于是"确认"这个动作对第二次点击是不存在的
+    onSettled: () => {
+      setScoreCostConfirmed(false)
+      runs.refetch()
     },
     onError: (error) => message.error(readWriteError(error)),
   })
@@ -87,6 +132,11 @@ export default function AITestPage() {
       else message.warning(result.message)
     },
     onError: (error) => message.error(readWriteError(error)),
+    // FE-315,与评分侧同一条。`onSettled` 而不是 `onSuccess`:失败的调用一样计费
+    onSettled: () => {
+      setCopyCostConfirmed(false)
+      runs.refetch()
+    },
   })
 
   const diagnosticEvaluation: Evaluation | null = scoreTest.data?.evaluation
@@ -267,7 +317,7 @@ export default function AITestPage() {
                   description={
                     <Space direction="vertical" size={2}>
                       <span>图片准备、模型推理和瞬时错误重试可能需要 1–5 分钟。</span>
-                      <span>请保持页面打开,不要刷新或重复点击;按钮会在收到明确结果后恢复。</span>
+                      <span>可以离开本页,结果会记入下方历史;别重复点击,按钮会在收到明确结果后恢复。</span>
                     </Space>
                   }
                 />
@@ -294,6 +344,12 @@ export default function AITestPage() {
                         ? <BrandTag tone="accent">独立测试</BrandTag>
                         : <Tag>正式流程</Tag>}
                       {scoreTest.data.attempt.duration_ms !== null && <Tag>{scoreTest.data.attempt.duration_ms} ms</Tag>}
+                      {/* FE-313:此前这一行渲染 evaluator / model_name / duration_ms /
+                          diagnostic 四项,**唯独缺提示词版本** —— 而"这一版跑出什么"
+                          正是这个页面存在的理由 */}
+                      {scoreTest.data.attempt.prompt_version && (
+                        <Tag>提示词 v{scoreTest.data.attempt.prompt_version}</Tag>
+                      )}
                     </Space>
                   }
                 />
@@ -425,6 +481,134 @@ export default function AITestPage() {
           </Card>
         </Col>
       </Row>
+
+      {/* FE-312 历史记录。**这张表是那句「请保持页面打开,不要刷新」的替代品。**
+          在留档之前,文案测试的输出关掉页面就没了,而评分测试只在
+          `evaluation_attempts` 里留了痕,没有任何地方能把两类测试一起按
+          提示词版本查出来 */}
+      <Card
+        title={focusKey ? `历史记录 · ${focusKey} v${focusVersion}` : '历史记录'}
+        extra={
+          <Space>
+            {focusKey && (
+              // 筛着的时候必须给得出"看全部"的路 —— 否则从提示词页跳过来的人
+              // 会以为这一页只有这几条,而地址栏那两个参数不是每个人都会看
+              <Button size="small" onClick={() => setSearchParams({})}>
+                看全部
+              </Button>
+            )}
+            <Button size="small" onClick={() => runs.refetch()} loading={runs.isFetching}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {runs.isError && !isAuthError(runs.error) && (
+          <ErrorNotice
+            title="拉不到测试历史"
+            error={runs.error}
+            onRetry={() => runs.refetch()}
+            retrying={runs.isFetching}
+          />
+        )}
+        <Table<AiTestRun>
+          rowKey="id"
+          size="small"
+          loading={runs.isLoading}
+          pagination={false}
+          dataSource={runs.data?.runs ?? []}
+          locale={{
+            emptyText: '还没有跑过测试。跑一次之后结果会记在这里,可以离开本页',
+          }}
+          columns={[
+            {
+              title: '时间',
+              dataIndex: 'created_at',
+              width: 170,
+              render: (v: string) => formatDateTime(v),
+            },
+            {
+              title: '类型',
+              dataIndex: 'kind',
+              width: 90,
+              render: (v: string) => (v === 'copy' ? '文案' : '评分'),
+            },
+            {
+              // 判定全在 `utils/aiTestRuns.ts` —— 那里能被 `node --test` 真的跑,
+              // 内联在这里的话一行都测不了(a61 的约定,a63 补做)
+              title: '提示词',
+              width: 220,
+              render: (_: unknown, row: AiTestRun) => {
+                const label = versionLabel(row)
+                return row.prompt_key ? (
+                  <Space size={4}>
+                    <Tag>{row.prompt_key}</Tag>
+                    {label && <Tag>{label}</Tag>}
+                  </Space>
+                ) : (
+                  <Text type="secondary">—</Text>
+                )
+              },
+            },
+            {
+              // FE-312 要的「对象」列。后端一直在返回 `subject_id`,而 a62 那版
+              // 没画 —— 于是「哪一张候选图 / 哪个商品」这件事只能靠时间猜
+              title: '对象',
+              width: 150,
+              render: (_: unknown, row: AiTestRun) => subjectLabel(row),
+            },
+            {
+              title: '生成器 / 模型',
+              width: 200,
+              render: (_: unknown, row: AiTestRun) => engineLabel(row),
+            },
+            {
+              title: '结果',
+              width: 150,
+              render: (_: unknown, row: AiTestRun) => {
+                const outcome = outcomeLabel(row)
+                return (
+                  <Space size={4}>
+                    <BrandTag tone={outcome.tone}>{outcome.text}</BrandTag>
+                    {outcome.detail && <Text type="secondary">{outcome.detail}</Text>}
+                  </Space>
+                )
+              },
+            },
+            {
+              title: '耗时',
+              dataIndex: 'duration_ms',
+              width: 90,
+              render: (v: number | null) => durationLabel(v),
+            },
+            {
+              title: 'token',
+              dataIndex: 'total_tokens',
+              width: 90,
+              // 0 与 null 不是一回事:Mock 评分器不消耗 token(0),
+              // 而模板文案根本不调模型(null)
+              render: (v: number | null) => (v == null ? '—' : String(v)),
+            },
+            {
+              // **PRD §12.5 要的是「成本」,而 `ai_test_runs` 没有金额列**
+              // (§11.4 的清单里只有 `billable: bool`)。金额在
+              // `provider_usage_records` 里,要关联才拿得到 —— 那是另一项工作。
+              // 这里如实画「是否计费」,而不是编一个金额出来
+              title: '计费',
+              dataIndex: 'billable',
+              width: 80,
+              // 失败也可能计费,所以它与「结果」那一列独立
+              render: (v: boolean) => (v ? '是' : '否'),
+            },
+            { title: '操作者', dataIndex: 'actor', width: 120 },
+          ]}
+        />
+        {runs.data?.has_more && (
+          <Text type="secondary">
+            只显示最近 {runs.data.limit} 条。要按提示词版本翻更早的档案,去提示词页。
+          </Text>
+        )}
+      </Card>
     </Space>
   )
 }

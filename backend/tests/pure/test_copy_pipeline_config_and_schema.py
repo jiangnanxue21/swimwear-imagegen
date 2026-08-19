@@ -16,7 +16,7 @@ from __future__ import annotations
 from app.core.errors import ErrorCode, ValidationError
 from app.listings import copy_rules
 from app.listings.copy_generator import (
-    PROMPT_VERSION,
+    LLM_SYSTEM_PROMPT,
     LLMCopyGenerator,
 )
 from app.workbench.batch import (
@@ -306,7 +306,9 @@ def test_the_prompt_version_is_not_a_hardcoded_one():
     「这一版为什么和上一版不一样」就没法回答了,幂等也认不出提示词变过。
     """
     draft = _gen(model="m-9").parse_response('{"title":"t","description":"d"}')
-    assert draft.prompt_version == f"m-9:{PROMPT_VERSION}"
+    from app.prompts.versioning import content_version
+
+    assert draft.prompt_version == f"m-9:{content_version(LLM_SYSTEM_PROMPT)}"
     assert not draft.prompt_version.endswith(":1")
 
 

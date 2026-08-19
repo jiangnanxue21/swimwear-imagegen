@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.core.clock import iso_utc
 from app.core.logging import get_logger
 from app.models.prompt_template import PromptTemplate
+from app.prompts import registry
 from app.services.prompt_rules import (
     KNOWN_KEYS,
     MAX_PROMPT_CHARS,
@@ -139,6 +140,74 @@ def _deactivate_all(session: Session, key: str) -> None:
     session.flush()
 
 
+class PromptConflict(Exception):
+    """服务端的生效版本已经不是调用方以为的那一版(FE-309 / AC-35)。
+
+    ## 这不是防御性编程
+
+    A 保存了 v5,B 的页面还停在 v4 上编辑,B 点保存 —— 在此之前这里会**直接落 v6**,
+    A 的改动无声消失。页面自己的注释写着「三个动作都会改变**在线上生效的评分口径**」,
+    而这条路径上没有任何东西问过"你看到的还是现在这一版吗"。
+
+    `save_version` 原有的 advisory 锁与重试守的是**另一件事** —— 版本号别撞、
+    active 别有两条。两个人各自基于不同版本各存一版,对那把锁来说是完全合法的。
+
+    ## 三个动作都要,不是只有保存
+
+    保存 / 切版本 / 恢复默认在这一点上是同一类风险:A 在切 v3、B 同时在切 v5,
+    一样静默覆盖。v1.0 只给保存加,v2.0 订正为三个都加(AC-35)。
+
+    异常带上服务端现在的实况,让界面能说清"对方改了什么"而不是只说一句 409。
+    """
+
+    def __init__(self, key: str, expected: int | None, actual: int | None,
+                 updated_by: str | None, updated_at: object) -> None:
+        self.key = key
+        self.expected = expected
+        self.actual = actual
+        self.updated_by = updated_by
+        self.updated_at = updated_at
+        super().__init__(f"{key} 的生效版本已变为 {actual},不是 {expected}")
+
+
+def _assert_expected_version(session: Session, key: str, expected: int | None) -> None:
+    """乐观锁。`expected` 为 None 表示调用方不参与检查(内部调用、脚本)。
+
+    **必须在 `_lock_key()` 之后调用** —— 拿锁之前读到的"当前版本"随时会变,
+    检查过了照样能被别人插进来,那种检查只是让人以为有防线。
+    """
+    if expected is None:
+        return
+    row = session.execute(
+        select(PromptTemplate).where(
+            PromptTemplate.key == key, PromptTemplate.is_active.is_(True)
+        )
+    ).scalar_one_or_none()
+    # 内置默认生效中时,服务端版本是 None。调用方看到的也该是 None ——
+    # 用 0 之类的哨兵值表示"没有版本",会让"回到默认"和"第 0 版"长得一样
+    actual = row.version if row is not None else None
+    if actual == expected:
+        return
+    logger.warning(
+        "prompt save rejected: version moved under the caller",
+        extra={
+            "extra_fields": {
+                "event": "settings.prompt_save_conflict",
+                "key": key,
+                "expected": expected,
+                "actual": actual,
+            }
+        },
+    )
+    raise PromptConflict(
+        key,
+        expected,
+        actual,
+        row.updated_by if row is not None else None,
+        row.updated_at if row is not None else None,
+    )
+
+
 def save_version(
     session: Session,
     key: str,
@@ -147,6 +216,7 @@ def save_version(
     note: str | None = None,
     updated_by: str | None = None,
     activate: bool = True,
+    expected_version: int | None = None,
 ) -> PromptTemplate:
     """存一个新版本。默认立即生效。
 
@@ -159,6 +229,7 @@ def save_version(
 
     # 拿锁之后,"查最大版本号 -> 插入"这一段对同一个 key 是串行的
     _lock_key(session, key)
+    _assert_expected_version(session, key, expected_version)
 
     last_error: IntegrityError | None = None
     for _ in range(MAX_VERSION_RETRIES):
@@ -221,11 +292,38 @@ def save_version(
     return row
 
 
-def activate_version(session: Session, key: str, version: int) -> PromptTemplate:
-    """回滚到某个历史版本。"""
+def activate_version(
+    session: Session,
+    key: str,
+    version: int,
+    *,
+    note: str | None = None,
+    updated_by: str | None = None,
+    expected_version: int | None = None,
+) -> PromptTemplate:
+    """回滚到某个历史版本。
+
+    **`note` 不是可选的礼貌,是这个动作唯一的解释(FE-310)。** 保存有 note,
+    占位文字甚至写着「回滚时这是唯一的线索」—— 而回滚本身此前没有。三个月后
+    看到 v3 生效、v5 存在,没人知道为什么退回去了。按这一页自己的标准,回滚的
+    理由比保存的理由更该留:保存至少还能从内容 diff 猜出来,回滚连 diff 都没有。
+
+    **理由不写进版本行的 `note`。** 第一版是往被切到那一版的 note 上拼一行,
+    两个理由撞在一起:那一版的 note 说的是「当初为什么这么写」,回滚的理由说的是
+    「后来为什么退回来」,揉进一个字段之后再也分不开。而且 `row.note = ...` 这句
+    赋值让 `audit_column_writers.py` 按**列名**把 `ListingImageSet.note` 也算成
+    有写入点(那个审计刻意"多认一次"),它的欠账条目当场失效 —— 一次改动顺手
+    抹掉了另一张表上的一笔账。
+
+    所以理由只进两处:审计 payload(`api/prompts.py`)与
+    `settings.prompt_rolled_back` 事件。版本表上「最近一次被切回的时间与理由」
+    要从审计里读回来,那需要一个按 entity 查审计的读路径 —— 本轮不做,记在
+    PRD §12.4 FE-310 那条下面。
+    """
     # 和 save_version 用同一把锁:两者都在改"哪一版是 active",
     # 各锁各的等于没锁
     _lock_key(session, key)
+    _assert_expected_version(session, key, expected_version)
 
     row = session.execute(
         select(PromptTemplate).where(
@@ -238,31 +336,79 @@ def activate_version(session: Session, key: str, version: int) -> PromptTemplate
     _deactivate_all(session, key)
     row.is_active = True
     session.flush()
-    logger.info(
-        "prompt template activated",
-        extra={
-            "extra_fields": {
-                "event": "settings.prompt_activated",
-                "key": key,
-                "version": version,
-            }
-        },
-    )
+    # 事件码必须是**字面量**:`test_a53_log_console.py` 按 AST 找 `"event": "..."`,
+    # 三元表达式两边它一个都看不见,于是「登记了没人写」当场变红。
+    # 字段表只有一份 —— a54 修过手抄返回字典那个坑,同一条道理
+    fields = {"key": key, "version": version, "actor": updated_by}
+    if note and note.strip():
+        logger.info(
+            "prompt template rolled back",
+            extra={"extra_fields": {"event": "settings.prompt_rolled_back", **fields}},
+        )
+    else:
+        logger.info(
+            "prompt template activated",
+            extra={"extra_fields": {"event": "settings.prompt_activated", **fields}},
+        )
     return row
 
 
-def reset_to_default(session: Session, key: str, *, updated_by: str | None = None) -> None:
+def reset_to_default(
+    session: Session,
+    key: str,
+    *,
+    updated_by: str | None = None,
+    note: str | None = None,
+    expected_version: int | None = None,
+) -> None:
     """回到代码内置的默认提示词。
 
     做法是把所有版本停用,而不是插一条"内容等于默认值"的新版本 ——
     这样"当前用的是内置默认"在库里是可判定的状态,不必拿内容去和常量比对。
     """
     _lock_key(session, key)
+    _assert_expected_version(session, key, expected_version)
     _deactivate_all(session, key)
     logger.info(
         "prompt template reset to built-in default",
-        extra={"extra_fields": {"event": "settings.prompt_reset", "key": key, "actor": updated_by}},
+        extra={
+            "extra_fields": {
+                "event": "settings.prompt_reset",
+                "key": key,
+                "actor": updated_by,
+                "note": note,
+            }
+        },
     )
+
+
+def get_version(session: Session, key: str, version: int) -> PromptTemplate | None:
+    """取某一版的**完整正文**(PRD BE-303)。
+
+    `describe()` 的版本列表刻意只给 `chars` 不给 `content` —— 一次拉全部
+    历史正文是浪费。但「想看 v3 写了什么」此前唯一的办法是把它切成生效
+    版本,而那个动作会立刻改掉线上评分口径:「想看一眼」和「想让它生效」
+    被绑成了一个动作(PRD FE-306)。这个函数把两件事拆开。
+    """
+    return (
+        session.query(PromptTemplate)
+        .filter(PromptTemplate.key == key, PromptTemplate.version == version)
+        .one_or_none()
+    )
+
+
+def _anti_injection_for(key: str) -> str | None:
+    """这处提示词的防注入段正文(FE-305),没有就 None。
+
+    只有 FREE 层的两份评分提示词带它 —— 其余几处的正文由代码拼装,
+    「删掉会告警」这句话对它们不成立,折叠块也就不该出现。
+    """
+    surface = registry.surface_of(key)
+    if surface is None or surface.tier is not registry.Tier.FREE:
+        return None
+    from app.evaluators.vision_schema import ANTI_INJECTION_BLOCK
+
+    return ANTI_INJECTION_BLOCK
 
 
 def describe(session: Session, key: str) -> dict[str, Any]:
@@ -274,6 +420,11 @@ def describe(session: Session, key: str) -> dict[str, Any]:
         "version": version,
         "is_default": version is None,
         "default_content": default_content(key),
+        # FE-305:防注入段单独送出去。**前端不许自己从 default_content 里切** ——
+        # 切片的起止在 `vision_schema` 里由两个头尾常量定着,而那两个常量漂一个字,
+        # 前端那份切法就会安静地切歪(import 时的 raise 只护着后端这一侧)。
+        # 送 None 表示这处提示词没有这一段(TEMPLATE / MAPPING 层)
+        "anti_injection_block": _anti_injection_for(key),
         "warnings": [
             {"code": w.code, "message": w.message} for w in lint_prompt(key, content)
         ],

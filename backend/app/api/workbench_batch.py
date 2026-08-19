@@ -110,7 +110,7 @@ def _action(raw: str) -> BatchAction:
     except ValueError as exc:
         allowed = "、".join(a.value for a in BatchAction)
         raise ValidationError(
-            f"不支持的批量动作 {raw!r};可用:{allowed}",
+            f"不支持的批量动作「{raw}」;可用:{allowed}",
             code=ErrorCode.INPUT_INVALID,
         ) from exc
 

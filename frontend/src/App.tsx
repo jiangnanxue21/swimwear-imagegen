@@ -45,6 +45,8 @@ const OpsLogPage = lazy(() => import('./pages/OpsLogPage'))
 const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'))
 const ProductListPage = lazy(() => import('./pages/ProductListPage'))
 const PromptsPage = lazy(() => import('./pages/PromptsPage'))
+const PromptListPage = lazy(() => import('./pages/PromptListPage'))
+const PromptVersionPage = lazy(() => import('./pages/PromptVersionPage'))
 const ProvidersPage = lazy(() => import('./pages/ProvidersPage'))
 const PublishPage = lazy(() => import('./pages/PublishPage'))
 const ReviewDetailPage = lazy(() => import('./pages/ReviewDetailPage'))
@@ -262,7 +264,11 @@ export const router = createBrowserRouter(
         <Route path="/reviews/:id" element={<ReviewDetailPage />} />
         <Route path="/model-templates" element={<ModelTemplatesPage />} />
         <Route path="/providers" element={<ProvidersPage />} />
-        <Route path="/prompts" element={<PromptsPage />} />
+        {/* 列表 + 详情 + 单版本只读(PRD §12.1)。侧栏条目仍然只有 /prompts 一个 ——
+            后两条是从列表点进去的,不是导航目标 */}
+        <Route path="/prompts" element={<PromptListPage />} />
+        <Route path="/prompts/:key" element={<PromptsPage />} />
+        <Route path="/prompts/:key/versions/:version" element={<PromptVersionPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/spend" element={<SpendPage />} />
         <Route path="/system" element={<SystemStatusPage />} />

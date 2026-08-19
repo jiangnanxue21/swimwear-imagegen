@@ -181,6 +181,24 @@ class Settings(BaseSettings):
     #: 调大之前先算内存:一条结构化日志 0.5~2KB,5000 条约 2~10MB。
     OPS_LOG_RING_CAP: int = 5000
 
+    #: 访问日志进不进诊断窗口。**默认只收出错的那些。**
+    #:
+    #:     errors   只有 >=400 的访问日志进环形;2xx/3xx 只进 stdout
+    #:     all      全进(a54 的行为,只挡 `/api/ops/` 的自指流量)
+    #:
+    #: 默认值是 `errors` 而不是 `all`,理由是算术:前端有 17 处
+    #: `refetchInterval`,打开一个任务详情页 ≈ 90 请求/分钟 = 5400 条/小时,
+    #: 而 cap 是 5000。**一个开着任务详情页的标签,一小时内把整个诊断窗口
+    #: 洗一遍** —— 而排障的人恰恰会开着任务详情页。
+    #:
+    #: a54 修过这个病的自指那一半(挡住 `/api/ops/` 前缀),而那一半修完之后
+    #: `held/cap` 显示 5000/5000,看起来非常健康,于是没人再怀疑它。
+    #:
+    #: **归档面一个字节没动**:stdout 与外部采集端仍然收到全部访问日志。
+    #: 这里只决定"诊断窗口里装什么"。切到 `all` 的场景是"我就是要看请求流水",
+    #: 那是一种真实用法,只是不该是默认。
+    OPS_LOG_RING_ACCESS: str = "errors"
+
     #: 模型载荷旁挂库。**默认开**,理由见上面那段。
     #: 关掉之后 `/api/ops/llm/{id}` 一律 404,界面会说"未开启捕获"而不是空面板。
     OPS_LLM_PAYLOAD_CAPTURE: bool = True
@@ -534,6 +552,21 @@ class Settings(BaseSettings):
     @classmethod
     def _upper(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("OPS_LOG_RING_ACCESS")
+    @classmethod
+    def _known_access_mode(cls, v: str) -> str:
+        """拼错的模式名在**启动期**就炸,不留到运行期。
+
+        和 `COPY_GENERATOR` 同一个理由,但这里更隐蔽:拼错之后如果按默认
+        处理,表现是"访问日志少了一半而没人知道为什么";如果按 `all` 处理,
+        表现是"窗口又开始被冲刷了"。**两种静默失败都指向同一个结论 ——
+        这个值不许猜。**
+        """
+        mode = v.strip().lower()
+        if mode not in ("errors", "all"):
+            raise ValueError(f"OPS_LOG_RING_ACCESS 只能是 errors 或 all(当前 {v!r})")
+        return mode
 
     @field_validator("COPY_GENERATOR")
     @classmethod

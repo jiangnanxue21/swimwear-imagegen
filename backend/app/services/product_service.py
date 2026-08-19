@@ -77,8 +77,11 @@ def assert_colour_belongs_to(
     """
     if product.spu_id is None:
         raise ValidationError(
-            "这件商品还没有归属到 SPU,不能按颜色上传素材;"
-            "走三步建档(POST /spus)建出来的商品才有颜色可选",
+            # A69:原来这里写「走三步建档(POST /spus)」。前半句「三步建档」
+            # 是运营认识的,后半句括号里那个不是 —— 而括号会让人以为
+            # 那才是准确说法。删掉它,前半句本来就够指路
+            "这件商品还没有挂到款上,不能按颜色上传素材;"
+            "从「新建款式」走完三步建出来的商品才有颜色可选",
             code=ErrorCode.INPUT_INVALID,
             http_status=409,
         )
@@ -183,8 +186,11 @@ def create_product(session: Session, data: dict[str, Any], *, actor: str) -> Pro
     spu_row = session.scalar(select(Spu).where(Spu.spu_code == spu_code))
     if spu_row is None:
         raise ValidationError(
-            f"SPU {spu_code} 不存在:请先用 POST /spus 建档,再往下挂 SKU。"
-            "受众在 SPU 层必填(§4.2),从这里直接建商品会绕过它",
+            # A69:原来这句写的是「请先用 POST /spus 建档」。运营界面上没有
+            # 「POST /spus」这个东西,对应的是款式列表页的「新建款式」——
+            # 报错要指的是**他点得到的那个动作**,不是我们内部怎么实现的
+            f"款号 {spu_code} 还没有建过:请先在款式列表里新建这个款,再往它下面加 SKU。"
+            "受众只能在款上填(§4.2),跳过建款直接建 SKU 会把这一步绕过去",
             code=ErrorCode.INPUT_INVALID,
             http_status=422,
         )

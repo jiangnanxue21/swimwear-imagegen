@@ -56,6 +56,7 @@ from app.models.evaluation import (
 from app.models.generation import GenerationCandidate, GenerationTask
 from app.models.product import Product
 from app.models.product_asset import ProductAsset
+from app.prompts.versioning import version_text
 from app.providers.errors import ProviderError
 from app.services import generation_service as gs
 from app.services.rule_set_service import ResolvedRuleSet, load_active_rule_set
@@ -235,7 +236,7 @@ def _record_attempt(
     outcome: EvaluationOutcome,
     evaluator: str,
     depth: EvaluationDepth,
-    prompt_version: int | None = None,
+    prompt_version: object = None,
     model_name: str | None = None,
     duration_ms: int | None = None,
     evaluation_id=None,
@@ -280,7 +281,7 @@ def _record_attempt(
         response_id=(str(meta["response_id"])[:128] if meta.get("response_id") else None),
         http_status=meta.get("http_status") if isinstance(meta.get("http_status"), int) else None,
         finish_reason=(str(meta["finish_reason"])[:48] if meta.get("finish_reason") else None),
-        prompt_version=prompt_version if isinstance(prompt_version, int) else None,
+        prompt_version=version_text(prompt_version),
         prompt_tokens=_int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens")),
         completion_tokens=_int_or_none(
             usage.get("completion_tokens") or usage.get("output_tokens")
@@ -385,11 +386,16 @@ def diagnose_candidate(
     candidate: GenerationCandidate,
     *,
     evaluator: ImageQualityEvaluator | None = None,
+    actor: str = "system",
 ) -> tuple[EvaluationResult | None, EvaluationAttempt]:
     """人工测试一张候选图，不覆盖正式评分或候选图状态。
 
     真实评分器仍可能计费，所以成功与失败都进入原有调用与费用台账；
     `meta.diagnostic` 用来和自动评分区分。
+
+    三条出路(解析失败 / Provider 出错 / 成功)**各自留档**,不在函数末尾
+    合并写一次 —— 前两条是 early return,合并点根本到不了,而"失败的测试
+    没进历史"正是这张表最该记住的那一类。
     """
 
     if candidate.task_id != task.id:
@@ -446,6 +452,7 @@ def diagnose_candidate(
             diagnostic=True,
             round_number=candidate.round_number,
         )
+        _archive_diagnostic(session, candidate, attempt, evaluator, product, actor)
         return None, attempt
     except ProviderError as exc:
         attempt = _record_attempt(
@@ -468,6 +475,7 @@ def diagnose_candidate(
             diagnostic=True,
             round_number=candidate.round_number,
         )
+        _archive_diagnostic(session, candidate, attempt, evaluator, product, actor)
         return None, attempt
 
     decision = grade_candidate(result, rule_set.thresholds)
@@ -489,7 +497,61 @@ def diagnose_candidate(
         diagnostic=True,
         round_number=candidate.round_number,
     )
+    _archive_diagnostic(session, candidate, attempt, evaluator, product, actor)
     return result, attempt
+
+
+def _archive_diagnostic(
+    session: Session,
+    candidate: GenerationCandidate,
+    attempt: EvaluationAttempt,
+    evaluator: ImageQualityEvaluator,
+    product: Product | None,
+    actor: str,
+) -> None:
+    """把这次评分测试写进 `ai_test_runs`(BE-310)。
+
+    数值一律**从 `attempt` 上读回**,不从各分支的局部变量再取一遍:两份
+    台账说的是同一次调用,分头取值迟早会在某个分支上分叉,而分叉了没有
+    任何东西会红。`_record_attempt` 已经 flush 过,所以这里读得到 id。
+
+    `prompt_key` 按受众现推 —— 键的推导只有 `vision_schema.prompt_key_for`
+    一处(见 `_prompt_context` 里那段注释),这里调它而不是抄一份判断。
+    """
+    from app.workflows.ai_test_record import record_for_evaluation
+    from app.services import ai_test_archive
+
+    try:
+        from app.core.audience import coerce as _coerce_audience
+        from app.evaluators.vision_schema import prompt_key_for
+
+        prompt_key = prompt_key_for(
+            _coerce_audience(getattr(product, "audience", None) if product else None)
+        )
+    except Exception:  # noqa: BLE001 —— 推不出键不该让留档整条消失
+        prompt_key = None
+
+    ai_test_archive.archive(
+        session,
+        record_for_evaluation(
+            candidate_id=candidate.id,
+            attempt_id=attempt.id,
+            success=attempt.outcome == EvaluationOutcome.SUCCEEDED.value,
+            billable=bool(getattr(evaluator, "billable", False)),
+            actor=actor,
+            prompt_key=prompt_key,
+            # 序号进序号那一列。评分链路没有内容派生版本,`prompt_version` 留空 ——
+            # 见 `ai_test_record._int_version` 上面那段(a63 订正的口径)
+            template_version=attempt.prompt_version,
+            evaluator=attempt.evaluator,
+            model_name=attempt.model_name,
+            depth=attempt.depth,
+            error_code=attempt.error_code,
+            error_message=attempt.error_message,
+            duration_ms=attempt.duration_ms,
+            total_tokens=attempt.total_tokens,
+        ),
+    )
 
 
 def _int_or_none(value: Any) -> int | None:

@@ -16,6 +16,7 @@ from app.api.deps import (
     require_operator,
 )
 from app.core.config import settings
+from app.core.enums import AUDIENCE_LABELS
 from app.core.errors import AppError, ErrorCode, ValidationError
 from app.schemas.asset import (
     LICENSE_ENDORSEMENT_FIELDS,
@@ -137,8 +138,17 @@ def list_templates(
     except ValueError as exc:
         # 受众取值不认识。这里必须报错而不是"忽略这个筛选返回全部"——
         # 后者会让一个拼错参数的前端拿到女装模特去配男装商品(§10.5)
+        #
+        # A69:**原来这里拼的是 `{exc}`**,而它是 `StrEnum` 的原生英文报错 ——
+        # 运营看到的整句是「受众取值不合法:'KIDS' is not a valid Audience」。
+        # 后半句一个字都不是给运营写的,而且它是 Python 的措辞,不是这个系统的。
+        #
+        # 中文名 `AUDIENCE_LABELS` 早就在 `core/enums.py` 里,只是没走到报错
+        # 这条路上来。列出可选值而不是只说"不合法":只说不合法等于让人挨个试。
         raise ValidationError(
-            f"受众取值不合法:{exc}", code=ErrorCode.INPUT_INVALID
+            f"没有「{audience}」这种受众;可选:"
+            + "、".join(AUDIENCE_LABELS.values()),
+            code=ErrorCode.INPUT_INVALID,
         ) from None
     return [_out(t, storage) for t in rows]
 

@@ -42,7 +42,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import {
   Alert, App, Button, Card, Descriptions, Empty, Form, Input, Select, Space,
-  Statistic, Steps, Table, Tag,
+  Statistic, Steps, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
@@ -433,6 +433,20 @@ export default function SpuCreatePage() {
       key: 'ops',
       width: 60,
       render: (_, row) => (
+        // A69:图标按钮没有可读名字,而且**禁用时更需要一句话** —— 下面那条
+        // 注释自己写着"删到零行的话下一步会灰掉而没有任何提示说明为什么",
+        // 这个 Tooltip 就是那句提示的落点。
+        //
+        // 包一层 <span>:antd 的 Tooltip 挂在 disabled 的按钮上不会触发
+        // (禁用元素不派发鼠标事件),而这里恰恰是禁用那一态最需要解释。
+        <Tooltip
+          title={
+            colours.length <= 1
+              ? '至少要保留一个颜色,这一行不能删'
+              : '删掉这个颜色'
+          }
+        >
+          <span>
         <Button
           type="text"
           danger
@@ -448,6 +462,8 @@ export default function SpuCreatePage() {
             invalidatePreview()
           }}
         />
+          </span>
+        </Tooltip>
       ),
     },
   ]

@@ -23,7 +23,6 @@ import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { readError } from '../api/client'
 import {
   AUDIT_ACTION_LABEL,
   AUDIT_ENTITY_LABEL,
@@ -36,6 +35,7 @@ import {
   enumParam, flagParam, intParam, oneOfParam, textParam, useUrlFilters,
 } from '../hooks/useUrlFilters'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
 
 const DAY_OPTIONS = [
@@ -253,12 +253,19 @@ export default function AuditLogPage() {
         </Space>
       </Card>
 
-      {query.isError && (
-        <Card size="small">
-          <Empty description={`拉不到审计记录:${readError(query.error)}`} />
-        </Card>
-      )}
 
+      {/* 失败**不是**"没有数据"。原来这一句渲染在表格的 emptyText 里,
+          于是一次拉取失败在界面上长得和「还没有审计记录」一模一样 ——
+          而这两者的下一步完全相反(一个是重试,一个是去创建)。
+          A12 的统一出口顺带把这件事分开了 */}
+      {query.isError && (
+        <ErrorNotice
+          title="拉不到审计记录"
+          error={query.error}
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
+      )}
       <Table<AuditEntry>
         rowKey="id"
         size="small"

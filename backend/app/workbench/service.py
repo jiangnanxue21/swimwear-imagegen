@@ -985,11 +985,16 @@ def diagnose_copy(
     product: Product,
     *,
     generator_name: str | None = None,
+    actor: str = "system",
 ) -> dict[str, Any]:
     """用生产生成器做一次不落正式文案的能力测试。
 
     事实、提示词与校验规则都复用正式链路,但不创建 ContentPlan / ListingCopy,
     因而不会改变工作台流程状态。真实模型调用仍如实进入费用台账。
+
+    **输出会留档**(BE-310)。在此之前这条链路的输出全仓一行都没存 —— 页面上
+    那句「请保持页面打开,不要刷新」就是这件事的自述。留档走
+    `ai_test_archive`,失败不抛(理由在那个模块顶部)。
     """
     plan = copy_service.content_plan_data(session, product=product)
     if not plan.facts:
@@ -1023,7 +1028,7 @@ def diagnose_copy(
                 billable_units=max(int(trace.get("provider_attempts") or 0), 1),
                 provider_attempts=trace.get("provider_attempts"),
             )
-        return {
+        failed = {
             "success": False,
             "billable": generator.billable,
             "generator": generator.name,
@@ -1035,6 +1040,10 @@ def diagnose_copy(
             "trace": trace,
             "violations": [],
         }
+        # 失败的测试也留档。「跑了但没成」和「没跑过」在历史表里必须分得开 ——
+        # 只记成功的话,那张表会把一串失败读成一段没人用过的空白
+        _archive_copy_test(session, product, failed, actor=actor)
+        return failed
 
     violations = copy_rules.validate_copy(
         draft.as_copy_dict(),
@@ -1056,7 +1065,7 @@ def diagnose_copy(
             billable_units=max(int(trace.get("provider_attempts") or 0), 1),
             provider_attempts=trace.get("provider_attempts"),
         )
-    return {
+    result = {
         "success": True,
         "billable": generator.billable,
         "generator": draft.generator,
@@ -1076,6 +1085,37 @@ def diagnose_copy(
             for item in violations
         ],
     }
+    _archive_copy_test(session, product, result, actor=actor, fact_count=len(plan.facts))
+    return result
+
+
+def _archive_copy_test(
+    session: Session,
+    product: Product,
+    result: dict[str, Any],
+    *,
+    actor: str,
+    fact_count: int | None = None,
+) -> None:
+    """把一次文案测试写进 `ai_test_runs`(BE-310)。
+
+    传的是 `diagnose_copy` 的**整个返回体**,不是它的某几个字段。成功与失败
+    两条分支返回同一套键,靠的就是这份对称;在这里再各拆一遍等于把它拆散,
+    而"某个分支少一个键"正是那份对称一直在防的事故。
+    """
+    from app.workflows.ai_test_record import record_for_copy
+    from app.services import ai_test_archive
+
+    ai_test_archive.archive(
+        session,
+        record_for_copy(
+            product_id=product.id,
+            result=result,
+            actor=actor,
+            prompt_key="copy_llm_system_prompt",
+            fact_count=fact_count,
+        ),
+    )
 
 
 def _copy_unit(
@@ -1741,7 +1781,7 @@ def export_draft(
         suffix = "csv"
     else:
         raise ValidationError(
-            f"不支持的导出格式 {fmt!r};阶段 2 支持 xlsx / csv",
+            f"不支持的导出格式「{fmt}」;现在支持 xlsx / csv",
             code=ErrorCode.INPUT_INVALID,
         )
 

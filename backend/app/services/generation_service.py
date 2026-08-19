@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.prompts.versioning import content_version
 from app.attributes import scope_fingerprint
 from app.core import audience as audience_rules
 from app.core.clock import utc_now
@@ -317,6 +318,22 @@ def _assert_assets_are_usable(
         )
 
 
+def _resolved_prompt_version(prompt: str | None, requested: str | None) -> str:
+    """出图链路的 prompt_version(PRD BE-306)。
+
+    上一版是函数默认参数 `"v1"` —— 拼装的提示词(compose_prompt 把场景/姿势/
+    角度并进去)怎么变,落库的版本号都不动,「这次调用到底用了哪段文本」
+    答不出来。现在:调用方显式给了就尊重;没给且有提示词,对**拼装后的最终
+    字符串**取内容哈希 —— 它就是 AC-30b 要求的"已定型的最终字符串";
+    没提示词的任务保持 `"v1"`,存量幂等身份不漂移。
+    """
+    if requested:
+        return requested
+    if prompt:
+        return content_version(prompt)
+    return "v1"
+
+
 def create_task(
     session: Session,
     *,
@@ -333,7 +350,7 @@ def create_task(
     base_seed: int | None = None,
     prompt: str | None = None,
     negative_prompt: str | None = None,
-    prompt_version: str = "v1",
+    prompt_version: str | None = None,
     provider_params: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     color_variant_id: UUID | None = None,
@@ -520,7 +537,7 @@ def create_task(
         asset_ids=[str(a.id) for a in assets],
         model_template_id=str(model_template_id) if model_template_id else None,
         candidate_count=candidate_count,
-        prompt_version=prompt_version,
+        prompt_version=_resolved_prompt_version(prompt, prompt_version),
         routing_mode=RoutingMode(routing_mode).value,
         max_rounds=max_rounds,
         output_width=output_width,
@@ -558,7 +575,7 @@ def create_task(
         base_seed=base_seed,
         prompt=prompt,
         negative_prompt=negative_prompt,
-        prompt_version=prompt_version,
+        prompt_version=_resolved_prompt_version(prompt, prompt_version),
         provider_params=provider_params or {},
         idempotency_key=key,
         status=TaskStatus.CREATED.value,

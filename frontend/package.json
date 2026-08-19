@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "engines": {
+    "//": "A67-ISSUE-003:22.6.0 = --experimental-strip-types 落地的版本。低于它 tools/run-pure-tests.mjs 加载不了 .ts 用例。这个数和该文件里的 MIN_NODE 必须一致(test_a68_fe_pure_runtime.py 盯着)。",
+    "node": ">=22.6.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

@@ -7,11 +7,11 @@ import type { ColumnsType } from 'antd/es/table'
 import { ImportOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { productsApi } from '../api/products'
-import { readError } from '../api/client'
 import {
   AUDIENCE_LABEL, GARMENT_TYPES, GARMENT_TYPE_LABEL, PATTERN_TYPE_LABEL, STATUS_LABEL,
   garmentTypeOptions, type Product, type ProductStatus,
 } from '../api/types'
+import ErrorNotice from '../components/ErrorNotice'
 import { AudienceTag } from '../components/AudienceBadge'
 import { useServerSort } from '../hooks/useServerSort'
 import {
@@ -222,7 +222,21 @@ const filters = useUrlFilters({
         </Space>
       </Card>
 
+      {/* 失败**不是**"没有数据"。原来这一句渲染在表格的 emptyText 里,
+          于是一次拉取失败在界面上长得和「还没有SKU」一模一样 ——
+          而这两者的下一步完全相反(一个是重试,一个是去创建)。
+          A12 的统一出口顺带把这件事分开了 */}
+      {query.isError && (
+        <ErrorNotice
+          title="拉不到 SKU 列表"
+          error={query.error}
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
+      )}
       <Table<Product>
+        /* A69:七个定宽列合计 830px,加"商品名称"(无定宽)220 = 1050 */
+        scroll={{ x: 1050 }}
         rowKey="id"
         size="small"
         bordered
@@ -233,13 +247,7 @@ const filters = useUrlFilters({
         onChange={sort.onTableChange}
         locale={{
           emptyText: (
-            <Empty
-              description={
-                query.isError
-                  ? readError(query.error)
-                  : '还没有 SKU。请先新建商品款式,或向已有款式批量导入 SKU。'
-              }
-            />
+            <Empty description="还没有 SKU。请先新建商品款式,或向已有款式批量导入 SKU。" />
           ),
         }}
         pagination={{

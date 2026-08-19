@@ -65,6 +65,20 @@ const ROW_TABS = ['fields', 'raw', 'payload'] as const
  */
 const FOLD_TEXT_OVER = 1200
 
+/**
+ * 时间窗预设。**换算成绝对时间戳才进 URL**(见 `since` 那段注释)。
+ *
+ * `docs/LOG-CONSOLE.md` §5.2 写着「级别、时间窗、搜索在顶栏」,而上一版
+ * 后端与前端都没有任何时间参数 —— 排障最常见的第一句话「昨天下午三点前后
+ * 发生了什么」这套控制台答不出来。
+ */
+const SINCE_PRESETS: Array<{ label: string; minutes: number }> = [
+  { label: '全部', minutes: 0 },
+  { label: '15 分钟', minutes: 15 },
+  { label: '1 小时', minutes: 60 },
+  { label: '6 小时', minutes: 360 },
+]
+
 function shortId(value: string): string {
   return value.length > 10 ? `${value.slice(0, 8)}…` : value
 }
@@ -79,7 +93,16 @@ export default function OpsLogPage() {
     domain: textParam(),
     event: textParam(),
     level: textParam(),
+    service: textParam(),
     q: textParam(),
+    /*
+     * 时间窗的起点。**存绝对 ISO 时间戳,不存「最近 15 分钟」。**
+     *
+     * 相对值会让分享出去的链接在对方那里指向另一段时间 —— 而"把链接发给同事"
+     * 是这一页最常见的动作之一(`expanded` 进 URL 就是为了这个)。
+     * 顶栏的预设按钮只是换算入口,换算完落进 URL 的是那一刻的绝对值。
+     */
+    since: textParam(),
     trace_kind: enumParam<string>(TRACE_KINDS),
     trace_id: textParam(),
     // 默认**开着**折叠,所以 URL 上出现的是把它关掉的那一次
@@ -97,7 +120,8 @@ export default function OpsLogPage() {
     tab: enumParam<string>(ROW_TABS, 'fields'),
   })
   const {
-    domain, event, level, q, trace_kind: traceKind, trace_id: traceId,
+    domain, event, level, service, q, since,
+    trace_kind: traceKind, trace_id: traceId,
     fold, follow, limit, expanded, tab,
   } = filters.values
 
@@ -110,7 +134,7 @@ export default function OpsLogPage() {
   const meta = useQuery({ queryKey: ['ops-meta'], queryFn: opsApi.meta })
 
   const query = useQuery({
-    queryKey: ['ops-logs', { domain, event, level, q, traceKind, traceId, limit }],
+    queryKey: ['ops-logs', { domain, event, level, service, q, since, traceKind, traceId, limit }],
     queryFn: () =>
       opsApi.logs({
         // 链路模式下**只按链路键筛**:进了链路就该看见这条链路的全部,
@@ -119,6 +143,10 @@ export default function OpsLogPage() {
         event: inTrace ? undefined : event || undefined,
         level: inTrace ? undefined : level || undefined,
         q: inTrace ? undefined : q || undefined,
+        // 时间窗与进程在链路模式下同样退场:进了链路就该看见这条链路的全部,
+        // 带着筛选进来会让人以为"这条链路只做了这些事"。
+        service: inTrace ? undefined : service || undefined,
+        since: inTrace ? undefined : since || undefined,
         task_id: traceKind === 'task' ? traceId : undefined,
         request_id: traceKind === 'request' ? traceId : undefined,
         limit,
@@ -149,7 +177,7 @@ export default function OpsLogPage() {
    * 免得一根属于上一屏的条一直摊在那里。
    */
   const [opened, setOpened] = useState<Set<string>>(new Set())
-  useEffect(() => setOpened(new Set()), [domain, event, level, q, traceId])
+  useEffect(() => setOpened(new Set()), [domain, event, level, service, q, since, traceId])
 
   /**
    * 折叠:把连续的例行事件收成一根计数条。
@@ -297,6 +325,29 @@ export default function OpsLogPage() {
         />
       )}
 
+      {ring?.access_mode === 'errors' && (
+        /*
+         * **窗口可以少装东西,但不许让人把「我没收」读成「没发生」。**
+         *
+         * 默认只收 4xx/5xx 的访问日志,理由是算术:前端 17 处轮询,打开一个
+         * 任务详情页 ≈ 5400 条/小时,而 cap 是 5000 —— 一个标签页一小时
+         * 就把整个诊断窗口洗一遍。但这个取舍一旦不说出来,`http` 域看起来
+         * 就像"这段时间没人访问过系统",而那是一句没发生的事。
+         */
+        <Alert
+          type="info"
+          showIcon
+          message="访问日志只在 4xx/5xx 时进入诊断窗口"
+          description={
+            <span>
+              2xx/3xx 的请求照常写进 stdout 与外部采集端,只是不占用这个环形窗口 ——
+              一个开着的轮询页面每小时能产生五千条,而窗口一共就这么大。
+              想看全部请求流水:把 <code>OPS_LOG_RING_ACCESS</code> 调成 <code>all</code>。
+            </span>
+          }
+        />
+      )}
+
       {inTrace && (
         <Alert
           type="info"
@@ -374,6 +425,39 @@ export default function OpsLogPage() {
               <span style={{ fontSize: fontScale.body }}>折叠例行事件</span>
             </Tooltip>
           </Space>
+          {/* 时间窗。点一下换算成那一刻的绝对时间戳落进 URL ——
+              相对值分享出去会在对方那里指向另一段时间 */}
+          <Tooltip title="按日志时间筛。选中后 URL 里存的是绝对时间戳,分享链接指向同一段时间">
+            <Segmented
+              value={since ? 'custom' : '全部'}
+              disabled={inTrace}
+              onChange={(value) => {
+                const preset = SINCE_PRESETS.find((one) => one.label === String(value))
+                if (!preset || preset.minutes === 0) {
+                  filters.patch({ since: '' })
+                  return
+                }
+                filters.patch({ since: new Date(Date.now() - preset.minutes * 60_000).toISOString() })
+              }}
+              options={[
+                ...SINCE_PRESETS.map((one) => ({ label: one.label, value: one.label })),
+                ...(since ? [{ label: '自定义', value: 'custom' }] : []),
+              ]}
+            />
+          </Tooltip>
+          {/* 进程筛选。取值来自窗口里**实际出现过**的那些,不是写死的表 ——
+              写死的表会在 worker 没起来时依然列出 worker,而那正是要发现的事 */}
+          <Select
+            allowClear
+            placeholder="哪个进程"
+            style={{ width: 150 }}
+            disabled={inTrace}
+            value={service || undefined}
+            onChange={(value) => filters.patch({ service: value ?? '' })}
+            options={Object.entries(query.data?.services_seen ?? meta.data?.services_seen ?? {}).map(
+              ([key, count]) => ({ label: `${key} · ${count}`, value: key }),
+            )}
+          />
           <Segmented
             value={limit}
             onChange={(value) => filters.patch({ limit: limitParam.narrow(Number(value)) })}
@@ -384,9 +468,12 @@ export default function OpsLogPage() {
       </Card>
 
       <div style={{ display: 'flex', gap: space.md, alignItems: 'flex-start' }}>
+        {/* 标题从「本屏计数」改成「全窗计数」:a54 已经把计数挪到服务端按全窗
+            算了,而这个标题是改动前的遗留 —— 它和自己下面那行 `note`
+            (「计数按整个环形窗口算」)一直在打架,而两句话里只有一句是真的 */}
         <Card
           size="small"
-          title={<span style={{ fontSize: fontScale.meta }}>领域(本屏计数)</span>}
+          title={<span style={{ fontSize: fontScale.meta }}>领域(全窗计数)</span>}
           styles={{ body: { padding: space.xs } }}
           style={{ width: 190, flexShrink: 0 }}
         >
@@ -422,6 +509,18 @@ export default function OpsLogPage() {
               onRetry={() => query.refetch()}
               retrying={query.isFetching}
               style={{ marginBottom: space.sm }}
+            />
+          )}
+          {query.data?.truncated && (
+            /* **截断必须显形。** 上一版超出 limit 就静默停,而 a54 刚把域计数
+               改成按全窗算 —— 于是左边显示 800、右边显示 200,两个数字互相
+               矛盾,页面上没有一处解释 */
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: space.sm }}
+              message={`命中 ${query.data.matched} 条,这里显示最近 ${query.data.items.length} 条`}
+              description="调大右上角的条数,或者收窄筛选(时间窗、域、级别)。"
             />
           )}
           <Table<{ key: string }>
@@ -500,8 +599,19 @@ export default function OpsLogPage() {
                 padding: `${space.sm}px 0`,
               }}
             >
-              窗口里最早的一条是 {formatDateTime(query.data.oldest_ts)} —— 更早的不是没发生,
-              是滚出窗口了。
+              {/* 两个数,谁也不冒充谁。上一版只说了全窗边界,而列表被 limit
+                  截断之后实际起点比它晚得多 —— 那句「更早的不是没发生」
+                  在那一刻是在误导人 */}
+              <div>
+                环形窗口最早的一条是 {formatDateTime(query.data.oldest_ts)} —— 更早的不是没发生,
+                是滚出窗口了。
+              </div>
+              {query.data.shown_oldest_ts &&
+                query.data.shown_oldest_ts !== query.data.oldest_ts && (
+                  <div>
+                    当前这张列表只到 {formatDateTime(query.data.shown_oldest_ts)}。
+                  </div>
+                )}
             </div>
           )}
         </div>
@@ -639,7 +749,17 @@ function LogRow({
       <span className="mono" style={{ fontSize: fontScale.meta, color: brandVars.textMuted }}>
         {formatDateTime(row.ts)}
       </span>
+      {/* 时间戳解析不出来的行排在末尾,并且**说出来** —— 兜底一个时间会让它
+          安静地落在某个位置上,而"它到底该排哪"恰恰是答不出来的那件事 */}
+      {row.ts_unparsed && (
+        <Tooltip title="这条日志的时间戳无法解析,它被排在了列表末尾 —— 它的真实位置未知">
+          <Tag color="warning">时间未知</Tag>
+        </Tooltip>
+      )}
       <Tag color={LEVEL_TONE[row.level ?? 'INFO']}>{row.level}</Tag>
+      {/* 哪个进程写的。三种进程写进同一个环形,少了这一列就分不出
+          「gen 域为什么空着」是没跑任务,还是 worker 挂了 */}
+      {row.service && <BrandTag tone="sand">{row.service}</BrandTag>}
       {/* 域一律同一个底色:十五种颜色没人记得住,域靠文字区分。
           走 BrandTag 而不是 antd 预设色 —— 后者不受 theme.ts 控制 */}
       <BrandTag tone="marine">{row.domain_label}</BrandTag>

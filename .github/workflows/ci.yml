@@ -37,6 +37,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # A67-ISSUE-003:这个 job 原来直接跑前端那个零依赖 runner,却**没有**
+      # setup-node —— 于是这条门禁跑成什么样,取决于 hosted runner 镜像当天
+      # 预装的是哪个 Node 小版本。22.16 与 22.22 在这件事上结论相反
+      # (默认剥类型是 22.18.0 才落地的),一次镜像滚动就能让 gate 由绿转红,
+      # 而 diff 里一个字都没改。
+      #
+      # 钉到小版本,不是 "22"。钉 major 只保证「是 22」,而这条门禁分不清的
+      # 恰好是 22 的内部。
+      #
+      # 注释里**刻意不写那个 runner 的文件名**:a61 的守卫是靠"那个文件名
+      # 在 ci.yml 里出现过"来判断 CI 有没有跑它的。名字一旦出现在注释里,
+      # 真实那一步被删掉时子串仍在,守卫照样绿。
+      #
+      # 这一处第一版就是这么写的,被 mutate_a61 的 M2 当场抓出来;而第二版
+      # 在**解释这个坑的注释里**又写了一次同一个名字,于是同一条变异第二次
+      # 通过。守卫读的是整份文件,它分不清代码和注释 —— 举例说明"不许写什么"
+      # 时,那个例子本身就会成为违规。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
       - name: 后端纯测试(零依赖)
         run: cd backend && python3 tools/run_pure_tests.py
       - name: 交付卫生与门禁接线自检
@@ -49,6 +69,14 @@ jobs:
         run: cd backend && python3 tools/audit_anchors.py
       - name: 守卫窗口体检
         run: cd backend && python3 tools/audit_source_guards.py
+      - name: 读源码的守卫窗口是否唯一(棘轮)
+        run: cd backend && python3 tools/audit_guard_windows.py
+      - name: 前端纯逻辑测试(零依赖)
+        run: cd frontend && node tools/run-pure-tests.mjs
+      - name: dataclass 字段是否有人给过值(棘轮)
+        run: cd backend && python3 tools/audit_dataclass_fields.py
+      - name: 迁移链重放并与 ORM 比对
+        run: cd backend && python3 tools/audit_migration_chain.py
       - name: 列写入点审计
         run: cd backend && python3 tools/audit_column_writers.py
 

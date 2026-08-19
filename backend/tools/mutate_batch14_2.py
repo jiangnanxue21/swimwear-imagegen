@@ -125,10 +125,26 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     ),
     (
         "N12",
-        "分组不再按 missing_reason 过滤(带值证据被当成'没有值'报出来)",
+        "组件退回按逐图证据自己判(带值证据被当成'没有值'报出来)",
         FRONTEND_TAB,
-        "      if (!item.missing_reason) continue",
-        "      if (false) continue",
+        # 这一条**失锚过**,而失锚的原因不是重构挪了行,是这个判定换了归属:
+        # §3.83 把「某张图说没有值,是否已被另一张图解决」整体收进后端
+        # (`attributes/missing_summary.unresolved_missing`),前端那句
+        # `if (!item.missing_reason) continue` 因此被删掉 —— 守卫在同一轮
+        # 跟着改成了「必须读后端派生的 unresolved_missing」,而这条变异没跟。
+        # 于是 batch14-2 全绿、audit_anchors 报 589/590,中间那段时间它什么都没验。
+        #
+        # 重新对准的是**同一个意图在新归属下的入口**:把喂给组件的数据从后端
+        # 派生值换回逐图证据,带值字段就会重新混进「仍没有可用值」那张列表 ——
+        # 也就是原描述里那句「带值证据被当成'没有值'报出来」。
+        # 它验的是 `test_the_missing_reason_is_rendered_not_just_typed` 里
+        # 那条此前**没有任何变异覆盖过**的断言(line ~461)。
+        #
+        # 后端那半边(`field not in resolved` 的过滤本身)归 §3.83 的守卫
+        # `test_attribute_missing_summary.py`,不在本批 SUITE_FILTER 的射程内,
+        # 需要另立一份变异 —— 记在这里,免得下一个人以为这条已经全覆盖了。
+        "        missing={lastExtraction.data?.unresolved_missing ?? []}",
+        "        missing={(lastExtraction.data?.evidence ?? []) as never}",
     ),
     (
         "N13",

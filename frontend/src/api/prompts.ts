@@ -1,8 +1,19 @@
 import { apiClient} from './client'
-import type { PromptOverview, PromptPreview } from './types'
+import type {
+  PromptOverview,
+  PromptPreview,
+  PromptSurfaceList,
+  PromptVersionDetail,
+} from './types'
 
 /** 提示词决定评分口径,读写都要口令 —— 能改它的人等于能改「什么图算合格」。 */
 export const promptsApi = {
+  /**
+   * 注册表全量(BE-302)。**这是列表页存在的前提** —— 在它之前,8 处提示词里
+   * 只有第 1 处能在界面上看到,其余 7 处的存在只写在一份 PRD 的表格里。
+   */
+  list: async () => (await apiClient.get<PromptSurfaceList>('/prompts')).data,
+
   read: async (key: string) =>
     (await apiClient.get<PromptOverview>(`/prompts/${key}`)).data,
 
@@ -34,6 +45,14 @@ export const promptsApi = {
       )
     ).data,
 
+  /** 单版本只读正文(BE-303)。看一眼不等于让它生效。 */
+  readVersion: async (key: string, version: number) =>
+    (
+      await apiClient.get<PromptVersionDetail>(
+        `/prompts/${key}/versions/${version}`,
+      )
+    ).data,
+
   activate: async (key: string, version: number) =>
     (
       await apiClient.post<PromptOverview>(
@@ -42,8 +61,13 @@ export const promptsApi = {
       )
     ).data,
 
-  reset: async (key: string) =>
-    (await apiClient.post<PromptOverview>(`/prompts/${key}/reset`, null)).data,
+  reset: async (key: string, note?: string, expectedVersion?: number | null) =>
+    (
+      await apiClient.post<PromptOverview>(`/prompts/${key}/reset`, {
+        note: note || null,
+        expected_version: expectedVersion ?? null,
+      })
+    ).data,
 }
 
 export const VISION_SYSTEM_PROMPT = 'vision_system_prompt'

@@ -3,6 +3,7 @@
 Alembic autogenerate 依赖此处的导入来发现全部表,新增模型必须在这里登记。
 """
 from app.db.base import Base
+from app.models.ai_test_run import AiTestRun
 from app.models.app_setting import AppSetting
 from app.models.attribute import (
     AttributeCalibration,
@@ -52,6 +53,7 @@ __all__ = [
     "ProductAsset",
     "AuditLog",
     "AppSetting",
+    "AiTestRun",
     "BatchJob",
     "BatchJobItem",
     "BatchActionReceipt",

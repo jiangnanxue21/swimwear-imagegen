@@ -129,6 +129,80 @@ describe('ErrorNotice：运营一句话，管理员能展开', () => {
   })
 })
 
+// ======================================================= ErrorNotice 重试矩阵
+
+/**
+ * A67-ISSUE-002 的行为回归。
+ *
+ * ## 上面那条为什么没抓到
+ *
+ * 它把**错误类型**和**调用点给不给 onRetry** 绑在了一起测：403 那次不传
+ * onRetry，500 那次才传。于是它证明的是「onRetry 缺席时没按钮」，而真正
+ * 出问题的组合 —— **403 且传了 onRetry** —— 一次都没渲染过。
+ *
+ * 而六个 a67 迁移页面恰好全是那个组合：它们无条件把 `onRetry` 传下去。
+ * 于是测试全绿，页面照样对权限错误画重试按钮，同一张卡片的技术详情里还
+ * 写着「重试不会改变结果」。
+ *
+ * 下面这张表**固定传 onRetry**，只让错误类型变化 —— 按钮出不出现由组件
+ * 自己按 `technical.retriable` 决定，这才是组件的 action policy。
+ */
+describe('ErrorNotice：传了 onRetry 之后，按钮仍由 retriable 决定', () => {
+  const noop = () => {}
+  const retryButton = () => screen.queryByRole('button', { name: /重\s*试/ })
+
+  /** 请求没到后端那一支：超时与连不上。`kind` 决定它是 FAILED 还是 UNKNOWN */
+  function transportError(code: 'ECONNABORTED' | 'ERR_NETWORK') {
+    return { isAxiosError: true, message: 'boom', code }
+  }
+
+  it.each([
+    ['403 权限不足', apiError(403, 'AUTH_FORBIDDEN', '这一步需要管理员账号')],
+    ['404 找不到', apiError(404, 'NOT_FOUND', '这条记录不在了')],
+    ['422 参数不合法', apiError(422, 'VALIDATION_ERROR', '字段填得不对')],
+    ['401 登录失效', apiError(401, 'AUTH_REQUIRED', '登录状态已失效')],
+  ])('%s：不画重试按钮 —— 再点一次仍然是同一个结果', (_label, error) => {
+    render(<ErrorNotice error={error} onRetry={noop} />)
+    expect(retryButton()).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['429 太频繁', apiError(429, 'RATE_LIMITED', '请求太频繁，请稍后再试')],
+    ['500 服务端失败', apiError(500, 'INTERNAL', '服务器开小差')],
+    ['503 服务不可用', apiError(503, 'UNAVAILABLE', '服务暂时不可用')],
+  ])('%s：画重试按钮 —— 等一会儿再来结果可能不同', (_label, error) => {
+    render(<ErrorNotice error={error} onRetry={noop} />)
+    expect(retryButton()).toBeInTheDocument()
+  })
+
+  it('连不上服务：画重试按钮', () => {
+    render(<ErrorNotice error={transportError('ERR_NETWORK')} onRetry={noop} />)
+    expect(retryButton()).toBeInTheDocument()
+  })
+
+  it('读请求超时：画重试按钮', () => {
+    render(<ErrorNotice error={transportError('ECONNABORTED')} onRetry={noop} kind="read" />)
+    expect(retryButton()).toBeInTheDocument()
+  })
+
+  it('写请求超时（UNKNOWN）：不画 —— 那一次可能已经生效了', () => {
+    render(<ErrorNotice error={transportError('ECONNABORTED')} onRetry={noop} kind="write" />)
+    expect(retryButton()).not.toBeInTheDocument()
+  })
+
+  it('按钮与技术详情不许各说各话', async () => {
+    // 管理员身份下，「可否重试」那一行和按钮出自同一个 `technical.retriable`。
+    // 这一条就是 ISSUE-002 的原始症状：详情说「不会改变结果」，底下摆着按钮
+    setIdentity({ isAdmin: true })
+    const user = userEvent.setup()
+    render(<ErrorNotice error={apiError(403, 'AUTH_FORBIDDEN', '权限不足')} onRetry={noop} />)
+
+    await user.click(screen.getByText(/技术详情/))
+    expect(await screen.findByText('重试不会改变结果')).toBeInTheDocument()
+    expect(retryButton()).not.toBeInTheDocument()
+  })
+})
+
 // ================================================================ ColdStartBanner
 
 function renderBanner(path = '/today') {

@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api import (
+    ai_tests,
     attributes,
     auth,
     dashboard,
@@ -67,6 +68,8 @@ api_router.include_router(dashboard.router)
 api_router.include_router(exports.router)
 api_router.include_router(settings.router)
 api_router.include_router(prompts.router)
+# AI 测试留档的读接口(BE-311)。管理员闸,与提示词页同一档口径
+api_router.include_router(ai_tests.router)
 # 付费调用花费台账(A23)。运营也要看 —— 预算快满了会影响今天怎么排活
 api_router.include_router(usage.router)
 # 发布(任务 18):提交/清单/详情/刷新状态/下架/清理预案。

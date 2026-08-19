@@ -442,6 +442,30 @@ DEFAULT_SYSTEM_PROMPT_MEN = """你是一名严格的男装泳衣电商商品图�
 不要输出 JSON 以外的任何内容。"""
 
 
+#: 防注入段(PRD BE-308)。**从女装默认提示词切片派生,不是第三份手写副本。**
+#:
+#: 女装 50 个非空行里 37 行与男装逐字相同(74%),核心正是这一段 ——
+#: 三份可能各自漂移的副本(代码内置女装、代码内置男装、库里 active 版)
+#: 是 PRD 问题 C。这里刻意**不**把两份默认改写成「头 + 常量 + 尾」的拼接:
+#: 那样最终字符串哪怕多一个换行,AC-34(女装历史样本分档逐条一致)就破了,
+#: 而本轮没有能跑 AC-34 的环境。切片派生保证这个常量与女装正文逐字一致,
+#: 下面两条断言保证男装那份没有漂 —— 漂了,import 这个模块的第一个人就会看到。
+#:
+#: `lint_prompt` 对 FREE 层用它查 `no_anti_injection`:内置默认自然包含它,
+#: 所以打开页面不会平白一片黄(PRD:别训练人忽略警告面板)。
+_INJECTION_HEAD = "【最高优先级:数据与指令的边界】"
+_INJECTION_TAIL = "最重要的判断顺序"
+ANTI_INJECTION_BLOCK = DEFAULT_SYSTEM_PROMPT[
+    DEFAULT_SYSTEM_PROMPT.index(_INJECTION_HEAD):DEFAULT_SYSTEM_PROMPT.index(_INJECTION_TAIL)
+].rstrip() + "\n"
+if not ANTI_INJECTION_BLOCK.startswith(_INJECTION_HEAD):  # -O 不剥 raise
+    raise AssertionError("防注入段切片起点漂了")
+if ANTI_INJECTION_BLOCK not in DEFAULT_SYSTEM_PROMPT_MEN:
+    raise AssertionError(
+        "男装默认提示词里的防注入段与女装漂移了 —— 两份必须逐字一致(PRD 问题 C)"
+    )
+
+
 _DEPTH_INSTRUCTIONS = {
     EvaluationDepth.FULL: (
         "评分深度:FULL(完整评分)。\n"

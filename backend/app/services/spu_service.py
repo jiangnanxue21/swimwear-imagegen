@@ -130,7 +130,10 @@ def _translate(error: sku_matrix.SkuPlanError) -> ValidationError:
 def get_spu(session: Session, spu_id: UUID) -> Spu:
     spu = session.get(Spu, spu_id)
     if spu is None:
-        raise NotFoundError(f"SPU {spu_id} 不存在")
+        raise NotFoundError(
+            "找不到这个款,它可能已经被删除;请回到款式列表重新进入",
+            detail={"spu_id": str(spu_id)},
+        )
     return spu
 
 
@@ -645,7 +648,10 @@ def _locked_spu(session: Session, spu_id: UUID) -> Spu:
     """
     spu = session.scalar(select(Spu).where(Spu.id == spu_id).with_for_update())
     if spu is None:
-        raise NotFoundError(f"SPU {spu_id} 不存在")
+        raise NotFoundError(
+            "找不到这个款,它可能已经被删除;请回到款式列表重新进入",
+            detail={"spu_id": str(spu_id)},
+        )
     return spu
 
 
@@ -656,7 +662,10 @@ def update_spu(
     expected = int(data.pop("expected_version"))
     spu = session.scalar(select(Spu).where(Spu.id == spu_id).with_for_update())
     if spu is None:
-        raise NotFoundError(f"SPU {spu_id} 不存在")
+        raise NotFoundError(
+            "找不到这个款,它可能已经被删除;请回到款式列表重新进入",
+            detail={"spu_id": str(spu_id)},
+        )
     if spu.row_version != expected:
         raise ConcurrentTransition(
             f"SPU 已被其他人更新（当前版本 {spu.row_version}），请刷新后重试"

@@ -1,6 +1,6 @@
-import { Alert, Badge, Card, Descriptions, Skeleton, Space } from 'antd'
+import { Badge, Card, Descriptions, Skeleton, Space } from 'antd'
 import { useQuery } from '@tanstack/react-query'
-import { apiClient, readError } from '../api/client'
+import { apiClient } from '../api/client'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -36,7 +36,12 @@ export default function SystemStatusPage() {
       />
 
       {health.isError && (
-        <Alert type="error" showIcon message="后端未响应" description={readError(health.error)} />
+        <ErrorNotice
+          title="后端未响应"
+          error={health.error}
+          onRetry={() => health.refetch()}
+          retrying={health.isFetching}
+        />
       )}
 
       <Card size="small" title="服务进程">

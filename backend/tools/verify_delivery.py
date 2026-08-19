@@ -344,6 +344,10 @@ def check_ci_runs_every_gate() -> None:
         "npm run test": "Vitest",
         "npm run build": "前端构建",
         "audit_source_guards.py": "守卫窗口体检（反向断言不许吃切窄的源码）",
+        "audit_guard_windows.py": "读源码的守卫窗口是否唯一（棘轮，a59）",
+        "run-pure-tests.mjs": "前端纯逻辑测试（零依赖，a61）",
+        "audit_dataclass_fields.py": "dataclass 字段是否有人给过值（棘轮，a64）",
+        "audit_migration_chain.py": "迁移链重放并与 ORM 比对（a65）",
         "audit_column_writers.py": "列写入点审计（每一列都答得出谁写它）",
         "verify_delivery.py": "交付卫生（本文件）",
         "docker build": "生产镜像构建",
@@ -351,6 +355,10 @@ def check_ci_runs_every_gate() -> None:
     missing = [f"{cmd}（{why}）" for cmd, why in required.items() if cmd not in ci]
     if missing:
         raise Failure("CI 没有覆盖这些门禁：\n  " + "\n  ".join(missing))
+    # 这条检查的名字原来写死着「CI 覆盖全部 14 条门禁」,而表里当时只有 13 条 ——
+    # **它在 a59 加第 14 条之前就已经是错的,没有任何东西会发现**。
+    # a59 把名字里的数字去掉:条数由这张表自己说,`docs/STATUS.md` 第五节
+    # 那条「数字不写死」的规矩立的正是为这一类。
 
 
 def check_ci_backs_pytest_with_redis() -> None:
@@ -1390,7 +1398,7 @@ CHECKS = [
     ("打包脚本先排除再复验", check_the_pack_script_excludes_and_then_verifies),
     ("backend/.dockerignore 排除密钥目录", check_backend_dockerignore_excludes_the_key_directory),
     ("每条前端门禁脚本都有人调用", check_every_frontend_gate_script_is_invoked),
-    ("CI 覆盖全部 14 条门禁", check_ci_runs_every_gate),
+    ("CI 覆盖每一条门禁", check_ci_runs_every_gate),
     ("CI 的 pytest 有 PostgreSQL + Redis", check_ci_backs_pytest_with_redis),
     (
         "CI 满足 conftest 的测试库契约",

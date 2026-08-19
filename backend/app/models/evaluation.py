@@ -282,8 +282,13 @@ class EvaluationAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finish_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
-    #: 当时生效的提示词版本。评分口径变化和失败率变化要能对得上
-    prompt_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 当时生效的提示词版本。评分口径变化和失败率变化要能对得上。
+    #:
+    #: **String 而不是 Integer**(迁移 0055 / BE-307):四张落 prompt_version
+    #: 的表里原来只有这一张是 int,跨表聚合做不了。今天这一列装的仍是
+    #: `prompt_templates.version` 那个自增序号(评分链路还没接内容哈希),
+    #: 但类型先归一 —— 接的那天不必再改一次表,也不必再写一次有损 downgrade。
+    prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

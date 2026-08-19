@@ -630,7 +630,8 @@ export interface EvaluationAttempt {
   response_id: string | null
   http_status: number | null
   finish_reason: string | null
-  prompt_version: number | null
+  // 迁移 0055 起是字符串(BE-307):四张落 prompt_version 的表归一到 String(32)
+  prompt_version: string | null
   prompt_tokens: number | null
   completion_tokens: number | null
   total_tokens: number | null
@@ -1032,6 +1033,14 @@ export interface PromptOverview {
   version: number | null
   is_default: boolean
   default_content: string
+  /**
+   * 防注入段正文(FE-305)。`null` = 这处提示词没有这一段。
+   *
+   * **由后端切好送来,前端不许自己从 `default_content` 里截** —— 切片的起止在
+   * `vision_schema` 里由两个头尾常量定着,那两个常量漂一个字,前端那份切法会
+   * 安静地切歪(后端 import 时有 raise 护着,前端没有)。
+   */
+  anti_injection_block: string | null
   warnings: PromptWarning[]
   versions: PromptVersion[]
   saved_version?: number
@@ -1041,4 +1050,84 @@ export interface PromptPreview {
   key: string
   chars: number
   warnings: PromptWarning[]
+}
+
+/** 三层模型(PRD §10)。`MAPPING` 本轮只读(§14.2 决议)。 */
+export type PromptTier = 'FREE' | 'TEMPLATE' | 'MAPPING'
+
+/**
+ * 注册表里的一处提示词(`GET /prompts`,BE-302)。
+ *
+ * `editable` 的语义是**消费链路会不会读库**,不是"想不想让人改" —— 8 处里
+ * 只有评分两份走 `get_active_content`,其余 6 处的正文由代码拼装。把它们做成
+ * 可编辑,得到的是「保存成功、毫无效果」,比不可编辑更伤人。所以列表页对
+ * `editable=false` 的项只展示、不给入口,理由从 `consumers` 里原样读出来。
+ *
+ * **没有"近 7 天调用次数"这一列。** PRD FE-301 要它,而后端 `list_prompts`
+ * 的文档写着「先不给一个算不准的数」—— 前端不推测状态(硬规则第 4 条),
+ * 后端不给就不显示,不在这里用别的字段凑一个近似值。
+ */
+export interface PromptSurface {
+  key: string
+  label: string
+  tier: PromptTier
+  editable: boolean
+  ui_reachable: boolean
+  required_slots: string[]
+  consumers: string[]
+  has_static_default: boolean
+  /** 只有 editable 的项带这一列;null = 内置默认生效中 */
+  active_version?: number | null
+}
+
+export interface PromptSurfaceList {
+  surfaces: PromptSurface[]
+}
+
+/**
+ * 单版本只读正文(`GET /prompts/{key}/versions/{n}`,BE-303)。
+ *
+ * 它存在的理由:在此之前想看 v3 写了什么,唯一办法是**把它切成生效版本** ——
+ * 而那个动作会立刻改掉线上每一张图的评分口径。「想看一眼」和「想让它生效」
+ * 被绑成了一个动作。
+ */
+export interface PromptVersionDetail {
+  key: string
+  version: number
+  content: string
+  is_active: boolean
+  note: string | null
+  updated_by: string | null
+}
+
+/** 一条 AI 测试留档(BE-311)。`payload_out` 对评分是指针,对文案是全文。 */
+export interface AiTestRun {
+  id: string
+  kind: 'evaluation' | 'copy'
+  subject_type: string
+  subject_id: string | null
+  prompt_key: string | null
+  prompt_version: string | null
+  prompt_template_version: number | null
+  generator: string | null
+  model_name: string | null
+  success: boolean
+  error_code: string | null
+  error_message: string | null
+  duration_ms: number | null
+  total_tokens: number | null
+  billable: boolean
+  actor: string
+  created_at: string
+  payload_in: Record<string, unknown> | null
+  payload_out: Record<string, unknown> | null
+}
+
+export interface AiTestRunList {
+  runs: AiTestRun[]
+  has_more: boolean
+  /** 后端**实际生效**的每页条数。传了 100000 而它收到 100 时,这个数是唯一的告知 */
+  limit: number
+  offset: number
+  max_limit: number
 }

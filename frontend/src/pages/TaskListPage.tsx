@@ -5,10 +5,11 @@ import type { ColumnsType } from 'antd/es/table'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { generationApi, SUBMIT_RESULT_UNKNOWN } from '../api/generation'
-import { isResultUnknown, readError, readWriteError } from '../api/client'
+import { isResultUnknown, readWriteError } from '../api/client'
 import {
   MODE_LABEL, TASK_STATUS_LABEL, listPollInterval, type Task, type TaskStatus,
 } from '../api/types'
+import ErrorNotice from '../components/ErrorNotice'
 import TaskCreateModal from '../components/TaskCreateModal'
 import ForceRetryModal from '../components/ForceRetryModal'
 import { useServerSort } from '../hooks/useServerSort'
@@ -294,7 +295,21 @@ export default function TaskListPage() {
         </Space>
       </Card>
 
+      {/* 失败**不是**"没有数据"。原来这一句渲染在表格的 emptyText 里,
+          于是一次拉取失败在界面上长得和「还没有生成任务」一模一样 ——
+          而这两者的下一步完全相反(一个是重试,一个是去创建)。
+          A12 的统一出口顺带把这件事分开了 */}
+      {query.isError && (
+        <ErrorNotice
+          title="拉不到任务列表"
+          error={query.error}
+          onRetry={() => query.refetch()}
+          retrying={query.isFetching}
+        />
+      )}
       <Table<Task>
+        // A69:七个定宽列合计 840px。全部定宽,所以这个数就是最小可读宽度
+        scroll={{ x: 840 }}
         rowKey="id"
         size="small"
         bordered
@@ -304,13 +319,7 @@ export default function TaskListPage() {
         onChange={sort.onTableChange}
         locale={{
           emptyText: (
-            <Empty
-              description={
-                query.isError
-                  ? readError(query.error)
-                  : '还没有生成任务。挑一个已上传素材的商品创建一个。'
-              }
-            />
+            <Empty description="还没有生成任务。挑一个已上传素材的商品创建一个。" />
           ),
         }}
         pagination={{

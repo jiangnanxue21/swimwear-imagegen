@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import locale
 import sys
 import time
 from collections import deque
@@ -47,6 +46,7 @@ from app.core.log_events import (  # noqa: E402 - 必须先把 backend 放进 sy
     folds_away,
     label_of,
     level_at_least,
+    normalize_level,
     resolve_domain,
 )
 
@@ -61,11 +61,30 @@ DEFAULT_DOMAINS = ("llm",)
 #: `/api/ops/llm/{call_id}`,那是另一个去向、另一套寿命。
 _PAYLOAD_KEYS = ("request_body", "response_body")
 
-_HIDDEN = {"ts", "level", "logger", "message", "domain", "event", "seq", *_PAYLOAD_KEYS}
+_HIDDEN = {
+    "ts", "level", "logger", "message", "domain", "event", "seq",
+    # 这两个有自己的固定位置(见 `_print_event`),不再混进字段列表
+    "service", "pid",
+    *_PAYLOAD_KEYS,
+}
 
 
-def _encoding() -> str:
-    return locale.getpreferredencoding(False) or "utf-8"
+#: 日志文件的编码。**固定 UTF-8,与写入端同一个口径。**
+#:
+#: 上一版是 `locale.getpreferredencoding(False)` —— 而 `core/logging.py` 的
+#: `setup_logging` 有一整段注释在讲为什么必须强制 UTF-8:
+#:
+#:     中文 Windows 上 stdout 默认是 GBK,轻则整份日志不是 UTF-8、采集端
+#:     读出乱码,重则遇到一个 GBK 编不出的字符抛 UnicodeEncodeError ——
+#:     logging 会吞掉它,**整条记录消失**。而这类记录往往正是出问题的那一条。
+#:
+#: **写的时候强制 UTF-8,读的时候用系统代码页。** 在中文 Windows 上,
+#: 所有中文 message 与字段值会变成乱码 —— 而 JSON 结构是纯 ASCII,
+#: `json.loads` 照样成功,**不报任何错**。查看器于是安静地展示乱码,
+#: 而人会以为是日志本身写坏了。
+#:
+#: `errors="replace"` 保留:一条坏字节不该让整个查看器停下来。
+LOG_ENCODING = "utf-8"
 
 
 def _compact(value: Any, *, limit: int = 160) -> str:
@@ -91,12 +110,16 @@ class Filter:
         min_level: str = "DEBUG",
         show_routine: bool = False,
         text: str = "",
+        service: str = "",
     ) -> None:
         self.domains = tuple(d for d in domains if d)
         self.events = tuple(events)
         self.min_level = min_level.upper()
         self.show_routine = show_routine
         self.text = text.lower()
+        #: 哪个进程写的。**与 Web 同名同义** —— 一个人在终端学会的过滤,
+        #: 换到页面上不用重学(§5.3 那条口径,这里是它的第二个字段)。
+        self.service = service.strip()
 
     def accepts(self, row: dict[str, Any]) -> bool:
         event = row.get("event")
@@ -104,6 +127,8 @@ class Filter:
         level = str(row.get("level") or "INFO").upper()
 
         if self.domains and domain not in self.domains:
+            return False
+        if self.service and str(row.get("service") or "") != self.service:
             return False
         if self.events and event not in self.events:
             return False
@@ -140,11 +165,27 @@ def _print_event(row: dict[str, Any], flt: Filter | None = None) -> None:
         f"  event={event or '-'}  request_id={row.get('request_id', '-')}  "
         f"llm_call_id={row.get('llm_call_id', '-')}"
     )
+    # 哪个进程写的。三种进程写进同一个环形,少了这一列就分不出
+    # 「gen 域为什么空着」是没跑任务还是 worker 挂了。
+    print(f"  service={row.get('service', '-')}  pid={row.get('pid', '-')}")
 
     fields = {k: v for k, v in row.items() if k not in _HIDDEN and v is not None}
     fields.pop("request_id", None)
+    # 表头那一行已经打过它了 —— 再随字段区打一遍,同一屏两份同一个值,
+    # 读的人会以为它们可能不同。
+    fields.pop("llm_call_id", None)
+    # 堆栈**不进 160 字符的 compact 预算**。exc 是排障最要紧的字段,而
+    # `_compact` 会把一条 Traceback 截成
+    # `"Traceback (most recent call last):\n  File …(2489 chars)"` ——
+    # 真正报错的最后一行恰恰在被截掉的那一截里。全文缩进打印,
+    # 与 `_print_payload` 同一个姿势。
+    exc_text = fields.pop("exc", None)
     for key, value in fields.items():
         print(f"  {key}: {_compact(value)}")
+    if isinstance(exc_text, str) and exc_text.strip():
+        print("  exc:")
+        for line in exc_text.splitlines():
+            print(f"    {line}")
 
     for key in _PAYLOAD_KEYS:
         if key in row:
@@ -152,16 +193,46 @@ def _print_event(row: dict[str, Any], flt: Filter | None = None) -> None:
     sys.stdout.flush()
 
 
-def _follow_file(path: Path, flt: Filter) -> None:
-    encoding = _encoding()
-    print(f"运行日志:{path}")
-    print(f"读取编码:{encoding};Ctrl+C 只停止查看,不停止 API。")
-    print(f"过滤:域={','.join(flt.domains) or '全部'} 级别≥{flt.min_level} "
-          f"例行={'展开' if flt.show_routine else '收起'}")
+def _replay_tail(stream: Any, flt: Filter, count: int) -> None:
+    """先把最后 ``count`` 条回放出来,再进入跟随。
+
+    上一版 `_follow_file` 开头直接 `seek(0, 2)` 跳到文件末尾,于是 CLI
+    **完全看不了历史** —— 只能等新日志。而这个工具最常见的用法恰恰是
+    「刚才出的那个错,给我看看」:等你把命令敲完,那条日志已经过去了。
+
+    `deque(maxlen=)` 而不是 `readlines()[-N:]`:日志文件是只增的,
+    整份读进内存这件事会在某个跑了两周的开发机上变成一次 OOM。
+    """
+    kept: deque[str] = deque(maxlen=max(0, count))
+    for line in stream:
+        kept.append(line)
+    if not kept:
+        return
+    print(f"—— 回放最近 {len(kept)} 行 ——")
+    for line in kept:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            _print_event(row, flt)
+    print("—— 回放结束,以下是新日志 ——")
     sys.stdout.flush()
 
-    with path.open("r", encoding=encoding, errors="replace") as stream:
-        stream.seek(0, 2)
+
+def _follow_file(path: Path, flt: Filter, *, tail: int = 200) -> None:
+    print(f"运行日志:{path}")
+    print(f"读取编码:{LOG_ENCODING}(与写入端一致);Ctrl+C 只停止查看,不停止 API。")
+    print(f"过滤:域={','.join(flt.domains) or '全部'} 级别≥{flt.min_level} "
+          f"例行={'展开' if flt.show_routine else '收起'}"
+          f"{' 进程=' + flt.service if flt.service else ''}")
+    sys.stdout.flush()
+
+    with path.open("r", encoding=LOG_ENCODING, errors="replace") as stream:
+        if tail > 0:
+            _replay_tail(stream, flt, tail)
+        else:
+            stream.seek(0, 2)
         while True:
             line = stream.readline()
             if not line:
@@ -199,7 +270,9 @@ def _follow_ring(flt: Filter, *, interval: float = 2.0) -> None:
             print(f"[查看器] 环形缓冲读不到:{error}")
             time.sleep(interval)
             continue
-        for row in reversed(rows):
+        # `read_ring` 现在返回 (原始行, 解析后) —— 原始行留给需要子串匹配的
+        # 调用方(见 `api/ops_logs.py`),这里只用解析后的那一半。
+        for _raw, row in reversed(rows):
             marker = str(row.get("seq") or f"{row.get('ts')}|{row.get('message')}")
             if marker in seen_index:
                 continue
@@ -226,6 +299,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--routine", action="store_true", help="展开例行事件(默认收起)")
     parser.add_argument("-q", "--query", default="", help="子串搜索")
     parser.add_argument("--ring", action="store_true", help="读 Redis 环形缓冲而不是日志文件")
+    parser.add_argument(
+        "--service", default="", help="只看某个进程:api/worker/beat/script"
+    )
+    parser.add_argument(
+        "--tail",
+        type=int,
+        default=200,
+        help="先回放最后 N 行再跟随(默认 200;给 0 表示只看新日志,即旧行为)",
+    )
     return parser
 
 
@@ -251,12 +333,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"未知的事件码:{','.join(unknown_events)}", file=sys.stderr)
         return 2
 
+    # 与未知域/未知事件码同一个口径:打错一个级别名要当场说出来,不该被
+    # `level_rank` 的未知兜底按 INFO 算 —— 那条兜底属于日志行自己的级别,
+    # 不属于筛选条件。上一版 `--level warn` 会静默变成"不筛"。
+    try:
+        min_level = normalize_level(args.level) or "DEBUG"
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     flt = Filter(
         domains=domains,
         events=events,
-        min_level=args.level,
+        min_level=min_level,
         show_routine=args.routine,
         text=args.query,
+        service=args.service,
     )
 
     try:
@@ -267,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         if not path.exists():
             print(f"日志文件不存在:{path}", file=sys.stderr)
             return 2
-        _follow_file(path, flt)
+        _follow_file(path, flt, tail=args.tail)
     except KeyboardInterrupt:
         print("\n已停止查看;API 未停止。")
     return 0

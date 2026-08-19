@@ -157,9 +157,25 @@ export default function ErrorNotice({
         </Space>
       }
       action={
-        // 结果未知时**不给重试按钮**。给了就等于在说"再点一次",
-        // 而这一支的全部意义在于:那一次可能已经生效了
-        onRetry && outcome !== 'UNKNOWN' ? (
+        // A67-ISSUE-002:按钮显示条件读 `technical.retriable`,不再自己看 outcome。
+        //
+        // **原来写的是 `onRetry && outcome !== 'UNKNOWN'`**,于是 403 / 404 / 422
+        // 这些 REJECTED 一样会画出重试按钮 —— 而同一张卡片的技术详情里,
+        // 「可否重试」那一行正写着「重试不会改变结果」。一个组件同时说两句
+        // 相反的话,运营信的是按钮,于是对着权限错误反复点。
+        //
+        // 判定仍然只有 `describeError` 一份(见文件头「判定不在这里」):
+        //     401 / 403 / 404 / 422 / 普通 4xx  retriable=false  不画
+        //     429                               retriable=true   画
+        //     5xx                               retriable=true   画
+        //     读超时 / 连不上                    retriable=true   画
+        //     写超时 UNKNOWN                     retriable=false  不画
+        //
+        // 最后一行就是原来那条 `outcome !== 'UNKNOWN'` 想守的东西:写请求
+        // 超时那一支的 `retriable` 本来就是 false(client.ts 那里写着
+        // 「不是重试无意义,是重试**不安全**」),所以这条新判据把旧判据
+        // 整个包住了,不是替换掉一层保护。
+        onRetry && technical.retriable ? (
           <Button size="small" loading={retrying} onClick={onRetry}>
             重试
           </Button>

@@ -226,7 +226,7 @@ def _naive_utc(value: Any) -> Any:
             value = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             raise ValidationError(
-                f"授权日期格式不合法:{text!r};请用 ISO 8601",
+                f"授权日期填得不对:「{text}」;请按 2026-08-19 这样的格式填",
                 code=ErrorCode.INPUT_INVALID,
             ) from None
     if isinstance(value, datetime):

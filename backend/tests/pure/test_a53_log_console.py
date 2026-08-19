@@ -29,7 +29,10 @@ from app.core.log_events import (
     domain_for_logger,
     folds_away,
     level_at_least,
+    normalize_level,
+    parse_ts,
     resolve_domain,
+    seq_sort_key,
 )
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -477,7 +480,16 @@ def test_the_ring_never_becomes_the_archive():
     setup = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "setup_logging"
     )
-    body = ast.get_source_segment(source, setup) or ""
+    # **吃去注释再比位置。**(a55 修)
+    #
+    # 上一版用 `ast.get_source_segment`,而那个函数返回的是**带注释的源码**。
+    # 于是 a55 在函数开头加了一段注释、里面提到了 `_attach_ring_handler`,
+    # 这条守卫当场变红 —— 而代码本身的挂载顺序一个字没动。
+    #
+    # 这正是第三条守卫(查看器不持消息字面量)顶上写着的那个教训,原话是
+    # 「正向断言会命中 docstring 里的同一串字」。同一个坑,换了个文件复发。
+    # 判据应该是"代码做了什么",不是"源文件里这两个词谁先出现"。
+    body = ast.unparse(setup)
     assert "StreamHandler" in body, "stdout handler 不见了 —— 归档面被换掉了"
     assert "_attach_ring_handler" in body, "环形 handler 没有挂上"
     assert body.index("StreamHandler") < body.index("_attach_ring_handler"), (
@@ -528,34 +540,175 @@ def test_the_worker_installs_the_json_logging_too():
     assert "beat_init" in hooked, "beat 进程同理:它产出的节拍与投递日志也该进环形"
 
 
+def _access_record(fields: dict):
+    """造一条访问日志的 LogRecord。三条过滤器测试共用。"""
+    import logging as std_logging
+
+    one = std_logging.LogRecord("app.main", 20, "x", 1, "http request completed", None, None)
+    one.extra_fields = fields
+    return one
+
+
 def test_watching_the_console_does_not_flush_the_console():
-    """**看日志的动作不许冲刷诊断窗口。**
+    """**看日志的动作不许冲刷诊断窗口。**(a54 的那一半,`all` 模式下仍然成立)
 
     a53 没有这条过滤:中间件对每个请求写一条访问日志,包括 `/api/ops/logs`
     自己,而跟随模式是 3 秒一拍。1200 条/小时、cap 5000 —— 四小时后环形里
     全是"某人在看运行日志",而 `held/cap` 显示 5000/5000,看起来非常健康。
     """
-    import logging as std_logging
+    from app.core.log_ring import AccessNoiseFilter
 
-    from app.core.log_ring import SelfTrafficFilter
-
-    def record(fields: dict) -> std_logging.LogRecord:
-        one = std_logging.LogRecord("app.main", 20, "x", 1, "http request completed", None, None)
-        one.extra_fields = fields
-        return one
-
-    keep = SelfTrafficFilter()
+    keep = AccessNoiseFilter(mode="all")
     self_traffic = {"event": ACCESS_EVENT, "path": "/api/ops/logs", "status": 200}
-    assert not keep.filter(record(self_traffic)), "控制台自己的 2xx 访问日志不该进环形"
-    assert keep.filter(record({**self_traffic, "status": 500})), (
+    assert not keep.filter(_access_record(self_traffic)), "控制台自己的 2xx 访问日志不该进环形"
+    assert keep.filter(_access_record({**self_traffic, "status": 500})), (
         "`/api/ops/logs` 自己 500 了是要看见的 —— 那不是噪音,是这一页坏了"
     )
-    assert keep.filter(record({**self_traffic, "path": "/api/generation-tasks"})), (
-        "别的端点的访问日志照进 —— 被挡掉的只有自指的那部分"
+    assert keep.filter(_access_record({**self_traffic, "path": "/api/generation-tasks"})), (
+        "`all` 模式下别的端点的访问日志照进 —— 那一档被挡掉的只有自指部分"
     )
-    assert keep.filter(record({"event": "gen.round_evaluated", "path": "/api/ops/logs"})), (
+    assert keep.filter(_access_record({"event": "gen.round_evaluated", "path": "/api/ops/logs"})), (
         "只认访问日志那一个事件码,不许按路径一刀切"
     )
+
+
+# ============================================================ a55 修复的守卫
+#
+# a54 的守卫全绿、门禁全绿,而下面这一组钉的每一件都**没有被它们看见**。
+# 共同形状还是那个:不报错、不变红,只在某个具体时刻让控制台少说一句真话。
+# 与 a54 那一组的区别是,这一轮里有一条是**守卫自己**看走了眼(见
+# `test_the_stream_really_stops_serialising_the_whole_window`)。
+
+
+def test_the_access_filter_defaults_to_keeping_the_window_usable():
+    """**默认档只收出错的访问日志。**(a55)
+
+    a54 只挡了 `/api/ops/` 前缀,而前端有 17 处 `refetchInterval`:打开一个
+    任务详情页 ≈ 90 请求/分钟 = **5400 条/小时**,cap 是 5000。一个开着任务
+    详情页的标签,一小时内把整个诊断窗口洗一遍 —— 而排障的人恰恰会开着
+    任务详情页。
+
+    **修了自指那一半比不修更危险**:这些行标了 routine,折进计数条;
+    `held/cap` 显示 5000/5000,于是没人再怀疑它。
+    """
+    from app.core.log_ring import AccessNoiseFilter
+
+    keep = AccessNoiseFilter(mode="errors")
+    for status in (200, 204, 302):
+        assert not keep.filter(
+            _access_record({"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status})
+        ), f"{status} 的访问日志在默认档不该占用诊断窗口 —— 它照常进 stdout"
+    for status in (401, 404, 500, 503):
+        assert keep.filter(
+            _access_record({"event": ACCESS_EVENT, "path": "/api/generation-tasks", "status": status})
+        ), f"{status} 是诊断信息,不是噪音 —— 两个档位下都必须放行"
+    assert keep.filter(_access_record({"event": "gen.round_evaluated"})), (
+        "非访问日志一律放行 —— 这个过滤器只认那一个事件码"
+    )
+
+
+def test_an_unknown_access_mode_fails_at_startup():
+    """拼错的模式名在**启动期**就炸,不留到运行期。
+
+    按默认处理的话表现是"访问日志少了一半而没人知道为什么";按 `all` 处理
+    的话表现是"窗口又开始被冲刷了"。**两种静默失败都指向同一个结论 ——
+    这个值不许猜。**
+
+    ## 为什么在这里只做源码断言
+
+    `tests/pure/` 跑在只有标准库的运行器上,`app.core.config` 依赖
+    pydantic-settings,import 不进来 —— 顶层 import 会让整个文件在导入期炸掉,
+    而运行器只把它记成一条失败(`run_pure_tests.py` 顶部写明的那类坑)。
+    真的构造一次 `Settings` 的用例在 `tests/test_a55_log_console.py`。
+    """
+    source = (BACKEND / "app/core/config.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    validators = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_known_access_mode"
+    ]
+    assert validators, "OPS_LOG_RING_ACCESS 没有启动期校验 —— 拼错会静默走默认档"
+    body = ast.unparse(validators[0])
+    assert "raise ValueError" in body, "校验函数不抛 —— 那它只是个格式化器"
+    assert "errors" in body and "all" in body, "两个合法取值必须在校验里列出来"
+
+
+def test_every_log_line_says_which_process_wrote_it():
+    """**每条日志答得出「哪个进程写的」。**(a55)
+
+    API / worker / beat / script 全部 LPUSH 进同一个 `ops:log_ring`,而在此
+    之前没有任何顶层字段区分它们。于是运行日志页上「`gen` 域为什么是空的」
+    **答不出来** —— 是没跑任务,还是 worker 挂了?这两件事的下一步完全相反。
+
+    a54 修的是「worker 的日志一条都没进过环形」;修完之后的新问题是
+    「进来了但认不出是谁」,而排障的第一个问题恰恰是「哪个进程」。
+    """
+    import logging as std_logging
+
+    from app.core import logging as logging_mod
+
+    # 直接改模块级的那个名字,不调 `setup_logging` —— 它会 `root.handlers.clear()`
+    # 并挂一个新的 stdout handler,而纯运行器正靠 stdout 捕获输出。
+    was = logging_mod._service_name  # noqa: SLF001
+    try:
+        logging_mod._service_name = "worker"  # noqa: SLF001
+        record = std_logging.LogRecord("app.tasks.batch_tasks", 20, "x", 1, "hi", None, None)
+        record.extra_fields = {"event": "batch.async_finished"}
+        payload = logging_mod.JsonFormatter().build_payload(record)
+    finally:
+        logging_mod._service_name = was  # noqa: SLF001
+    assert payload["service"] == "worker", "顶层没有 service —— 三种进程在窗口里分不开"
+    assert isinstance(payload["pid"], int), "pid 要是个能读的整数,不是 seq 里那段十六进制"
+
+
+def test_every_entry_point_names_itself():
+    """四个入口都必须报上名字,不许默认。
+
+    默认值是 `api`,而一个**没报名字的 worker 会自称 api** —— 那比没有这个
+    字段更糟:它不是"不知道",是一句错话,而且看起来完全正常。
+    """
+    expected = {
+        "app/main.py": "api",
+        "app/tasks/celery_app.py": "worker",
+        "app/scripts/requeue_stranded.py": "script",
+    }
+    for path, service in expected.items():
+        source = (BACKEND / path).read_text(encoding="utf-8")
+        assert f'service="{service}"' in source, f"{path} 没有把自己报成 {service}"
+
+
+# 下面四件事的守卫住在 `tests/test_a55_log_console.py`,不在这里:
+#
+#     跟随模式不再全窗序列化   数 `json.dumps` 的调用次数
+#     按时间排序 / ts 解析失败  真的调一次 `list_logs`
+#     截断显形                  同上
+#     时间窗坏值 400            同上
+#
+# 理由是这个目录的硬约束:纯运行器只有标准库,而 `app/api/ops_logs.py` import
+# fastapi。顶层 import 会让整个文件在导入期炸掉,运行器只记一条失败 ——
+# 那正是 `run_pure_tests.py` 顶部写着的那个坑(9 个用例一条都没跑过,
+# 而套件显示"只差一条")。
+
+def test_the_viewer_reads_the_encoding_the_writer_wrote():
+    """CLI 读日志文件的编码必须和写入端一致。(a55)
+
+    `core/logging.py` 有一整段注释在讲为什么必须强制 UTF-8(中文 Windows 上
+    GBK 会让整条记录消失)。而 `watch_logs.py` 上一版用的是
+    `locale.getpreferredencoding(False)` —— **写的时候强制 UTF-8,读的时候
+    用系统代码页**。中文 Windows 下所有中文字段变成乱码,而 JSON 结构是纯
+    ASCII,`json.loads` 照样成功,**不报任何错**。
+
+    反向断言(吃去注释再查),理由同第三条守卫:正向断言会命中本文件与被测
+    文件注释里的同一串字。
+    """
+    source = (BACKEND / "tools/watch_logs.py").read_text(encoding="utf-8")
+    code = ast.unparse(ast.parse(source))
+    assert "getpreferredencoding" not in code, (
+        "查看器又按本机代码页读日志了 —— 写入端强制 UTF-8,两边对不上时"
+        "表现是安静的乱码,不是报错"
+    )
+    assert "utf-8" in code.lower(), "读取编码没有钉死"
 
 
 def test_the_level_filter_means_at_least_not_exactly():
@@ -742,34 +895,15 @@ def test_a_disabled_ring_never_looks_like_an_empty_period():
     assert "ring_disabled" in guard, "关掉之后要给界面一个能说出口的理由"
 
 
-def test_the_stream_is_filtered_before_it_is_shaped():
-    """先筛后成形。
-
-    `_shape` 里有一次 `json.dumps`,a53 对全窗 5000 条每条都做一遍,
-    而其中绝大多数会被随后的筛选丢掉;跟随模式 3 秒一拍,这笔开销是常驻的。
-
-    ## 判据按**调用名**比,不按子串比
-
-    上一版这里写的是 `assert "_matches" in text`,而 `tools/mutate_a54.py`
-    的 P1 把调用改名成 `_matches_removed` —— 子串照样在,守卫照样绿。
-    一条按子串判的断言,挡不住把函数换掉这件事,而换掉正是它要挡的。
-    """
-    source = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    body = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "list_logs"
-    )
-    called = sorted(
-        (node.lineno, node.func.id)
-        for node in ast.walk(body)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    )
-    first = {}
-    for line, name in called:
-        first.setdefault(name, line)
-    assert "_matches" in first, f"筛选没有独立出来,又回到了先成形再丢掉:{sorted(first)}"
-    assert "_shape" in first, "这个端点不成形了?"
-    assert first["_matches"] < first["_shape"], "成形跑在筛选前面了"
+# `test_the_stream_is_filtered_before_it_is_shaped` 删除于 a55。
+#
+# 它断言的是 `list_logs` 里 `_matches` 的调用**行号**小于 `_shape` 的,而
+# 那个形状从 a54 起就一直成立 —— 与此同时,调用方的循环里还留着一行无条件
+# 的 `json.dumps`,对全窗 5000 条各做一遍。**守卫一直是绿的,开销一次没降。**
+#
+# 换掉它的是 `test_the_stream_really_stops_serialising_the_whole_window`:
+# 数 dumps 的调用次数,而不是数行号。这段注释留着,是因为把它改回 AST 断言
+# 看起来会更"快、更纯"—— 而那正是它上一次失效的样子。
 
 
 def test_the_domain_counts_survive_picking_a_domain():
@@ -786,3 +920,120 @@ def test_the_domain_counts_survive_picking_a_domain():
     )
     text = ast.unparse(body)
     assert "domain=None" in text, "域计数吃了 domain 筛选 —— 那它只会数出选中的那一个"
+
+
+# ============================================================ a56:五处复盘守卫
+
+
+def test_parse_ts_always_returns_aware_or_none():
+    """**解析成功的时间恒带时区。** naive 混进 aware 的比较是 TypeError。
+
+    a55 的兜底路径(`fromisoformat`)对无时区输入原样返回 naive,而
+    `list_logs` 的排序与 `_matches` 的时间窗拿它和主格式的 aware 比 ——
+    `?since=2026-08-18T09:30:00` 让 `/ops/logs` 整个 500;第三方 handler
+    往环形写一条无时区 ts,整页挂掉。**恰恰是"容一手第三方写法"的那条
+    路径在让调用方崩溃。** 无时区按本机时区解释:写入端 `formatTime`
+    用的就是本机墙上钟。
+    """
+    for value in (
+        "2026-08-18T17:30:00+0800",
+        "2026-08-18T09:30:00Z",
+        "2026-08-18T09:30:00",          # 手打 since 最常见的形状
+        "2026-08-18 09:30:00",
+        "2026-08-18T09:30:00.123456",   # 第三方 handler 的毫秒写法
+    ):
+        parsed = parse_ts(value)
+        assert parsed is not None, f"{value!r} 应当可解析"
+        assert parsed.tzinfo is not None, (
+            f"{value!r} 解析出了 naive datetime —— 它和 aware 一比就是 TypeError,"
+            "而比较发生在 list_logs 的排序与时间窗里"
+        )
+    assert parse_ts("not a time") is None
+    assert parse_ts(None) is None
+    # 有它才有资格说"混排不炸":aware 与(本机时区解释后的)aware 可比。
+    early = parse_ts("2026-08-18T00:00:00+0800")
+    late = parse_ts("2026-08-18T23:59:59")
+    assert early is not None and late is not None
+    assert (early < late) or (early > late) or (early == late)
+
+
+def test_a_mistyped_level_filter_is_rejected_not_silently_widened():
+    """筛选级别打错要**当场说出来**,不是静默变成"不筛"。
+
+    `level_rank` 对未知名字按 INFO 兜底 —— 那是给**日志行自己的级别**的
+    容错(第三方 logger 会写自定义级别名)。筛选条件走同一条兜底,
+    `level=WARN` 会静默拉回整窗 5000 条,而打错的人以为自己看的是
+    WARNING 以上。CLI 对 `--domain`/`--event` 早就写明这个口径,
+    级别是唯一漏掉的那个。
+    """
+    assert normalize_level(None) is None
+    assert normalize_level("   ") is None
+    assert normalize_level("warning") == "WARNING"
+    assert normalize_level("Error") == "ERROR"
+    for bad in ("WARN", "ERR", "FATAL", "VERBOSE"):
+        try:
+            normalize_level(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} 被静默接受了 —— 它会变成 rank 20,等于不筛")
+
+    # 两个入口都必须接这一份判定,不许各自 `.upper()` 完就交给 level_rank。
+    api = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    assert "normalize_level(level)" in api, "API 的 level 参数没走 normalize_level"
+    assert 'wanted_level = (level or "").upper()' not in api, (
+        "API 又在自己 .upper() 了 —— 打错的级别会被 level_rank 按 INFO 兜底"
+    )
+    cli = (BACKEND / "tools/watch_logs.py").read_text(encoding="utf-8")
+    assert "normalize_level(args.level)" in cli, "CLI 的 --level 没走 normalize_level"
+
+
+def test_seq_ties_break_numerically_not_lexically():
+    """同一秒内的先后按**计数的数值**,不按字符串。
+
+    ts 只有秒级精度(`_TS_FORMAT` 无毫秒),同秒顺序全靠 seq;而字符串序里
+    `"1a2b-10" < "1a2b-7"`,同一进程一秒内发第 7~10 条时,链路视角的展示
+    顺序会倒置 —— 横幅上正写着「按时间顺读」。
+    """
+    assert seq_sort_key("1a2b-7") < seq_sort_key("1a2b-10"), "还是字符串序"
+    assert sorted(["1a2b-10", "1a2b-2", "1a2b-7"], key=seq_sort_key) == [
+        "1a2b-2", "1a2b-7", "1a2b-10",
+    ]
+    # 坏值不炸,排同秒最前 —— 与 parse_ts 的"不猜、不炸"同一个姿势。
+    assert seq_sort_key(None) == ("", -1)
+    assert seq_sort_key("no-dash-here")[1] == -1 or seq_sort_key("no-dash-here")[0]
+    api = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    assert "seq_sort_key(row.get" in api, "list_logs 的 tie-break 没接 seq_sort_key"
+    assert 'str(row.get("seq") or "")' not in api, (
+        "tie-break 又回到字符串序了 —— 同一进程同一秒内 10 会排在 7 前面"
+    )
+
+
+def test_held_is_the_redis_length_not_the_parsed_count():
+    """`ring.held` 是 Redis 里真实的 LLEN,不是解析成功的条数。
+
+    `read_ring` 的文档承诺坏行"会体现在 held 与实际条数的差里" —— a55 把
+    `/logs` 的 held 填成 `len(rows)`,那个差恒为 0,承诺成了空话;而
+    `/logs/meta` 给的又是真实 LLEN:同名字段,两个端点,两种含义。
+    行为断言在 `tests/test_a55_log_console.py`(要 fastapi);这里钉住源码
+    形状,防止那行 hint 被写回来。
+    """
+    api = (BACKEND / "app/api/ops_logs.py").read_text(encoding="utf-8")
+    assert "held_hint=len(rows)" not in api, (
+        "/logs 又在拿解析条数冒充 held —— 坏行的差从此恒为 0,"
+        "而 /logs/meta 给的是真实 LLEN,同名字段两种含义"
+    )
+    # 关掉环形那个分支的 held_hint=0 是对的:不碰 Redis,0 附带 ring_disabled。
+    assert "held_hint=0" in api, "ring_disabled 分支的 held=0 被顺手删了"
+
+
+def test_the_cli_never_truncates_a_traceback():
+    """CLI 的 `exc` 全文打印,不进 160 字符的 compact 预算。
+
+    一条 Traceback 被 `_compact` 截成
+    `"Traceback (most recent call last):\n  File …(2489 chars)"` 之后,
+    真正报错的最后一行恰恰在被截掉的那一截里 —— 而 exc 是排障最要紧的字段。
+    顺带:`llm_call_id` 表头已经打过,字段区不许再打第二遍。
+    """
+    cli = (BACKEND / "tools/watch_logs.py").read_text(encoding="utf-8")
+    assert 'fields.pop("exc"' in cli, "exc 还混在 compact 循环里 —— 堆栈会被截断"
+    assert 'fields.pop("llm_call_id"' in cli, "llm_call_id 会在表头与字段区打两遍"

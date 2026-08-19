@@ -18,17 +18,34 @@
 
 ## 现在的口径:不看 JSX 形状,只问「这个 readError 是不是 toast」
 
-    宽口径(主基线)   pages/ + components/ 里**非 toast** 的 readError 调用点,合计 24
-    窄口径(锚点)     `<Alert…readError(` 这一种,合计 17 —— 保留它是为了不丢失与
+    宽口径(主基线)   pages/ + components/ 里**非 toast** 的 readError 调用点,合计 18
+    窄口径(锚点)     `<Alert…readError(` 这一种,合计 14 —— 保留它是为了不丢失与
                      评审那条记录的对应关系,不是因为它够用
 
 宽口径不解析 JSX,所以换写法绕不过去:只要 `readError` 出现在展示层且不是
 `message.error(readError(…))` 这类 toast,就计为债。`message.error(...)` / `notification.*`
 是 `readError` 的正当用法(一句话的浮层本就不该展开技术详情),明确排除。
 
-**宽口径 24 是窄口径 17 的超集,不等于「24 处都必须迁成 `<ErrorNotice>`」。** 有些
+**宽口径 18 是窄口径 14 的超集,不等于「24 处都必须迁成 `<ErrorNotice>`」。** 有些
 计入的点(例如把错误串进一句「模特列表没拉到,下面是空的不代表没有模特」的提示)
 未必值得整块 `<ErrorNotice>`。这里守的是**这个数只能下降**,不是「每一处都是错的」。
+
+## a67 第一次真的还了六处
+
+在此之前这份基线只涨过一次(a58 新页面被拦下、当轮改掉)、没降过 —— **棘轮让债不涨,
+而没有人还**。a67 迁了六处,基线 24 -> 18、窄口径 17 -> 14:
+
+    Dashboard / SystemStatus / Spend    整块 Alert 换 ErrorNotice。Spend 那处顺带
+                                        把手写的重试按钮交回组件 —— 连同「用按钮
+                                        而不是无 href 的锚点」那条无障碍理由
+    ProductList / TaskList / AuditLog   **失败被画成了"没有数据"**:错误句渲染在
+                                        表格的 emptyText 里,一次拉取失败在界面上
+                                        和「还没有 SKU」长得一模一样,而这两者的
+                                        下一步完全相反(重试 vs 去创建)。
+                                        改成表上方一条 ErrorNotice,空表文案留给真的空
+
+后面这三处不是机械替换 —— **统一出口顺带把"失败"和"空"分开了**,而那才是 A12
+真正在买的东西。
 
 ## 还债与限度
 
@@ -54,25 +71,19 @@ FRONTEND_SRC = PROJECT_ROOT / "frontend" / "src"
 BROAD_BASELINE: dict[str, int] = {
     "components/GenerationPlanPanel.tsx": 2,
     "components/workbench/BatchActionBar.tsx": 1,
-    "pages/AuditLogPage.tsx": 1,
-    "pages/DashboardPage.tsx": 1,
     "pages/MediaLibraryPage.tsx": 1,
     "pages/ProductDetailPage.tsx": 1,
-    "pages/ProductListPage.tsx": 1,
     "pages/PromptsPage.tsx": 2,
     "pages/ReviewDetailPage.tsx": 1,
     "pages/ReviewQueuePage.tsx": 1,
     "pages/SettingsPage.tsx": 2,
-    "pages/SpendPage.tsx": 1,
-    "pages/SystemStatusPage.tsx": 1,
     "pages/TaskDetailPage.tsx": 1,
-    "pages/TaskListPage.tsx": 1,
     "pages/WorkbenchBatchPage.tsx": 2,
     "pages/WorkbenchReviewPage.tsx": 4,
 }
 
 #: 窄口径:评审点名的 `<Alert…readError(` 那一种。保留作锚点。
-NARROW_ALERT_TOTAL = 17
+NARROW_ALERT_TOTAL = 14
 
 _READ_ERROR = re.compile(r"readError\(")
 #: toast 是正当用法:一句话的浮层本就不展开技术详情
@@ -135,7 +146,7 @@ def test_the_detector_sees_the_shapes_that_defeated_the_first_version():
 
 def test_broad_baseline_total_is_twentyfour():
     """守住基线总数本身,口径不能悄悄漂走。"""
-    assert sum(BROAD_BASELINE.values()) == 24
+    assert sum(BROAD_BASELINE.values()) == 18
 
 
 def test_the_narrow_alert_shape_still_matches_the_review():

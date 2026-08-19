@@ -150,9 +150,15 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "G1",
         "Makefile 的 check-offline 不再跑它(本地跑门禁的人看不到这一条)",
         MK,
-        "check-offline: test-pure verify-delivery verify-sample-data verify-imports "
-        "audit-anchors audit-guards",
-        "check-offline: test-pure verify-delivery verify-sample-data verify-imports audit-anchors",
+        # 锚点是**一整行**。a64 把 check-offline 的依赖拆成了一项一行,
+        # 于是"某一项"有了一个不随清单增长而变的表示。
+        #
+        # 这条锚点断过两次,病因一样:锚在**当时的清单**上。第一版编进了前六项
+        # (a61 插 `fe-test-pure` 时断);a61 的修法是"再往右多带一项",而多带的
+        # 那一项也是清单成员(a64 插 `audit-dataclass-fields` 时又断)。
+        # **锚在会变的清单上,修法不能是换一段同样会变的清单。**
+        "\n\taudit-guards \\",
+        "",
     ),
     (
         "G2",

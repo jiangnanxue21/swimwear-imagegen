@@ -119,7 +119,7 @@ def update_platform_status(
         target = PlatformStatus(to_status)
     except ValueError as exc:
         raise ValidationError(
-            f"未知的平台状态 {to_status!r}",
+            f"未知的平台状态「{to_status}」",
             code=ErrorCode.INPUT_INVALID,
         ) from exc
     if target not in allowed:
@@ -188,7 +188,7 @@ def record_rejection(
     except ValueError as exc:
         allowed = "、".join(r.value for r in pf.RejectionReason)
         raise ValidationError(
-            f"未知的驳回原因码 {reason_code!r};可用:{allowed}",
+            f"未知的驳回原因码「{reason_code}」;可用:{allowed}",
             code=ErrorCode.INPUT_INVALID,
         ) from exc
 

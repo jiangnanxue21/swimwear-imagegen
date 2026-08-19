@@ -259,3 +259,32 @@ def legacy_variant_owner_id(*, spu: str, variant_id: str) -> str:
     """冻结格式的构造。**只给用例用**,生产代码不许调 —— 见上面那段。"""
     spu = (spu or "").strip()
     return f"{len(spu)}:{spu}{LEGACY_VARIANT_NS}{variant_id}"
+
+
+def offline_gate_targets(makefile: str) -> set[str]:
+    """`check-offline` 的依赖项集合。
+
+    a64 把那份清单拆成了**一项一行**(续行)。拆之前它挤在一行里,而
+    `mutate_batch14_14` 的 G1 锚在那一行的一段内容上 —— 那段内容是**当时的清单**,
+    每加一条门禁就失锚一次(a61 断过、a64 又断)。**锚在会变的清单上,修法不能是
+    换一段同样会变的清单**,所以改了结构。
+
+    代价是读它的三处守卫得跟着改,而那正是这个函数存在的理由:**判定只有一份**。
+    三处各写一遍 `startswith("check-offline:")`,下次改结构就要再找三遍。
+    """
+    lines = makefile.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith("check-offline:")), None
+    )
+    if start is None:
+        raise AssertionError("Makefile 里没有 check-offline 规则")
+    collected: list[str] = []
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        body = line.split("##", 1)[0]
+        collected.extend(body.replace("check-offline:", "").replace("\\", "").split())
+        if not body.rstrip().endswith("\\"):
+            break
+        index += 1
+    return set(collected)

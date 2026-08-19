@@ -88,6 +88,14 @@ celery_app.conf.beat_schedule = {
         "task": "publish.poll_listings",
         "schedule": 20.0,
     },
+    # AI 测试留档的超期清理(PRD §11.4)。**排的是干跑那一档** ——
+    # 它负责让「有多少该清了」这个数出现在运行日志里,真删要人显式触发
+    # (`purge_ai_test_runs(apply=True)`)。自动删一张带完整模型输出的档案表,
+    # 风险高于它省下的磁盘;而这张表每天进个位数行,一天一拍绰绰有余。
+    "purge-ai-test-runs": {
+        "task": "maintenance.purge_ai_test_runs",
+        "schedule": 86400.0,
+    },
 }
 
 celery_app.conf.update(
@@ -174,10 +182,15 @@ def _reset_db_pool_after_fork(**_kwargs: object) -> None:
 # root handler 是我们的,不需要接管 Celery 的那一套。
 @worker_process_init.connect
 def _install_json_logging_in_worker(**_kwargs: object) -> None:
-    """worker 子进程自己装一次日志(JsonFormatter + 环形)。"""
+    """worker 子进程自己装一次日志(JsonFormatter + 环形)。
+
+    `service="worker"` 是 a55 加的:三种进程全部写进同一个 `ops:log_ring`,
+    而在此之前没有任何顶层字段区分它们。于是运行日志页上「`gen` 域为什么
+    是空的」答不出来 —— 是没跑任务,还是 worker 挂了?这两件事的下一步完全相反。
+    """
     from app.core.logging import setup_logging
 
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(settings.LOG_LEVEL, service="worker")
 
 
 @beat_init.connect
@@ -185,4 +198,4 @@ def _install_json_logging_in_beat(**_kwargs: object) -> None:
     """beat 同理。它产出的是节拍与投递日志,归 `ops` 域。"""
     from app.core.logging import setup_logging
 
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(settings.LOG_LEVEL, service="beat")
