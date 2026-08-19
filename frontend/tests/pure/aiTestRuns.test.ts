@@ -14,6 +14,7 @@ import {
   runsQueryForVersion,
   subjectLabel,
   versionLabel,
+  versionPathFor,
 } from '../../src/utils/aiTestRuns.ts'
 
 const base = { prompt_key: 'k', prompt_version: null, prompt_template_version: null }
@@ -99,4 +100,39 @@ test('对象列:候选图与商品用中文分,不甩后端枚举', () => {
 test('对象被清理掉之后只剩类型,不画一个空 id', () => {
   // `subject_id` 刻意不加外键 —— 候选图随任务清理走,而"那次测试跑过"不该跟着消失
   assert.equal(subjectLabel({ subject_type: 'product', subject_id: null }), '商品')
+})
+
+// ==================================================== FE-314 反向互链(a70)
+
+test('评分留档给得出版本页路径', () => {
+  assert.equal(
+    versionPathFor({ ...base, prompt_key: 'vision_system_prompt', prompt_template_version: 3 }),
+    '/prompts/vision_system_prompt/versions/3',
+  )
+})
+
+test('文案留档不画链接 —— 内容哈希没有对应的版本页', () => {
+  // 拿哈希去拼版本路由会得到一个必然 404 的链接。a63 的判据在反向同样成立:
+  // 一个点进去永远是空的链接会被读成「这一版不见了」
+  assert.equal(
+    versionPathFor({
+      prompt_key: 'copy_llm_system_prompt',
+      prompt_version: 'gpt-4o:a1b2c3',
+      prompt_template_version: null,
+    }),
+    null,
+  )
+})
+
+test('没有 key 时不画链接', () => {
+  assert.equal(versionPathFor({ ...base, prompt_key: null, prompt_template_version: 3 }), null)
+})
+
+test('序号小于 1 时不画链接 —— 版本号从 1 起,0 是判不出来的值', () => {
+  assert.equal(versionPathFor({ ...base, prompt_template_version: 0 }), null)
+  assert.equal(versionPathFor({ ...base, prompt_template_version: -1 }), null)
+})
+
+test('非整数序号不画链接', () => {
+  assert.equal(versionPathFor({ ...base, prompt_template_version: 1.5 }), null)
 })

@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import db_session, require_admin
+from app.core.clock import iso_utc
 from app.core.enums import AuditAction
 from app.core.errors import NotFoundError
 from app.prompts import registry
 from app.services import audit, prompt_service
+from app.workflows import prompt_stats
 
 router = APIRouter(tags=["prompts"])
 
@@ -91,22 +93,34 @@ def _conflict(exc: prompt_service.PromptConflict) -> HTTPException:
 
 
 @router.get("/prompts")
-def list_prompts(session: Session = Depends(db_session)) -> dict:
+def list_prompts(
+    session: Session = Depends(db_session),
+    actor: str = Depends(require_admin),
+) -> dict:
     """注册表全量(PRD BE-302):8 处提示词的 key、层、可编辑性、消费方。
 
     「可编辑」= 消费链路会读库,改了会生效;详见 `registry` 模块文档 ——
     对其余 6 处这里如实标 False,而不是让保存成功但毫无效果。
     editable 的项附上当前生效版本号。
 
-    **调用统计(FE-301 的近 7 天列)仍然没有,但推迟的理由已经不是原来那个。**
-    原文写的是「待测试留档落地后一并做」—— 而留档 a57 就落了、读接口 a62 也落了,
-    这个前提在 a62 就消失了,注释却又躺了六轮(§3.33:过期的理由比没有理由更糟)。
+    ## 调用统计(FE-301 的近 7 天列)—— 这一段的来路值得记
 
-    现在的实情是:数据齐了,做得了 —— `ai_test_runs` 按 `prompt_key` +
-    `prompt_template_version` 聚合即可,而两列的语义 a63 才理顺。**没做的原因
-    只剩"还没排"**,不是"还差什么"。它连着 FE-301 的那一列一起,记在 PRD §16 的
-    S3 那格,别再写成依赖问题。
+    注释在这里连着躺了两版错的理由。第一版写「待测试留档落地后一并做」,
+    而留档 a57 就落了、读接口 a62 也落了,前提在 a62 就消失了。a68 订正成
+    「数据齐了,只差排期」,但**同时把数据源指错了**:那一版说按 `ai_test_runs`
+    聚合即可 —— 那张表只记**诊断测试**,拿它当调用统计,界面上会出现一个
+    看起来像生产流量、实际是"有人手工测了几次"的数字。**它不会错得很显眼,
+    只会一直偏小**,而运营正是拿它判断"要不要回滚这一版"。
+
+    真正的源是 `evaluation_attempts`(PRD §12.4 写的就是它):每一次评分请求
+    成功与失败都留一行。而那张表 a70 之前**没有 `prompt_key` 列**,只有版本号,
+    版本号又是按 key 各自自增的 —— 女装 v3 与男装 v3 在库里一个字节都不差。
+    所以"数据齐了"那句也不成立:迁移 0059 补上归属之后才真的齐。
+
+    统计有**起点**(0059 执行时刻),`stats_since` 如实报出去。
     """
+    from app.services import prompt_usage
+
     surfaces = []
     for surface in registry.PROMPT_SURFACES:
         item = {
@@ -122,8 +136,19 @@ def list_prompts(session: Session = Depends(db_session)) -> dict:
         if surface.editable:
             _content, version = prompt_service.get_active_content(session, surface.key)
             item["active_version"] = version  # None = 内置默认生效中
+            # 只给 editable 的那两份取统计。其余 6 处的消费链路**不读库**
+            # (`registry.editable` 的语义),它们的调用根本不经过
+            # `evaluation_attempts` —— 给它们查一次一定是 0,而界面上一个
+            # 「近 7 天 0 次」会被读成"没人用",实际是"这里压根不记这个数"
+            item["stats"] = prompt_usage.recent_stats(session, surface.key).as_dict()
         surfaces.append(item)
-    return {"surfaces": surfaces}
+    return {
+        "surfaces": surfaces,
+        "stats_window_days": prompt_stats.RECENT_WINDOW_DAYS,
+        # 归不了属的那些单独报,不摊进任何一份提示词(迁移 0059)
+        "stats_unattributed": prompt_usage.unattributed_recent(session),
+        "stats_since": iso_utc(prompt_usage.coverage_since(session)),
+    }
 
 
 @router.get("/prompts/{key}/versions/{version}")
@@ -131,8 +156,19 @@ def read_prompt_version(
     key: str,
     version: int,
     session: Session = Depends(db_session),
+    actor: str = Depends(require_admin),
 ) -> dict:
-    """单版本**只读**正文(PRD BE-303)。看一眼不等于让它生效。"""
+    """单版本**只读**正文(PRD BE-303)。看一眼不等于让它生效。
+
+    **`require_admin` 是 a70 补的,不是一开始就有。** 这个模块开头写着
+    「读写**都**要过 `require_admin`」,`read_prompt` 也确实有 —— 而这个端点
+    与 `list_prompts` 从落地起就漏了。漏的后果不对称:`read_prompt` 要口令
+    才给的**同一段正文**,换个地址(`/versions/{n}`)不要口令就拿得到,
+    而提示词决定「什么图算合格」。
+
+    发现它是因为 a70 往 `list_prompts` 加了调用统计 —— 加宽一个面之前先看
+    这个面有多大,才看见它本来就不该这么大。
+    """
     row = prompt_service.get_version(session, key, version)
     if row is None:
         raise NotFoundError(f"提示词 {key} 没有第 {version} 版")

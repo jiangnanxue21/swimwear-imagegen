@@ -21,6 +21,7 @@ FE-301 落地」。a58 翻转它。**翻转的判据是"同一段代码",不是"
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -211,25 +212,88 @@ def test_the_list_route_is_matched_before_the_detail_route():
 # ============================================================ 前后端契约
 
 
-def test_the_frontend_type_matches_what_the_list_endpoint_returns():
-    """接口加一个字段而类型没跟,前端拿得到但读不出来;反过来则是白等一个不存在的键。"""
+def _list_prompts_shape() -> tuple[set[str], set[str]]:
+    """`list_prompts` 的(行字段, 信封字段)。
+
+    ## 为什么用 AST,以及这里为什么分两层
+
+    第一版把函数体里所有 `"键":` 都当成**行**字段,只把 `surfaces` 排掉 ——
+    那在端点只返回 `{"surfaces": [...]}` 时是对的,而 a70 给信封加了
+    `stats_window_days` / `stats_unattributed` / `stats_since` 三个同级键
+    (窗口天数与未归属计数是整个列表一份的,不属于任何一行)。于是那一版
+    把信封字段判成了行字段,报 `PromptSurface` 少了它们。
+
+    **修的是守卫的模型,不是放宽它。** 分开之后两侧各自比对,比原来严:
+    信封字段漏进 `PromptSurfaceList` 现在也会红,而上一版根本不看那个接口。
+    """
     api_source = (BACKEND / "app" / "api" / "prompts.py").read_text(encoding="utf-8")
-    block = api_source[
-        api_source.index("def list_prompts") : api_source.index("def read_prompt_version")
-    ]
-    keys = set(re.findall(r'^\s+"(\w+)":', block, re.M)) | set(
-        re.findall(r'item\["(\w+)"\]', block)
+    tree = ast.parse(api_source)
+    func = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "list_prompts"
     )
-    keys.discard("surfaces")
+
+    def _dict_keys(node: ast.AST) -> set[str]:
+        return (
+            {
+                k.value
+                for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+            if isinstance(node, ast.Dict)
+            else set()
+        )
+
+    row: set[str] = set()
+    envelope: set[str] = set()
+    for node in ast.walk(func):
+        # `item = {...}` 的字面量,外加 `item["stats"] = ...` 这类后补的键
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "item":
+                    row |= _dict_keys(node.value)
+                elif (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "item"
+                    and isinstance(target.slice, ast.Constant)
+                ):
+                    row.add(target.slice.value)
+        elif isinstance(node, ast.Return):
+            envelope |= _dict_keys(node.value)
+    envelope.discard("surfaces")  # 它的元素类型由 row 那一半管
+    assert row and envelope, "没解析出 list_prompts 的返回形状,守卫形状变了"
+    return row, envelope
+
+
+def _declared_fields(interface: str, until: str) -> set[str]:
     types_source = _read("api/types.ts")
     iface = types_source[
-        types_source.index("export interface PromptSurface {") : types_source.index(
-            "export interface PromptSurfaceList"
-        )
+        types_source.index(f"export interface {interface} {{") : types_source.index(until)
     ]
-    declared = set(re.findall(r"^  (\w+)\??:", iface, re.M))
-    missing = keys - declared
+    return set(re.findall(r"^  (\w+)\??:", iface, re.M))
+
+
+def test_the_frontend_type_matches_what_the_list_endpoint_returns():
+    """接口加一个字段而类型没跟,前端拿得到但读不出来;反过来则是白等一个不存在的键。"""
+    row, _envelope = _list_prompts_shape()
+    declared = _declared_fields("PromptSurface", "export interface PromptSurfaceList")
+    missing = row - declared
     assert not missing, f"PromptSurface 少了后端会返回的字段:{sorted(missing)}"
+
+
+def test_the_frontend_type_matches_the_list_envelope():
+    """信封字段(整个列表一份的那些)同样要对得上。
+
+    a70 加的三个都在这一层:窗口天数、未归属计数、统计起点。少了它们前端
+    读不出「近 N 天」的 N,只能自己写死一个 —— 而写死的那个和后端分叉时
+    界面会用另一个窗口的数字说「近 7 天」。
+    """
+    _row, envelope = _list_prompts_shape()
+    declared = _declared_fields("PromptSurfaceList", "export interface PromptVersionDetail")
+    missing = envelope - declared
+    assert not missing, f"PromptSurfaceList 少了后端会返回的字段:{sorted(missing)}"
 
 
 def test_the_version_detail_type_matches_the_endpoint():

@@ -51,6 +51,31 @@ export function runsQueryForVersion(
   return { prompt_key: promptKey, prompt_template_version: version }
 }
 
+/**
+ * 反向互链(FE-314 的另一半):这条留档用的是**哪一版**,点过去看那一版正文。
+ *
+ * 正向(提示词页 → 这一版跑过的测试)a63 就落了,反向一直欠着。a63 给的理由是
+ * 「它要按 key 反查那一版是否还存在,而版本可能已被删」—— **那个顾虑不成立,
+ * a70 去代码里核实了**:`prompt_service` 里没有任何删除路径,
+ * `reset_to_default` 只是把所有版本 `is_active=False`,行留着
+ * (它自己的注释写着「历史仍然留着」)。所以对评分链路,链接必然指得到东西。
+ *
+ * **但只对评分链路成立。** 两条链路落的版本列不同(§3.96):
+ *
+ *     评分   prompt_template_version  自增序号   → `/prompts/{key}/versions/{n}` 有这一页
+ *     文案   prompt_version           内容哈希   → **没有对应的版本页**
+ *
+ * 拿哈希去拼版本路由会得到一个必然 404 的链接,而 a63 已经写明判据:
+ * **一个点进去永远是空的链接,比没有链接更糟 —— 它会被读成「这一版没跑过测试」**,
+ * 这里则会被读成「这一版不见了」。所以文案那半返回 null,只画标签不画链接。
+ */
+export function versionPathFor(run: RunVersionRef): string | null {
+  if (!run.prompt_key) return null
+  const version = run.prompt_template_version
+  if (version == null || !Number.isInteger(version) || version < 1) return null
+  return `/prompts/${run.prompt_key}/versions/${version}`
+}
+
 /** 结果一列的文案。失败也留档 ——「跑了但没成」和「没跑过」必须分得开。 */
 export function outcomeLabel(run: { success: boolean; error_code: string | null }): {
   tone: 'success' | 'warning'

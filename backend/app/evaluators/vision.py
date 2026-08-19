@@ -151,6 +151,18 @@ def enabled_codes_from(rule_set: dict | None) -> list[str] | None:
 
 PROMPT_VERSION_KEY = "_system_prompt_version"
 
+#: 本次评分用的是**哪一份**提示词(`vision_system_prompt` / `..._men`)。
+#:
+#: 单有 `PROMPT_VERSION_KEY` 归不了属:版本号是 `max(version) WHERE key=?` 按 key
+#: **各自**自增的,于是女装 v3 与男装 v3 都写成 `"3"`。BE-302 的调用统计要按
+#: (key, version) 聚合,只有版本号那一列的话,两份提示词的调用次数会加在一起 ——
+#: 而那正是这张统计要回答的问题的反面(「换了提示词之后失败率有没有下降」)。
+#:
+#: 与 PROMPT_KEY / PROMPT_VERSION_KEY 同一条通道下发,取值仍然只由
+#: `vision_schema.prompt_key_for` 一处推导 —— 归属抄一份的话,选键改了而
+#: 统计的归属不跟着改,两边都不会红。
+PROMPT_KEY_NAME = "_system_prompt_key"
+
 # 这里原来有一份 RETRYABLE_STATUS / MAX_RETRY_AFTER_SECONDS 的本地定义,
 # 取值与 `app.llm.transport` 那份一模一样,而文件顶部也 import 了它们。
 # ruff 拆开看之后结论比"重复定义"更干脆:**两份都没有被这个模块用过**。

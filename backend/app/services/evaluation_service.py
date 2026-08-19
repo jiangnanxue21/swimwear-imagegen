@@ -45,6 +45,7 @@ from app.evaluators.vision import (
     AUDIENCE_KEY,
     ENABLED_CODES_KEY,
     PROMPT_KEY,
+    PROMPT_KEY_NAME,
     PROMPT_VERSION_KEY,
 )
 from app.evaluators.vision import DEPTH_KEY as VISION_DEPTH_KEY
@@ -237,6 +238,7 @@ def _record_attempt(
     evaluator: str,
     depth: EvaluationDepth,
     prompt_version: object = None,
+    prompt_key: str | None = None,
     model_name: str | None = None,
     duration_ms: int | None = None,
     evaluation_id=None,
@@ -282,6 +284,10 @@ def _record_attempt(
         http_status=meta.get("http_status") if isinstance(meta.get("http_status"), int) else None,
         finish_reason=(str(meta["finish_reason"])[:48] if meta.get("finish_reason") else None),
         prompt_version=version_text(prompt_version),
+        # 归属(BE-302)。**推不出来时留 None,不兜底成女装。** 兜底会把
+        # "不知道这次用的哪份"记成"用的是女装",而统计正是拿它回答
+        # 「换了提示词之后失败率有没有下降」—— 掺进来的假归属看不出来
+        prompt_key=(prompt_key or None),
         prompt_tokens=_int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens")),
         completion_tokens=_int_or_none(
             usage.get("completion_tokens") or usage.get("output_tokens")
@@ -295,6 +301,19 @@ def _record_attempt(
             "response_format": meta.get("response_format"),
             "images": meta.get("images"),
             "diagnostic": diagnostic,
+            # 这一行是**整轮汇总**还是一次真实调用(BE-302)。
+            #
+            # 整轮那两处("一张都没评成")不对应任何一次 API 调用 —— 计费侧
+            # 早就为这条踩过坑,`billable_provider` 只在逐张的三处传,
+            # 注释写着「给它们记账会让调用数凭空翻倍」。调用统计是同一个问题:
+            # 算进去既虚增分母,又把已经逐张记过的失败再加一遍。
+            #
+            # **不能靠 outcome 分。** 整轮那两处写的是 ROUND_RETRY_SCHEDULED
+            # **或** PROVIDER_ERROR,而后者逐张也在写。
+            # **也不能靠 candidate_id 分。** 那一列是 ondelete="SET NULL",
+            # 候选图被清理之后逐张行会变成 NULL,当场被误判成整轮行。
+            # 所以在写入这一刻把它钉下来 —— 事实写完就不再变。
+            "round_level": candidate is None,
         },
     )
     session.add(row)
@@ -444,6 +463,7 @@ def diagnose_candidate(
             evaluator=evaluator.evaluator_name,
             depth=depth,
             prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            prompt_key=prompt_context.get(PROMPT_KEY_NAME),
             error_code=str(exc.code),
             error_message=exc.message,
             duration_ms=exc.duration_ms,
@@ -463,6 +483,7 @@ def diagnose_candidate(
             evaluator=evaluator.evaluator_name,
             depth=depth,
             prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            prompt_key=prompt_context.get(PROMPT_KEY_NAME),
             error_code=str(exc.code),
             error_message=exc.message,
             duration_ms=getattr(exc, "duration_ms", None),
@@ -490,6 +511,7 @@ def diagnose_candidate(
         evaluator=result.evaluator,
         depth=result.depth,
         prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+        prompt_key=prompt_context.get(PROMPT_KEY_NAME),
         model_name=result.model_name,
         duration_ms=result.duration_ms,
         raw=result.raw,
@@ -637,7 +659,10 @@ def _prompt_context(session: Session, audience: object = None) -> dict:
 
         key = prompt_key_for(_coerce_audience(audience))
         content, version = prompt_service.get_active_content(session, key)
-        return {PROMPT_KEY: content, PROMPT_VERSION_KEY: version}
+        # 键本身也带下去(BE-302)。版本号按 key 各自自增,单有版本号归不了属 ——
+        # 详见 `vision.PROMPT_KEY_NAME` 上面那段。这里顺手返回,而不是让
+        # `_record_attempt` 的调用点各自再推一次:选键的判据只有上面那一行
+        return {PROMPT_KEY: content, PROMPT_VERSION_KEY: version, PROMPT_KEY_NAME: key}
 
     except Exception as exc:  # noqa: BLE001
         if settings.is_production:
@@ -783,6 +808,7 @@ def evaluate_round(
                 evaluator=evaluator.evaluator_name,
                 depth=depth,
                 prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+                prompt_key=prompt_context.get(PROMPT_KEY_NAME),
                 error_code=str(exc.code),
                 error_message=exc.message,
                 # 请求成功、只是解析失败 —— 模型名、响应 ID、token 用量、
@@ -813,6 +839,7 @@ def evaluate_round(
                 evaluator=evaluator.evaluator_name,
                 depth=depth,
                 prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+                prompt_key=prompt_context.get(PROMPT_KEY_NAME),
                 error_code=str(exc.code),
                 error_message=exc.message,
                 # 和上面的解析失败分支对齐。截断、内容安全拒绝这类
@@ -848,6 +875,7 @@ def evaluate_round(
             evaluator=result.evaluator,
             depth=result.depth,
             prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            prompt_key=prompt_context.get(PROMPT_KEY_NAME),
             model_name=result.model_name,
             duration_ms=result.duration_ms,
             evaluation_id=row.id,
@@ -887,6 +915,7 @@ def evaluate_round(
             evaluator=evaluator.evaluator_name,
             depth=EvaluationDepth.FULL,
             prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            prompt_key=prompt_context.get(PROMPT_KEY_NAME),
             error_code=codes[0] if codes else None,
             error_message=f"整轮 {len(scorer_failures)} 张候选图全部评分失败",
         )
@@ -961,6 +990,7 @@ def evaluate_round(
             evaluator=evaluator.evaluator_name,
             depth=EvaluationDepth.FULL,
             prompt_version=prompt_context.get(PROMPT_VERSION_KEY),
+            prompt_key=prompt_context.get(PROMPT_KEY_NAME),
             error_code=codes[0] if codes else None,
             error_message=(
                 f"{len(scorer_failures)} 张候选图未评分,已评的 {len(verdicts)} 张里没有 A 档,"

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Checkbox, Col, Descriptions, Empty, Image, Row, Select,
   Radio, Space, Spin, Table, Tag, Typography,
@@ -24,6 +24,7 @@ import {
   outcomeLabel,
   subjectLabel,
   versionLabel,
+  versionPathFor,
 } from '../utils/aiTestRuns'
 import { brandVars, fontScale, space } from '../theme'
 
@@ -540,13 +541,25 @@ export default function AITestPage() {
               width: 220,
               render: (_: unknown, row: AiTestRun) => {
                 const label = versionLabel(row)
-                return row.prompt_key ? (
+                if (!row.prompt_key) return <Text type="secondary">—</Text>
+                // FE-314 反向互链。`versionPathFor` 只对**评分**那半给得出路径:
+                // 文案链路落的是内容哈希,没有对应的版本页,拼出来必然 404 ——
+                // 那时它不画链接,标签照常显示(判据见 utils 里那段)
+                const path = versionPathFor(row)
+                return (
                   <Space size={4}>
                     <Tag>{row.prompt_key}</Tag>
-                    {label && <Tag>{label}</Tag>}
+                    {label &&
+                      (path ? (
+                        <Link to={path}>
+                          {/* 走 BrandTag 而不是 `<Tag color="...">`:antd 预设调色板
+                              不受 theme.ts 控制,会在暗色模式下漂色(ESLint 钉着这条) */}
+                          <BrandTag tone="accent">{label}</BrandTag>
+                        </Link>
+                      ) : (
+                        <Tag>{label}</Tag>
+                      ))}
                   </Space>
-                ) : (
-                  <Text type="secondary">—</Text>
                 )
               },
             },

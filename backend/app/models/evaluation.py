@@ -248,6 +248,15 @@ class EvaluationAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_evaluation_attempts_task_round", "task_id", "round_number"),
         Index("ix_evaluation_attempts_outcome", "outcome"),
         Index("ix_evaluation_attempts_created_at", "created_at"),
+        # BE-302 的两条查询都打这个前缀:列表页按 (key) 收近 7 天,详情页按
+        # (key, version) 逐版收。`created_at` 收尾让时间窗也走索引 —— 这张表
+        # 每次评分都写一行(一轮 4 张 × 最多 3 轮),全表扫会随用量线性变慢
+        Index(
+            "ix_evaluation_attempts_prompt",
+            "prompt_key",
+            "prompt_version",
+            "created_at",
+        ),
     )
 
     task_id: Mapped[UUID] = mapped_column(
@@ -289,6 +298,19 @@ class EvaluationAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: `prompt_templates.version` 那个自增序号(评分链路还没接内容哈希),
     #: 但类型先归一 —— 接的那天不必再改一次表,也不必再写一次有损 downgrade。
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    #: 当时用的是**哪一份**提示词(迁移 0059 / BE-302)。
+    #:
+    #: 单有上面那一列归不了属:版本号是 `max(version) WHERE key=?` **按 key 各自**
+    #: 自增的,于是女装 v3 与男装 v3 都存成 `"3"`。按版本号聚合会把两份提示词的
+    #: 调用次数加在一起,而这张统计要回答的恰恰是「换了这一份之后失败率有没有下降」。
+    #:
+    #: **允许为空,且空值不许兜底成女装。** 三种情况会留空:迁移之前的历史行、
+    #: 提示词读取失败退回内置默认的降级路径(`_prompt_context` 返回 {})、
+    #: 受众推不出来。把它们记成女装等于往统计里掺假归属,而掺进去之后
+    #: 没有任何东西能把它们分出来 —— 统计侧因此单独报一个 `unattributed`,
+    #: 不把未归属的调用悄悄算进任何一份提示词的分母。
+    prompt_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

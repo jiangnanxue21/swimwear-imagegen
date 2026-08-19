@@ -34,6 +34,7 @@ from app.services.prompt_rules import (
     default_content,
     lint_prompt,
 )
+from app.workflows import prompt_stats
 
 logger = get_logger(__name__)
 
@@ -413,7 +414,16 @@ def _anti_injection_for(key: str) -> str | None:
 
 def describe(session: Session, key: str) -> dict[str, Any]:
     """页面要的全部信息:当前内容、版本、是否内置默认、体检结果、历史。"""
+    from app.services import prompt_usage
+
     content, version = get_active_content(session, key)
+    # FE-306 那一列。逐版取一次(一条 GROUP BY),而不是每行查一次 ——
+    # 版本表可能有几十行,每行一次查询会把一次打开详情页变成几十次往返。
+    #
+    # 版本号在 `evaluation_attempts` 里是**字符串**(那一列 String(32)),
+    # 所以下面按 `str(row.version)` 取桶。两边形状不一致的话拿不到数,
+    # 而拿不到数长得就像"这一版没跑过" —— 守卫钉着这一条
+    per_version = prompt_usage.version_stats(session, key)
     return {
         "key": key,
         "content": content,
@@ -436,7 +446,17 @@ def describe(session: Session, key: str) -> dict[str, Any]:
                 "updated_by": row.updated_by,
                 "chars": len(row.content),
                 "created_at": iso_utc(row.created_at),
+                # 没有任何调用的版本给的是一份全零统计,**不是 None** ——
+                # 这一层答得出"这一版跑了 0 次"这件事本身。分不清"真的 0 次"
+                # 与"统计还没覆盖到"的责任在展示层,靠下面那个 stats_since
+                "stats": per_version.get(
+                    str(row.version), prompt_stats.PromptCallStats()
+                ).as_dict(),
             }
             for row in list_versions(session, key)
         ],
+        # 统计的起点。0059 执行之前的调用不带归属,所以更早的版本会偏少 ——
+        # 界面拿它说「统计自 X 起」,而不是让一个跑过 500 次的老版本
+        # 顶着「调用 0 次」冒充没人用过(迁移 0059 的模块文档)
+        "stats_since": iso_utc(prompt_usage.coverage_since(session)),
     }

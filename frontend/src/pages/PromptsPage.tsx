@@ -10,6 +10,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
   App,
   Collapse,
@@ -24,6 +25,7 @@ import { formatDateTime } from '../utils/datetime'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
 import { runsQueryForVersion } from '../utils/aiTestRuns'
+import { versionLabel as versionStatsLabel } from '../utils/promptStats'
 import TextDiff from '../components/TextDiff'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { fontScale } from '../theme'
@@ -194,6 +196,10 @@ export default function PromptsPage() {
    *
    * 三种状态必须分开表达:检过了没问题 / 检过了有问题 / **没检成**。
    */
+  // 统计起点。null(还没有任何带归属的留痕)原样传下去 —— 判定层拿 null
+  // 与拿一个占位串会说出两句不同的话
+  const statsSince = query.data?.stats_since ? formatDateTime(query.data.stats_since) : null
+
   const previewBroken = dirty && preview.isError
   const previewStale = dirty && checked !== content
   const warnings = dirty ? (preview.data?.warnings ?? []) : (query.data?.warnings ?? [])
@@ -213,6 +219,23 @@ export default function PromptsPage() {
     { title: '说明', dataIndex: 'note', render: (v: string | null) => v || <Text type="secondary">—</Text> },
     { title: '署名', dataIndex: 'updated_by', width: 120, render: (v: string | null) => v || '—' },
     { title: '字数', dataIndex: 'chars', width: 90 },
+    {
+      // FE-306 最后一项。字数此前是这张表里最接近「质量」的一列 —— 而字数
+      // 说不出这一版跑得好不好。调用与失败次数说得出。
+      //
+      // **全零不等于「这一版没跑过」**:统计有起点(`stats_since`,来自迁移
+      // 0059 补上归属那一刻),更早的调用查不出来。判定在 `versionStatsLabel`
+      // 里,它拿 `statsSince` 决定说「0 次」还是「未统计」
+      title: '调用',
+      width: 150,
+      render: (_: unknown, row: PromptVersion) => {
+        const display = versionStatsLabel(row.stats, statsSince)
+        const body = (
+          <Text type={display.tone === 'muted' ? 'secondary' : undefined}>{display.text}</Text>
+        )
+        return display.hint ? <Tooltip title={display.hint}>{body}</Tooltip> : body
+      },
+    },
     {
       title: '时间',
       dataIndex: 'created_at',

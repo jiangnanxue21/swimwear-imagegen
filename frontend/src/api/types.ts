@@ -1024,6 +1024,14 @@ export interface PromptVersion {
   updated_by: string | null
   chars: number
   created_at: string | null
+  /**
+   * 这一版的调用统计(FE-306 的「调用 N 次 · 失败 M 次」列)。不设时间窗 ——
+   * 一个老版本的全部调用可能都在 7 天之前,加了窗会让每个非当前版本都显示 0。
+   *
+   * 全零**不等于**"这一版没跑过":统计有起点(见 `PromptOverview.stats_since`),
+   * 更早的调用不带归属。展示层要把这两件事分开说。
+   */
+  stats: PromptCallStats
 }
 
 export interface PromptOverview {
@@ -1044,6 +1052,13 @@ export interface PromptOverview {
   warnings: PromptWarning[]
   versions: PromptVersion[]
   saved_version?: number
+  /**
+   * 调用统计的起点(第一条带归属的评分留痕)。`null` = 还没有。
+   *
+   * 界面拿它说「统计自 X 起」。少了这句,一个在迁移 0059 之前跑过 500 次的
+   * 版本会顶着「调用 0 次」冒充没人用过 —— 而那正是这一列要分开的两件事。
+   */
+  stats_since: string | null
 }
 
 export interface PromptPreview {
@@ -1067,6 +1082,26 @@ export type PromptTier = 'FREE' | 'TEMPLATE' | 'MAPPING'
  * 的文档写着「先不给一个算不准的数」—— 前端不推测状态(硬规则第 4 条),
  * 后端不给就不显示,不在这里用别的字段凑一个近似值。
  */
+/**
+ * 一份(或一版)提示词的调用统计(BE-302)。源是 `evaluation_attempts` ——
+ * 每一次评分请求成功与失败都留一行。
+ *
+ * **两个比率可以是 `null`,不是 0。** 一次调用都没有时没有分母,而 0% 会让一个
+ * 没人用过的版本和一个跑得很好的版本在界面上长得一模一样 —— 那正是这两列
+ * 要分开的东西。展示层必须自己处理 null,不许 `?? 0`。
+ */
+export interface PromptCallStats {
+  calls: number
+  failures: number
+  parse_failed: number
+  provider_error: number
+  unavailable: number
+  /** 其中由 AI 测试页手工触发的次数。已含在 `calls` 里,不是另一批 */
+  diagnostic: number
+  parse_failure_rate: number | null
+  failure_rate: number | null
+}
+
 export interface PromptSurface {
   key: string
   label: string
@@ -1078,10 +1113,25 @@ export interface PromptSurface {
   has_static_default: boolean
   /** 只有 editable 的项带这一列;null = 内置默认生效中 */
   active_version?: number | null
+  /**
+   * 近 `stats_window_days` 天的调用统计(FE-301)。**只有 editable 的项带它** ——
+   * 其余 6 处的消费链路不读库,它们的调用根本不经过 `evaluation_attempts`,
+   * 查出来一定是 0,而界面上一个「近 7 天 0 次」会被读成"没人用"。
+   */
+  stats?: PromptCallStats
 }
 
 export interface PromptSurfaceList {
   surfaces: PromptSurface[]
+  /** 统计窗口。与列头文案同源 —— 前端不许自己写死「近 7 天」 */
+  stats_window_days: number
+  /**
+   * 窗口内**归不了属**的调用次数(迁移 0059 之前的历史行、提示词读取失败的
+   * 降级路径、受众推不出来)。不摊进任何一份提示词 —— 摊进去看不出来
+   */
+  stats_unattributed: number
+  /** 统计从什么时候开始有。`null` = 还没有任何带归属的留痕 */
+  stats_since: string | null
 }
 
 /**
