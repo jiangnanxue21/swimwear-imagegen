@@ -316,16 +316,20 @@ def create_app() -> FastAPI:
             request.method.upper() != "OPTIONS"
             and path.startswith(prefix)
             and not is_public_api_path(path, prefix)
+        )
+        if needs_guard and resolve_identity(request) is None:
             # 中间件比路由分派先执行。若不先问路由表，一条不存在的路径或
             # 方法不匹配的路径会被改写成 401，下面专门准备的中文 404/405
             # 永远不可达。只给 FULL 加守卫：新加的真实路由仍然默认关闭；
             # PARTIAL/无匹配交回 Starlette 生成准确的 405/404。
-            and any(
+            #
+            # 只在匿名请求上扫路由表。已登录请求本来就会放行，不该为每次
+            # 正常 API 调用重复做一遍正则匹配。
+            if not any(
                 route.matches(request.scope)[0] is Match.FULL
                 for route in request.app.router.routes
-            )
-        )
-        if needs_guard and resolve_identity(request) is None:
+            ):
+                return await call_next(request)
             from app.api.deps import rejection
 
             exc = rejection(needs_admin=False)
