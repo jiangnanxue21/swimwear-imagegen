@@ -39,16 +39,29 @@ from app.evaluators.decision import (
 )
 from app.evaluators.ranking import RankedCandidate, rank_candidates
 from app.evaluators.registry import get_active_evaluator
+from app.evaluators.repair import (
+    REPAIR_PROMPT_ADDITIONS_KEY,
+    REPAIR_TABLE,
+    RepairAction,
+    parse_repair_table,
+)
 from app.evaluators.rules import grade_candidate
 from app.evaluators.scoring import EvaluationParseError
 from app.evaluators.vision import (
     AUDIENCE_KEY,
+    DEPTH_INSTRUCTIONS_KEY,
     ENABLED_CODES_KEY,
     PROMPT_KEY,
     PROMPT_KEY_NAME,
     PROMPT_VERSION_KEY,
+    USER_PROMPT_TEMPLATE_KEY,
 )
 from app.evaluators.vision import DEPTH_KEY as VISION_DEPTH_KEY
+from app.evaluators.vision_schema import (
+    SCORING_DEPTH_INSTRUCTIONS_KEY,
+    SCORING_USER_PROMPT_KEY,
+    parse_depth_instructions,
+)
 from app.models.evaluation import (
     CandidateEvaluation,
     EvaluationAttempt,
@@ -632,7 +645,7 @@ def _persist(
 
 
 def _prompt_context(session: Session, audience: object = None) -> dict:
-    """当前生效的系统提示词与版本号。**按受众取键**(PRD v2 §12.5)。
+    """当前生效的评分提示词快照。系统段仍按受众取键(PRD v2 §12.5)。
 
     这里的 try/except 曾经吞掉**所有**异常并退回内置默认提示词。听起来像是
     合理的降级,实际上不是:数据库超时、连接断开、出现两条 active 记录,
@@ -659,10 +672,23 @@ def _prompt_context(session: Session, audience: object = None) -> dict:
 
         key = prompt_key_for(_coerce_audience(audience))
         content, version = prompt_service.get_active_content(session, key)
+        user_template, _user_version = prompt_service.get_active_content(
+            session, SCORING_USER_PROMPT_KEY
+        )
+        depth_content, _depth_version = prompt_service.get_active_content(
+            session, SCORING_DEPTH_INSTRUCTIONS_KEY
+        )
+        depth_instructions = parse_depth_instructions(depth_content)
         # 键本身也带下去(BE-302)。版本号按 key 各自自增,单有版本号归不了属 ——
         # 详见 `vision.PROMPT_KEY_NAME` 上面那段。这里顺手返回,而不是让
         # `_record_attempt` 的调用点各自再推一次:选键的判据只有上面那一行
-        return {PROMPT_KEY: content, PROMPT_VERSION_KEY: version, PROMPT_KEY_NAME: key}
+        return {
+            PROMPT_KEY: content,
+            PROMPT_VERSION_KEY: version,
+            PROMPT_KEY_NAME: key,
+            USER_PROMPT_TEMPLATE_KEY: user_template,
+            DEPTH_INSTRUCTIONS_KEY: depth_instructions,
+        }
 
     except Exception as exc:  # noqa: BLE001
         if settings.is_production:
@@ -686,6 +712,47 @@ def _prompt_context(session: Session, audience: object = None) -> dict:
             extra={"extra_fields": {"event": "eval.prompt_fallback", "error": type(exc).__name__}},
         )
         return {}
+
+
+def _active_repair_table(session: Session) -> dict[str, RepairAction]:
+    """本轮自动修复策略快照；无效配置在任何付费评分请求前失败关闭。"""
+    from app.core.config import settings
+    from app.services import prompt_service
+
+    try:
+        content, _version = prompt_service.get_active_content(
+            session, REPAIR_PROMPT_ADDITIONS_KEY
+        )
+        return parse_repair_table(content)
+    except Exception as exc:  # noqa: BLE001
+        if settings.is_production:
+            logger.error(
+                "cannot load the active repair prompt mapping; refusing to score",
+                extra={
+                    "extra_fields": {
+                        "event": "eval.prompt_missing",
+                        "key": REPAIR_PROMPT_ADDITIONS_KEY,
+                        "error": type(exc).__name__,
+                    }
+                },
+            )
+            raise ManualReviewRequired(
+                "读取生效中的修复提示词补丁表失败，无法安全生成下一轮；已转人工审核。"
+                "请检查补丁表 JSON、必需问题代码和字段类型",
+                detail={"error": type(exc).__name__},
+            ) from exc
+        logger.warning(
+            "cannot load the active repair prompt mapping, falling back to the built-in "
+            "default (non-production only)",
+            extra={
+                "extra_fields": {
+                    "event": "eval.prompt_fallback",
+                    "key": REPAIR_PROMPT_ADDITIONS_KEY,
+                    "error": type(exc).__name__,
+                }
+            },
+        )
+        return REPAIR_TABLE
 
 
 def evaluate_round(
@@ -740,6 +807,9 @@ def evaluate_round(
         # 一轮里所有候选图共用同一份 —— 否则同轮分数之间不可比
         **_rule_pack_context(product),
     }
+    # 补丁表只影响本轮结论，不发给模型；同一轮仍固定使用同一个活动版本。
+    # 在候选循环前解析，避免 JSON 配错后先花完评分费用才发现无法决策。
+    repair_table = _active_repair_table(session)
 
     verdicts: list[CandidateVerdict] = []
     #: 没评成的候选图 (candidate_id, error_code, message)。
@@ -965,6 +1035,7 @@ def evaluate_round(
         thresholds=rule_set.thresholds,
         task_key=str(task.id),
         provider_exhausted=provider_exhausted,
+        repair_table=repair_table,
     )
 
     if scorer_failures and decision.outcome is not RoundOutcome.AUTO_APPROVED:

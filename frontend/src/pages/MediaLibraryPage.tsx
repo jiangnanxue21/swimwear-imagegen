@@ -8,6 +8,7 @@ import { readError } from '../api/client'
 import { useWriteError } from '../hooks/useWriteError'
 import {
   mediaApi,
+  MEDIA_STATUS_LABEL,
   type MediaAsset,
   type MediaQuery,
   type MediaRole,
@@ -64,21 +65,6 @@ const SORT_OPTIONS = [
   { value: 'spu:asc', label: 'SPU 升序' },
 ]
 
-/**
- * 素材生命周期(后端 `MediaStatus`)。文案与颜色放同一张表 —— 拆成两张
- * 的下场是加一个状态时只补了颜色,标签上留着一个英文枚举值。
- *
- * `QUARANTINED` 说「已隔离」不说「不合规」:合规预检有假阳性,
- * 隔离是「先拦下来等人看」,不是判定。
- */
-const STATUS_META: Record<string, { text: string; color: string }> = {
-  READY: { text: '可用', color: 'green' },
-  PENDING: { text: '待处理', color: 'default' },
-  QUARANTINED: { text: '已隔离', color: 'orange' },
-  FAILED: { text: '入库失败', color: 'red' },
-  DELETED: { text: '已删除', color: 'default' },
-}
-
 /** 角色来源徽标。模型猜的角色不能当主图,这个信息必须在列表里看得见。 */
 function RoleSourceTag({ asset }: { asset: MediaAsset }) {
   if (asset.role_source === 'HUMAN') return <BrandTag tone="accent">人工</BrandTag>
@@ -97,7 +83,7 @@ function RoleSourceTag({ asset }: { asset: MediaAsset }) {
 }
 
 export default function MediaLibraryPage() {
-  useDocumentTitle('素材管理')
+  useDocumentTitle('素材库')
   const { message } = App.useApp()
   const qc = useQueryClient()
   const [query, setQuery] = useState<MediaQuery>({
@@ -189,10 +175,7 @@ export default function MediaLibraryPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-    <PageHeader title="素材管理" subtitle="原始素材的角色、复核状态与隔离" />
-      <Typography.Title level={4} style={{ margin: 0 }}>
-        素材库
-      </Typography.Title>
+      <PageHeader title="素材库" subtitle="管理原始素材的角色、复核状态和隔离情况" />
 
       {/* 迁移期状态。切换读路径之前这两个数字必须都是 0 —— 放在页面顶部
           而不是藏在运维脚本里,是因为「一周无 mismatch」是个需要有人天天看的判据。
@@ -256,7 +239,7 @@ export default function MediaLibraryPage() {
             allowClear
             placeholder="状态"
             style={{ width: 140 }}
-            options={Object.entries(STATUS_META).map(([value, meta]) => ({
+            options={Object.entries(MEDIA_STATUS_LABEL).map(([value, meta]) => ({
               value,
               label: meta.text,
             }))}
@@ -330,8 +313,8 @@ export default function MediaLibraryPage() {
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Space wrap size={4}>
                 <Tag>{SOURCE_LABEL[asset.source] ?? asset.source}</Tag>
-                <Tag color={STATUS_META[asset.status]?.color}>
-                  {STATUS_META[asset.status]?.text ?? asset.status}
+                <Tag color={MEDIA_STATUS_LABEL[asset.status]?.color}>
+                  {MEDIA_STATUS_LABEL[asset.status]?.text ?? asset.status}
                 </Tag>
               </Space>
               <Space wrap size={4}>

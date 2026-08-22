@@ -558,8 +558,21 @@ def discover() -> list[Path]:
 def main() -> int:
     scripts = discover()
     if not scripts:
-        print(f"{RED}一份变异脚本都没找到{RESET} —— 审计对象为空,这不是通过")
-        return 1
+        # **零份是合法状态,不是\"审计对象丢了\"。**
+        #
+        # 上一版在这里直接返回 1,措辞是「审计对象为空,这不是通过」。那句话的
+        # 前提是变异脚本长期留在树里 —— 而 `docs/DECISIONS.md` §3.107 把口径
+        # 改了:mutate 脚本随对应批次交付后即删,考古走 git 历史。按老口径,
+        # 一次正常的清退会让 `make check-offline` 恒红,而恒红的门禁会被人加
+        # `|| true`(`p0_gate.py` 顶部写着同一件事)。
+        #
+        # 代价写明:这条审计从此在\"有脚本\"的那些轮次才真的验东西。它不替
+        # 「该不该有变异脚本」把关 —— 那是评审的判断,不是一条静态审计能答的。
+        print(
+            f"{DIM}树里没有变异脚本{RESET} —— "
+            "按 DECISIONS §3.107,它们随批次交付后即删,这是预期状态"
+        )
+        return 0
 
     reports: list[tuple[str, dict[str, tuple[str, list[str]]], list[str]]] = []
     total = 0

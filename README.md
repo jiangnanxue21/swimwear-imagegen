@@ -1,7 +1,8 @@
-# 网站商品展示图自动生成系统
+# 服装商品运营平台
 
-服装商品展示图的生产流水线:上传商品资料与原图 → 多 Provider 生成候选图 →
-自动评分分档 → 自动重生或人工审核 → 输出网站可直接使用的多尺寸图片 URL。
+面向服装商品运营的一体化工作平台:从商品资料与素材生产出发,经 AI 图片生成、
+自动评分与人工审核、属性和文案确认,生成上架草稿并发布到渠道,同时提供运营
+跟踪与数据分析能力。
 
 [快速开始](#快速开始) ·
 [架构图册](docs/ARCHITECTURE.md) ·
@@ -25,7 +26,7 @@
 > **想知道某项能力现在能不能用,从 [`docs/STATUS.md`](docs/STATUS.md) 开始。**
 > 那份文档按能力逐条写明状态与已知限制,是本仓库里唯一负责回答「现在到底能不能用」的地方。
 
-> ⚠️ **升级一个已在运行的部署之前,先读 [`docs/DECISIONS.md`](docs/DECISIONS.md) 第三节。**
+> ⚠️ **升级一个已在运行的部署之前,先读 [`docs/UPGRADING.md`](docs/UPGRADING.md)。**
 > 那里按主题归并了全部升级须知:必须做的人工动作(主密钥轮换、`ADMIN_TOKEN`、beat 进程)、
 > 原本能跑通但现在会被挡下的操作、以及几处不报错的看板口径变更。
 
@@ -51,7 +52,7 @@ make smoke      # 一分钟内告诉你闭环通不通
 要当前口径跑 `cd backend && python3 tools/verify_sample_data.py`):
 
 ```bash
-python3 sample-data/generate_images.py   # 首次需先生成占位图
+python3 sample-data/generate_images.py   # 占位图是生成物,不入库 —— 首次必跑
 make seed
 make worker-ping                          # 期望输出 {'pong': True, ...}
 ```
@@ -124,7 +125,8 @@ openssl rand -base64 32                                        # 生成设置页
 | 某一块代码的边界与契约 | [`docs/subsystems/README.md`](docs/subsystems/README.md) |
 | 怎么加一个 Provider / 品类 / 配置项 | [`docs/cookbook/README.md`](docs/cookbook/README.md) |
 | 某项能力能不能用、已知限制 | [`docs/STATUS.md`](docs/STATUS.md) |
-| 为什么这么设计、升级须知 | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| 为什么这么设计 | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| 升级一个已在运行的部署 | [`docs/UPGRADING.md`](docs/UPGRADING.md) |
 
 全部文档的入口在 [`docs/README.md`](docs/README.md)。
 

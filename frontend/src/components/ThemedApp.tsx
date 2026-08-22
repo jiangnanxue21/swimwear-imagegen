@@ -1,4 +1,4 @@
-import { App as AntdApp, ConfigProvider, theme as antdTheme } from 'antd'
+import { App as AntdApp, ConfigProvider, Empty, theme as antdTheme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { useEffect, useState, type ReactNode } from 'react'
 
@@ -39,6 +39,7 @@ export default function ThemedApp({ children }: { children: ReactNode }) {
   return (
     <ConfigProvider
       locale={zhCN}
+      renderEmpty={() => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />}
       theme={theme}
     >
       <AntdApp>{children}</AntdApp>

@@ -346,4 +346,71 @@ describe('运行日志页(a54 修复)', () => {
 
     expect(await screen.findByText(/控制台不改写它/)).toBeInTheDocument()
   })
+
+  /*
+   * 滚动即暂停跟随。**这个功能上一版一次都没有触发过。**
+   *
+   * 上一版把滚动监听挂在流列表那个 div 上,而它既没有 `overflow` 也没有高度 ——
+   * 它根本不是滚动容器,`scrollTop` 恒为 0。整页在滚的是 window,所以现在监听
+   * 的是 window。
+   *
+   * 修复方向对,但在此之前**验证是零**:交付环境没有 node_modules、没有浏览器。
+   * 一个「改对了但没验」的修复与未修的区别,只在于下一次是谁发现它还是坏的 ——
+   * 所以这里补一条真的会触发那条 effect 的用例。
+   *
+   * jsdom 里 `window.scrollTo` 不改 `scrollY`,也不派发 scroll 事件,所以要
+   * 手动写 `scrollY` 再 dispatch。这不是在迁就测试环境:被测的判据本来就是
+   * 「`window.scrollY > 40` 时把 follow 关掉」,写的正是它。
+   */
+  async function scrollWindowTo(y: number) {
+    Object.defineProperty(window, 'scrollY', { value: y, writable: true, configurable: true })
+    window.dispatchEvent(new Event('scroll'))
+  }
+
+  /**
+   * 布尔参数在 URL 里是 `1` / `0`,不是 `true` / `false`。
+   *
+   * `flagParam` 的 codec 只认这两个字面量(`useUrlFilters.ts`),别的取值一律
+   * 退回默认值 —— 而 `follow` 的默认值是 `true`。所以这三条用例原来写的
+   * `?follow=false` 读出来是**跟随中**,第三条因此长期是红的;
+   * 前两条的 `?follow=true` 则是靠默认值碰巧变绿,并没有验到 URL 解析。
+   *
+   * 这是用例的问题不是页面的问题:界面写出去的地址永远是 codec 生成的
+   * `follow=0`,`?follow=false` 是应用产生不出来的形状。口径由
+   * `nav-and-url-filters.test.tsx` 的 `only_blocked=1` 钉着,两处必须一致。
+   */
+  it('向下滚动会关掉自动跟随 —— 正在读的行不被顶走', async () => {
+    opsMocks.logs.mockResolvedValue(page([entry({ seq: 'a', message: '这一条' })]))
+    renderPage('/ops-logs?follow=1')
+
+    expect(await screen.findByText('跟随中')).toBeInTheDocument()
+
+    await scrollWindowTo(120)
+
+    await waitFor(() => expect(screen.getByText('已暂停')).toBeInTheDocument())
+  })
+
+  it('小幅滚动不算 —— 阈值以内仍然跟随', async () => {
+    opsMocks.logs.mockResolvedValue(page([entry({ seq: 'a', message: '这一条' })]))
+    renderPage('/ops-logs?follow=1')
+
+    expect(await screen.findByText('跟随中')).toBeInTheDocument()
+
+    await scrollWindowTo(10)
+
+    // 反向断言:阈值以内不许改状态。没有这一条的话,一个"只要滚动就暂停"的
+    // 实现照样能让上面那条变绿,而那会让运营每一次轻微滚动都掉出跟随
+    expect(screen.getByText('跟随中')).toBeInTheDocument()
+  })
+
+  it('跟随已经关掉时不再挂监听 —— 关掉之后不该被滚动再改一次', async () => {
+    opsMocks.logs.mockResolvedValue(page([entry({ seq: 'a', message: '这一条' })]))
+    renderPage('/ops-logs?follow=0')
+
+    expect(await screen.findByText('已暂停')).toBeInTheDocument()
+
+    await scrollWindowTo(300)
+
+    expect(screen.getByText('已暂停')).toBeInTheDocument()
+  })
 })

@@ -8,7 +8,13 @@ import { useQuery } from '@tanstack/react-query'
 import { dashboardApi } from '../api/exports'
 import ErrorNotice from '../components/ErrorNotice'
 import GradeTag from '../components/GradeTag'
-import { GRADE_LABEL, type DashboardSummary, type Grade } from '../api/types'
+import {
+  GRADE_LABEL,
+  OUTPUT_PURPOSE_LABEL,
+  TASK_STATUS_LABEL,
+  type DashboardSummary,
+  type Grade,
+} from '../api/types'
 import { brandVars, fontScale } from '../theme'
 import { formatDateTime } from '../utils/datetime'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -29,7 +35,6 @@ function GradeBar({ grades }: { grades: Record<Grade, number> }) {
   }
   return (
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
-    <PageHeader title="指标仪表盘" subtitle="系统跑得好不好:分档分布、出图调用、出图覆盖率" />
       <div style={{ display: 'flex', height: 18, borderRadius: 3, overflow: 'hidden' }}>
         {GRADE_ORDER.map((grade) => {
           const count = grades[grade] ?? 0
@@ -55,7 +60,15 @@ function GradeBar({ grades }: { grades: Record<Grade, number> }) {
   )
 }
 
-function CountRow({ data, empty }: { data: Record<string, number>; empty: string }) {
+function CountRow({
+  data,
+  empty,
+  labelFor = (key) => key,
+}: {
+  data: Record<string, number>
+  empty: string
+  labelFor?: (key: string) => string
+}) {
   const entries = Object.entries(data).filter(([, v]) => v > 0)
   if (entries.length === 0) {
     return <span style={{ color: brandVars.textMuted, fontSize: fontScale.body }}>{empty}</span>
@@ -64,7 +77,7 @@ function CountRow({ data, empty }: { data: Record<string, number>; empty: string
     <Space size={4} wrap>
       {entries.sort((a, b) => b[1] - a[1]).map(([key, value]) => (
         <Tag key={key}>
-          {key} <span className="mono">{value}</span>
+          {labelFor(key)} <span className="mono">{value}</span>
         </Tag>
       ))}
     </Space>
@@ -127,6 +140,10 @@ export default function DashboardPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <PageHeader
+        title="指标仪表盘"
+        subtitle="查看图片生成质量、服务调用与成品图覆盖情况"
+      />
       <Space>
         <Button size="small" icon={<ReloadOutlined />} onClick={() => query.refetch()}>刷新</Button>
         <span style={{ fontSize: fontScale.meta, color: brandVars.slate }}>每 30 秒自动刷新</span>
@@ -227,7 +244,11 @@ export default function DashboardPage() {
               </div>
               <div>
                 <div className="section-label">按用途</div>
-                <CountRow data={data.outputs.by_purpose} empty="还没有成品图" />
+                <CountRow
+                  data={data.outputs.by_purpose}
+                  empty="还没有成品图"
+                  labelFor={(key) => OUTPUT_PURPOSE_LABEL[key as keyof typeof OUTPUT_PURPOSE_LABEL]?.text ?? key}
+                />
               </div>
             </Space>
           </Card>
@@ -248,7 +269,11 @@ export default function DashboardPage() {
         </Col>
         <Col xs={24} lg={12}>
           <Card size="small" title="任务状态分布" style={{ height: '100%' }}>
-            <CountRow data={data.tasks.by_status} empty="还没有任务" />
+            <CountRow
+              data={data.tasks.by_status}
+              empty="还没有任务"
+              labelFor={(key) => TASK_STATUS_LABEL[key as keyof typeof TASK_STATUS_LABEL]?.text ?? key}
+            />
           </Card>
         </Col>
       </Row>

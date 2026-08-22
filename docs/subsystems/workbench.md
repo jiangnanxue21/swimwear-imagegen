@@ -47,6 +47,49 @@ beat 每 60 秒一拍,没 beat 时退回 `make requeue`。
 
 **没有新建 outbox 表** —— 条目本身就是意图记录。
 
+判定与实现的分工:
+
+```
+app/workbench/batch.py          判定:ITEM_LEASE_SECONDS / MAX_ITEM_ATTEMPTS
+                                lease_expired() / reclaim_verdict() / WORKER_LOST
+app/workbench/batch_service.py  claim_items() / settle() / reap_expired_leases()
+                                / redispatch_stalled_batches()
+app/tasks/maintenance_tasks.py  reap_batch_leases,beat 每 60 秒一拍
+```
+
+改这一段之前先读三条:
+
+1. **租约必须长于「一次领取的全部条目顺序跑完」的最长合法耗时**,而不是单件耗时。
+   回执表挡得住「跑完的不重跑」,挡不住「正在跑的又来一次」—— 回执是调用之后才写的。
+   为什么:`../notes/2026-08-02-lease-assert-missed-claim-chunk.md`
+2. **`lease_until IS NULL` 算已过期。** 与 `publish_service` 那条 `next_attempt_at IS NULL`
+   是同一个坑的两面:那边漏掉 NULL 是行永远领不到,这边把 NULL 当「永不过期」是存量
+   残骸永远回收不了。判定口径在 `batch.lease_expired()` 一处,两处 SQL 必须与它同向。
+3. **`claim_items` 不在接线门禁的名单里**(唯一调用点在同一个文件,那条门禁刻意排除
+   模块内互调)。它由 `tests/pure/test_batch_lease.py` 用 AST 钉着 —— 改回无锁 SELECT
+   会让租约变成一个没人写的列,而回收器会把**正在跑**的条目当成残骸。
+
+## 轮询节拍是三档,不是两档
+
+前端凡是决定「还要不要继续问」的地方,都不许写成「终态就停、非终态就问」。中间还有
+一档:**机器不再写它了,但有人点一下就会继续走**。
+
+```
+生成任务  frontend/src/api/types.ts   taskLiveness()     TERMINAL / AWAITING_HUMAN / LIVE
+批次      frontend/src/api/batch.ts   batchLivenessOf()  SETTLED  / STALLED / LIVE
+```
+
+三份清单都钉在后端,`tests/pure/test_frontend_contract.py` 逐值比对:任务的终态那份
+等于 `state_machine.TERMINAL_STATES`,中间那档等于 `state_machine.AWAITING_HUMAN_STATES`;
+批次那份直接读后端现算的 `liveness` 字段(前端不推测状态)。
+
+`job.status` 和条目**不是同一份事实**:`reset_items_for_retry()` 只把条目打回 PENDING、
+不动 `job.status`,于是"重试之后投递失败"这条动线上,status 停在终态而条目还有一堆
+没跑的。**两份事实冲突时信条目**,细节在 `app/workbench/batch.py` 的「两份 status,
+信条目那一份」。
+
+为什么:`../notes/2026-08-01-polling-treated-non-terminal-as-terminal.md`
+
 ## 按款视图没有款级「下一步」
 
 不同 SKU 卡在不同步骤时,任何单选都是编的。所以按款视图给的是**卡点分布**,

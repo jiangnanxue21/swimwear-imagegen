@@ -113,11 +113,11 @@ def test_prompt_spells_out_the_json_object_envelope_and_array_shapes():
 def test_prompt_change_has_its_own_version_for_calibration_and_idempotency():
     """提示词变了必须换版本,不能继续借用旧提示词的校准证据。"""
     # BE-306:版本改内容派生 —— 「改一次提示词必须 bump 一次」不再靠人记得。
-    from app.extractors.schema import build_extraction_prompt
+    from app.extractors.schema import EXTRACTION_PROMPT_TEMPLATE
     from app.extractors.vision import _EXTRACTION_PROMPT_VERSION
     from app.prompts.versioning import content_version
 
-    assert _EXTRACTION_PROMPT_VERSION == content_version(build_extraction_prompt())
+    assert _EXTRACTION_PROMPT_VERSION == content_version(EXTRACTION_PROMPT_TEMPLATE)
 
 
 # ---------------------------------------------------------------- 归一化

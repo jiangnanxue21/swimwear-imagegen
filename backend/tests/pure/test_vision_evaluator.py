@@ -21,10 +21,12 @@ from app.evaluators.scoring import EvaluationParseError, parse_evaluator_payload
 from app.evaluators.vision import (
     API_STYLE_CHAT,
     API_STYLE_RESPONSES,
+    DEPTH_INSTRUCTIONS_KEY,
     DEPTH_KEY,
     FORMAT_JSON_OBJECT,
     FORMAT_JSON_SCHEMA,
     PROBE_PNG,
+    USER_PROMPT_TEMPLATE_KEY,
     ChatCompletionsAdapter,
     ResponsesAdapter,
     VisionEvaluatorConfig,
@@ -32,9 +34,12 @@ from app.evaluators.vision import (
 )
 from app.evaluators.vision_schema import (
     QUICK_DIMENSIONS,
+    SCORING_DEPTH_INSTRUCTIONS_DEFAULT,
+    SCORING_USER_PROMPT_TEMPLATE,
     build_response_schema,
     build_user_prompt,
     dimensions_for,
+    parse_depth_instructions,
 )
 from app.llm.images import ImageResolver, PreparedImage, decode_data_url, to_data_url
 from app.llm.transport import (
@@ -258,6 +263,28 @@ def test_prompt_survives_unserialisable_metadata():
         depth=EvaluationDepth.FULL, product_metadata={"x": {1, 2}}, reference_count=1
     )
     assert "评分深度" in prompt
+
+
+def test_active_user_template_and_depth_mapping_change_the_real_prompt():
+    depth_map = json.loads(SCORING_DEPTH_INSTRUCTIONS_DEFAULT)
+    depth_map[EvaluationDepth.FULL.value] = "活动版本的 FULL 指令"
+    custom_template = SCORING_USER_PROMPT_TEMPLATE.replace(
+        "输出要求:", "活动版本的用户段\n\n输出要求:"
+    )
+    evaluator = VisionModelImageQualityEvaluator(VisionEvaluatorConfig())
+    prompt = evaluator.build_prompt(
+        {"sku": "SKU-1"},
+        {
+            DEPTH_KEY: EvaluationDepth.FULL.value,
+            USER_PROMPT_TEMPLATE_KEY: custom_template,
+            DEPTH_INSTRUCTIONS_KEY: parse_depth_instructions(
+                json.dumps(depth_map, ensure_ascii=False)
+            ),
+        },
+    )
+    assert "活动版本的 FULL 指令" in prompt
+    assert "活动版本的用户段" in prompt
+    assert "SKU-1" in prompt
 
 
 # ---------------------------------------------------------------- 请求体

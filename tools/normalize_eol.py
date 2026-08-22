@@ -84,6 +84,30 @@ def looks_binary(payload: bytes) -> bool:
     return b"\x00" in payload[:_BINARY_SNIFF_BYTES]
 
 
+#: 文件末尾恰好一个换行。缺一个和多几个都算不合规。
+#:
+#: 缺:很多工具按行读,最后一行没有换行时它要么被吞掉、要么和下一份内容黏在一起;
+#: `git diff` 也会为此打印 `\ No newline at end of file`,让一次内容改动的 diff
+#: 多出一行噪音。多:每一次追加都会在 diff 里带出前一个空行,而那一行不属于本次改动。
+#:
+#: 判据取自 deepseek-harness 的仓库约定(`AGENTS.md` 的 Conventions 一节),
+#: 那边由 `git diff --cached --check` 在 pre-commit 上把关;本仓没有 hook,
+#: 所以挂在这个已经被打包脚本与门禁调用的工具上 —— 行尾这件事只有一个家。
+_TRAILING_NEWLINE = "trailing-newline"
+
+
+def has_bad_trailing_newline(payload: bytes) -> bool:
+    """末尾不是恰好一个 ``\n``。空文件豁免:它没有\"最后一行\"。"""
+    if not payload or looks_binary(payload):
+        return False
+    return not payload.endswith(b"\n") or payload.endswith(b"\n\n")
+
+
+def fix_trailing_newline(payload: bytes) -> bytes:
+    """末尾收成恰好一个换行。只动末尾,前面一个字节不碰。"""
+    return payload.rstrip(b"\n") + b"\n"
+
+
 def classify(payload: bytes) -> str:
     """一份字节的行尾形态:``lf`` / ``crlf`` / ``mixed`` / ``cr`` / ``binary``。
 
@@ -145,9 +169,16 @@ def offenders(root: Path) -> list[tuple[str, str]]:
         except OSError as exc:  # noqa: PERF203 - 每个文件独立报告
             found.append((str(path.relative_to(root)).replace("\\", "/"), f"unreadable:{type(exc).__name__}"))
             continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
         kind = classify(payload)
         if kind in ("crlf", "mixed", "cr"):
-            found.append((str(path.relative_to(root)).replace("\\", "/"), kind))
+            found.append((rel, kind))
+        # 分开报,不合并成一条:两种不合规的修法相同(都由 --write 收掉),
+        # 但**读的人要知道是哪一种** —— 一份 CRLF 的 shell 脚本会在 Linux 上
+        # 直接跑不起来,而末尾少一个换行只是 diff 噪音。合并之后这两件事
+        # 在报告里长得一样。
+        elif has_bad_trailing_newline(payload):
+            found.append((rel, _TRAILING_NEWLINE))
     return found
 
 
@@ -157,9 +188,14 @@ def rewrite(root: Path) -> list[str]:
     root = root.resolve()
     for path in iter_text_files(root):
         payload = path.read_bytes()
-        if classify(payload) not in ("crlf", "mixed", "cr"):
+        fixed = payload
+        if classify(payload) in ("crlf", "mixed", "cr"):
+            fixed = normalize_bytes(fixed)
+        if has_bad_trailing_newline(fixed):
+            fixed = fix_trailing_newline(fixed)
+        if fixed == payload:
             continue
-        path.write_bytes(normalize_bytes(payload))
+        path.write_bytes(fixed)
         changed.append(str(path.relative_to(root)).replace("\\", "/"))
     return changed
 

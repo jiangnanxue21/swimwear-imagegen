@@ -88,6 +88,10 @@ import { brandVars, fontScale, imageTile } from '../theme'
 import KeyboardHelp from '../components/KeyboardHelp'
 import { MEDIA_ROLE_LABEL } from '../components/workbench/materialUtils'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { pushRecent, readPref, writePref } from '../utils/localPrefs'
+
+/** 最近用过的退回原因(本机偏好)。存的是 code,中文与下一步永远现问后端 */
+const RECENT_REASONS_KEY = 'review-recent-reject-reasons'
 import BrandTag from '../components/BrandTag'
 import { AudienceTag, ReviewFocusLine } from '../components/AudienceBadge'
 
@@ -122,28 +126,28 @@ function ReviewCentreTiles({
     {
       key: 'candidate',
       label: '候选图审核',
-      hint: '评分不过关转人工的单张候选图。审的是"这张图能不能用"',
+      hint: '评分未自动通过、需要人工判断的单张候选图。',
       count: candidateCount,
       go: () => navigate('/reviews'),
     },
     {
       key: 'imageset',
       label: '图片集待批准',
-      hint: '一个颜色的整组图排完了,等人批。审的是"这一版能不能发"',
+      hint: '整套图片已完成编排，请确认这一版是否可以发布。',
       count: imageSetCount,
       go: () => onPick('APPROVE_IMAGE_SET'),
     },
     {
       key: 'copy',
       label: '文案待批准',
-      hint: '标题与卖点生成完了,等人批',
+      hint: '标题、卖点和描述已生成，请审核后批准或退回。',
       count: copyCount,
       go: () => onPick('APPROVE_COPY'),
     },
     {
       key: 'conflict',
       label: '属性冲突',
-      hint: '同一属性在多个来源上取值打架,要人来定',
+      hint: '多个来源给出了不同属性值，请人工确认正确结果。',
       count: conflictCount,
       go: () => navigate('/workbench?next_action=RESOLVE_CONFLICT'),
     },
@@ -471,6 +475,26 @@ function RejectModal({
   const picked = options.find((o) => o.code === reason)
   const noteMissing = Boolean(picked?.note_required) && !note.trim()
 
+  /**
+   * 最近用过的原因。**这一行是快捷入口,不是排序。**
+   *
+   * 九个原因里高频的通常只有两三个,而 R 键的价值全在节奏上 —— 每次从九行里
+   * 用眼睛找同一行,退回就比批准慢一截。
+   *
+   * 刻意**不重排下面那个单选列表**:顺序由后端给,而运营按位置形成肌肉记忆
+   * (首页那七张卡片不许因为归零就消失,是同一条理由)。会动的列表还有一个
+   * 更贵的后果:上一次点第 3 行,这一次第 3 行换了内容,而退回选错原因
+   * 等于把商品送去错的下一步。所以高频项另起一行摆在上面,原列表一动不动。
+   *
+   * 只存 code:中文、下一步、是否必填说明全部来自后端那份清单
+   * (`GET /workbench/reject-reasons`),本机存下来的一份会在原因改名那天骗人。
+   * 后端撤掉某个原因时,它自然从这一行消失 —— 下面这个 filter 就是那道闸。
+   */
+  const recentCodes = readPref<string[]>(RECENT_REASONS_KEY, [])
+  const recent = recentCodes
+    .map((code) => options.find((o) => o.code === code))
+    .filter((o): o is RejectReasonOption => Boolean(o))
+
   return (
     <Modal
       open={open}
@@ -478,7 +502,12 @@ function RejectModal({
       okText="确认退回"
       cancelText="取消"
       okButtonProps={{ danger: true, disabled: !picked || noteMissing, loading: pending }}
-      onOk={() => picked && onSubmit(picked.code, note.trim())}
+      onOk={() => {
+        if (!picked) return
+        // 记在提交那一刻,不是选中那一刻:选了又改的原因不该被记成"用过"
+        writePref(RECENT_REASONS_KEY, pushRecent(recentCodes, picked.code))
+        onSubmit(picked.code, note.trim())
+      }}
       onCancel={onCancel}
       destroyOnClose
       width={520}
@@ -491,6 +520,24 @@ function RejectModal({
         {reasons.isLoading && <Spin />}
         {reasons.isError && (
           <Alert type="error" showIcon message={readError(reasons.error)} />
+        )}
+
+        {recent.length > 0 && (
+          <Space size={[6, 6]} wrap>
+            <Typography.Text type="secondary" style={{ fontSize: fontScale.meta }}>
+              最近用过:
+            </Typography.Text>
+            {recent.map((option) => (
+              <Tooltip key={option.code} title={`退回后:${option.next_action_label}`}>
+                <Tag.CheckableTag
+                  checked={reason === option.code}
+                  onChange={() => setReason(option.code)}
+                >
+                  {option.label}
+                </Tag.CheckableTag>
+              </Tooltip>
+            ))}
+          </Space>
         )}
 
         <Radio.Group
@@ -690,6 +737,16 @@ export default function WorkbenchReviewPage() {
           ? a.product.sku.localeCompare(b.product.sku)
           : a.product.spu.localeCompare(b.product.spu),
       )
+    /*
+     * 这条豁免消不掉,原因写在上面两段:`queues` 进依赖会让 memo 恒失效,
+     * 而它排的是整条审核队列的序 —— 每次渲染重排会让「快照不重排」当场失效。
+     * 真正会变的那部分已经由 `queuesFreshness` 表达了。
+     *
+     * **加新依赖的时候要回到这里。** disable 盖住的是整个依赖数组,不只是
+     * `queues` 这一项:将来这个 memo 里读了第四个变量而忘了手动补进数组,
+     * 规则本该提醒的那一次会被这条 disable 一起吞掉,表现是排序用着旧值,
+     * 而界面上看不出任何异常。
+     */
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queuesFreshness, doneKeys])
 
@@ -1086,7 +1143,7 @@ export default function WorkbenchReviewPage() {
               常驻只留按键本身,规则说明进 `?` 速查 —— 那些是需要时才查的东西。 */}
           <Space size={10} wrap style={{ fontSize: fontScale.body }}>
             <Typography.Text type="secondary">
-              一屏一件,处理完自动下一件 · <kbd>J</kbd>/<kbd>K</kbd> 翻件 ·{' '}
+              每次处理一件，提交后自动进入下一件 · <kbd>J</kbd>/<kbd>K</kbd> 切换 ·{' '}
               <kbd>A</kbd> 批准 · <kbd>R</kbd> 退回
             </Typography.Text>
             <Typography.Link onClick={() => setHelpOpen(true)}>快捷键与规则 (?)</Typography.Link>

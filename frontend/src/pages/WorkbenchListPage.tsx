@@ -2,7 +2,7 @@
  * 工作台商品列表(阶段 1:FE-101~104、FE-106)。
  *
  * 这一页要回答的唯一问题是「今天从哪件商品下手」。所以一行里挤了
- * 五个子状态、阻断数、待确认数和一个推荐动作 —— §3.6 的退出条件是
+ * 七个流程步骤、阻断数、待确认数和一个推荐动作 —— §3.6 的退出条件是
  * 运营看一件商品的中位判断时间 ≤ 10 秒,那就不能让他为了看卡点去点开详情。
  *
  * 状态、完成度、阻断数、下一步**全部来自后端**(§3.2.1),这一页不算任何一项。
@@ -21,10 +21,10 @@
  * 组件内不存第二份。地址可复制、刷新保留、后退保留 —— 这三条从前都不成立。
  */
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  Alert, App, Button, Card, Dropdown, Empty, Input, Modal, Progress, Segmented, Select,
-  Space, Table, Tag, Tooltip,
+  Alert, App, Button, Card, Dropdown, Empty, Input, Modal, Popover, Progress, Segmented,
+  Select, Space, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
@@ -34,6 +34,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ErrorNotice from '../components/ErrorNotice'
 import ProductFormModal from '../components/ProductFormModal'
+import FilterPresets from '../components/workbench/FilterPresets'
 import SpuGroupTable from '../components/workbench/SpuGroupTable'
 import { batchApi } from '../api/batch'
 import { productsApi } from '../api/products'
@@ -79,10 +80,10 @@ import PageHeader from '../components/PageHeader'
  * 三处写的都是「商品工作台」(侧栏、README 的界面表、`SpuCreatePage` 的返回按钮),
  * 所以离群的是页头那一个,改它。
  *
- * 反过来改侧栏是错的,而且有一处具体代价:`backend/tools/mutate_batch14_4.py`
- * 的 Q2 变异逐字锚在 `{ key: '/workbench', label: '商品工作台'` 上。
- * 改掉那一行会让那条变异失锚 —— 而失锚的变异不报错、不变红,只是安静地
- * 什么都不验,正是 `audit_anchors.py` 存在的理由。
+ * 反过来改侧栏是错的,而且当年有一处具体代价:`backend/tools/mutate_batch14_4.py`
+ * 的 Q2 变异逐字锚在 `{ key: '/workbench', label: '商品工作台'` 上(该脚本已删,
+ * 口径见 DECISIONS §3.107)。改掉那一行会让那条变异失锚 —— 而失锚的变异不报错、
+ * 不变红,只是安静地什么都不验,正是 `audit_anchors.py` 存在的理由。
  *
  * 抽成常量而不是在两处各写一遍中文:两处字面量之间没有任何东西盯着,
  * 而 `nav-and-url-filters.test.tsx` 现在拿 NAV 的标签和它对断言。
@@ -90,6 +91,65 @@ import PageHeader from '../components/PageHeader'
 export const PAGE_TITLE = '商品工作台'
 
 const DENSE_KEY = 'imagegen.workbench-dense'
+
+type WorkbenchView = 'sku' | 'spu'
+
+/**
+ * 页头里的两个视图开关必须始终占据同一块空间。
+ *
+ * 按款视图没有流程列，所以密度开关不能生效；但把它整个卸载会让右对齐的
+ * 「按 SKU / 按款」和刷新按钮横向跳动。保留控件并明确禁用，既稳定布局，
+ * 也让用户知道设置仍在、切回按 SKU 后会继续沿用。
+ */
+export function WorkbenchViewControls({
+  view,
+  dense,
+  onViewChange,
+  onDensityChange,
+}: {
+  view: WorkbenchView
+  dense: boolean
+  onViewChange: (view: WorkbenchView) => void
+  onDensityChange: (dense: boolean) => void
+}) {
+  const densityDisabled = view === 'spu'
+  const densityHint = densityDisabled
+    ? '紧凑 / 展开只控制按 SKU 的流程列；当前按款视图不适用，切回后会保留原设置'
+    : dense
+      ? '展开七个流程步骤列。屏幕不够宽时表格会横向滚动'
+      : '把七个流程步骤压成一格色条，表格缩短 576px，小屏上主按钮不会被挤出去'
+
+  return (
+    <Space size={8}>
+      <Segmented
+        aria-label="商品聚合方式"
+        size="small"
+        value={view}
+        onChange={(value) => onViewChange(value as WorkbenchView)}
+        options={[
+          { label: '按 SKU', value: 'sku' },
+          { label: '按款', value: 'spu' },
+        ]}
+      />
+      <Tooltip title={densityHint}>
+        {/* disabled 控件本身收不到 hover，外层 span 负责承接说明，同时保持固定占位。 */}
+        <span data-testid="workbench-density-control" style={{ display: 'inline-flex' }}>
+          <Segmented
+            aria-label="流程列显示密度"
+            size="small"
+            disabled={densityDisabled}
+            value={dense ? 'dense' : 'wide'}
+            onChange={(value) => onDensityChange(value === 'dense')}
+            options={[
+              { label: '紧凑', value: 'dense' },
+              { label: '展开', value: 'wide' },
+            ]}
+          />
+        </span>
+      </Tooltip>
+    </Space>
+  )
+}
 
 /** 顶部四个计数。点一下就是一次筛选 —— 这是运营最常用的入口。 */
 function SummaryTiles({
@@ -109,9 +169,9 @@ function SummaryTiles({
     filter: 'blocked' | 'exportable' | null
   }[] = [
     { key: 'total', label: '筛选结果', hint: '当前筛选命中的商品数', color: brandVars.ink, filter: null },
-    { key: 'blocked', label: '有阻断', hint: '存在阻断问题,走不到导出', color: brandVars.danger, filter: 'blocked' },
-    { key: 'needs_confirm', label: '待确认', hint: '等人做决定:确认属性、批准、点导出', color: brandVars.sand, filter: null },
-    { key: 'exportable', label: '可导出', hint: '草稿校验通过,点一下就能出文件', color: brandVars.marine, filter: 'exportable' },
+    { key: 'blocked', label: '流程受阻', hint: '存在必须先解决的问题，暂时无法导出', color: brandVars.danger, filter: 'blocked' },
+    { key: 'needs_confirm', label: '待确认', hint: '需要人工确认属性、批准内容或执行导出', color: brandVars.sand, filter: null },
+    { key: 'exportable', label: '待导出', hint: '草稿已通过校验，可以生成上架文件', color: brandVars.marine, filter: 'exportable' },
     { key: 'done', label: '已完成', hint: '已导出且无过期', color: brandVars.success, filter: null },
   ]
   return (
@@ -223,7 +283,7 @@ export default function WorkbenchListPage() {
      * 写进 URL:这一页七个筛选项全在 URL 里,新增的跟上同一规矩,
      * 于是刷新、后退、把链接发给同事都停在同一个视图上。
      */
-    view: enumParam<'sku' | 'spu'>(['sku', 'spu']),
+    view: enumParam<WorkbenchView>(['sku', 'spu']),
     only_blocked: flagParam(),
     /* 显示已归档。写进 URL,和这一页其余七个筛选项同一规矩 */
     include_archived: flagParam(),
@@ -285,7 +345,7 @@ export default function WorkbenchListPage() {
   }, [search])
 
   /**
-   * 列密度(走查 P0-1)。展开时五个步骤列各占 96px,表格最小 1280px;
+   * 列密度(走查 P0-1)。展开时七个步骤列各占 96px,表格最小 1280px;
    * 而外框固定吃掉 230px(侧栏 190 + 内容区 padding 40),于是 1366 的屏幕
    * 缺 144px、1440 缺 70px —— 缺掉的正是最后一列那颗主按钮。
    *
@@ -428,6 +488,25 @@ export default function WorkbenchListPage() {
   // 框里的字由上面那条同步 effect 跟着清,不在这里各写一遍。
   const reset = () => filters.reset()
 
+  /** 预设存的就是这一串。用 `useLocation` 而不是 `filters.signature`:
+      后者会把没设过的键也写成 `step=`,存下来是一串空参数 */
+  const location = useLocation()
+
+  /**
+   * 应用一条筛选预设。
+   *
+   * 先 `reset()` 再带着预设的串导航:不清的话,当前屏上有而预设里没有的
+   * 那几项会留下来 —— 于是点「女装待确认属性」得到的是它与上一次筛选的
+   * 交集,而屏幕上看不出多了哪一条。
+   *
+   * 用 `navigate` 而不是逐项 `patch`:预设存的本来就是一个地址,
+   * 拆开再拼回去只是多一次出错的机会。搜索框里的字由既有那条同步 effect
+   * 跟着 URL 走,勾选由 `filters.signature` 那条 effect 清。
+   */
+  const applyPreset = (query: string) => {
+    navigate({ pathname: '/workbench', search: query ? `?${query}` : '' })
+  }
+
   useDocumentTitle(
     query.data ? `${PAGE_TITLE} (${query.data.total})` : PAGE_TITLE,
   )
@@ -539,11 +618,39 @@ export default function WorkbenchListPage() {
       render: (_, row) => (
         <Space size={8} align="start">
           {row.thumbnail_url ? (
-            <img
-              src={row.thumbnail_url}
-              alt=""
-              style={{ width: 44, height: 44, objectFit: 'contain', background: brandVars.imageBg, borderRadius: 3 }}
-            />
+            /*
+             * 悬停放大(R14)。44px 分不出同款不同花色 —— 而这一页要回答的
+             * 「今天从哪件下手」经常就卡在这一步:为了看清一张图,运营得点进
+             * 详情页再退回来,而他本来只是想确认自己找对了那一件。
+             *
+             * 用 Popover 而不是 antd 的 `<Image preview>`:后者要点一下才展开,
+             * 而这里的动作是"扫过去看一眼",点击应当留给行入口。
+             * `mouseEnterDelay` 不能省 —— 鼠标从上往下划过 20 行时,
+             * 没有延迟就是连闪二十张大图。
+             */
+            <Popover
+              mouseEnterDelay={0.4}
+              placement="right"
+              content={
+                <img
+                  src={row.thumbnail_url}
+                  alt={`${row.product.sku} 主图`}
+                  style={{
+                    display: 'block',
+                    width: 260,
+                    height: 260,
+                    objectFit: 'contain',
+                    background: brandVars.imageBg,
+                  }}
+                />
+              }
+            >
+              <img
+                src={row.thumbnail_url}
+                alt=""
+                style={{ width: 44, height: 44, objectFit: 'contain', background: brandVars.imageBg, borderRadius: 3 }}
+              />
+            </Popover>
           ) : (
             // FE-101:无主图显示占位和警告。缺正面图本身就是阻断项,这里只做视觉提示
             <Tooltip title="没有可用主图。素材列会显示具体缺什么">
@@ -587,7 +694,7 @@ export default function WorkbenchListPage() {
       sorter: true,
       sortOrder: sort.orderFor('completion'),
       render: (_, row) => (
-        <Tooltip title="五步等权各 20%,每步按状态计分:完成 100%、待确认/待批准 60%、进行中 30%、未开始/阻断/过期 0%。过期算 0 分 —— 这样过期件不会顶着一个高完成度沉到列表底下">
+        <Tooltip title="完成度按七个步骤加权：建档 5%、素材 15%、属性 25%、生成方案 10%、图片集 20%、文案 15%、草稿 10%。各步骤再按当前状态计分。">
           <Progress
             percent={row.flow.completion}
             size="small"
@@ -596,8 +703,8 @@ export default function WorkbenchListPage() {
         </Tooltip>
       ),
     },
-    // 五个子状态(FE-102)。两种形态,由 `dense` 切换 —— 走查 P0-1:
-    // 展开形态 5×96 = 480px,把最后一列「唯一下一步」挤出了 1366/1440 的屏幕,
+    // 七个子状态(FE-102)。两种形态,由 `dense` 切换 —— 走查 P0-1:
+    // 展开形态 7×96 = 672px,把最后一列「唯一下一步」挤出了 1366/1440 的屏幕,
     // 而那颗按钮是这一整页存在的理由
     ...(dense
       ? [
@@ -787,37 +894,13 @@ export default function WorkbenchListPage() {
                 新建
               </Button>
             </Dropdown>
-            {/* 按 SKU / 按款(a47 §8.2)。默认按 SKU,状态写在 URL 上 */}
-            <Segmented
-              size="small"
-              value={view}
-              onChange={(v) => filters.patch({ view: v as 'sku' | 'spu', page: 1 })}
-              options={[
-                { label: '按 SKU', value: 'sku' },
-                { label: '按款', value: 'spu' },
-              ]}
+            {/* 默认按 SKU，状态写在 URL；两组控件始终保留，避免切换时页头横跳。 */}
+            <WorkbenchViewControls
+              view={view}
+              dense={dense}
+              onViewChange={(nextView) => filters.patch({ view: nextView, page: 1 })}
+              onDensityChange={toggleDense}
             />
-            {/* 列密度只对按 SKU 那张表有意义(它切的是五个步骤列)。
-                按款视图里没有那几列,留着这个开关会让人点一下、什么都没发生 */}
-            {view === 'sku' && (
-              <Tooltip
-                title={
-                  dense
-                    ? '展开五个步骤列。屏幕不够宽时表格会横向滚动'
-                    : '把五个步骤压成一格色条,表格窄 384px —— 小屏上主按钮才不会被挤出去'
-                }
-              >
-                <Segmented
-                  size="small"
-                  value={dense ? 'dense' : 'wide'}
-                  onChange={(v) => toggleDense(v === 'dense')}
-                  options={[
-                    { label: '紧凑', value: 'dense' },
-                    { label: '展开', value: 'wide' },
-                  ]}
-                />
-              </Tooltip>
-            )}
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -931,6 +1014,7 @@ export default function WorkbenchListPage() {
             </Button>
           </Tooltip>
           <Button onClick={reset}>清除筛选</Button>
+          <FilterPresets search={location.search} onApply={applyPreset} />
         </Space>
       </Card>
 
@@ -971,7 +1055,7 @@ export default function WorkbenchListPage() {
         </>
       ) : (
         <>
-      {/* 二次走查 A-2:紧凑模式的图例。不给的话那五个色块在界面上
+      {/* 二次走查 A-2:紧凑模式的图例。不给的话那七个色块在界面上
           没有任何地方解释「左起第一格是哪一步」「哪个色是哪个状态」 */}
       {dense && <FlowStripLegend />}
 

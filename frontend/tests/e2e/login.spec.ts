@@ -162,7 +162,7 @@ test('登录成功后回到原来要去的那一页', async ({ page }) => {
 
   await expect(page).toHaveURL(/\/tasks$/)
   // 外壳起来了 = 侧栏那一套现在点得动
-  await expect(page.getByText('服装上架平台')).toBeVisible()
+  await expect(page.getByText('商品运营中心')).toBeVisible()
 })
 
 test('退出登录之后回到登录页,原来那一页也进不去了', async ({ page }) => {

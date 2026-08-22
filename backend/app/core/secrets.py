@@ -64,9 +64,20 @@ def _normalize_key(raw: str):
     candidate = raw.strip().encode()
     try:
         Fernet(candidate)
-        return candidate
     except (ValueError, TypeError):
+        # **这不是吞异常,是一次探测的否定结果。**
+        #
+        # 这两个异常在这里的唯一含义是「这串字节不是一把现成的 Fernet key」,
+        # 而那正是本函数要区分的两种情况之一 —— 下一行的 scrypt 派生就是
+        # 为它准备的分支。没有任何东西被掩盖:口令本身仍然会被用上,
+        # 只是走派生那条路。
+        #
+        # 换成告警反而是错的:随手填一句长口令是被文档明确允许的用法
+        # (见本函数 docstring),给一个正常用法配一条警告日志,
+        # 会让这条日志在真出问题时没有人看。
         pass
+    else:
+        return candidate
     derived = hashlib.scrypt(candidate, salt=KDF_SALT, n=2**14, r=8, p=1, dklen=32)
     return base64.urlsafe_b64encode(derived)
 
@@ -142,7 +153,25 @@ def _atomic_write_key(path: Path, material: bytes) -> bytes:
         try:
             path.unlink()
         except OSError:
-            pass
+            # **写失败本身不静默** —— 下面那句 `raise` 会把它抛给调用方,
+            # 表现是「保存密钥失败」并带原因。这里被吞掉的是**清理动作**。
+            #
+            # 吞掉它是对的:此刻已经有一个真实的失败要抛,清理失败再抛一次
+            # 只会用 `raise ... during handling of ...` 把根因盖住。
+            #
+            # 但它不能无声无息:清不掉意味着磁盘上留下了一个 0 字节的主密钥
+            # 文件,而下一个进程读到它会走进上面那条「文件存在但一直是空的」
+            # 分支 —— 那句报错让人去查「谁写到一半退出了」,而真正发生的事
+            # (写失败 + 清理也失败)只有这条日志记得住。
+            logger.warning(
+                "cannot remove the half-written settings key file; the next "
+                "process will see an empty key file",
+                extra={"extra_fields": {
+                    "event": "settings.key_file_cleanup_failed",
+                    "path": str(path),
+                }},
+                exc_info=True,
+            )
         raise
     return material
 

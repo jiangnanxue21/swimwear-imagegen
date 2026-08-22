@@ -91,6 +91,16 @@ $ForbiddenFiles = @(
     'settings.local.json'
 )
 
+# Kept in the repo, but deliberately not shipped. Unlike $ForbiddenFiles, a
+# leak here is not an incident -- it is only wasted package size. Keeping the
+# two lists apart keeps the word "forbidden" meaningful. Mirrors pack.sh's
+# NOT_SHIPPED_FILES; verify_delivery compares the two arrays entry by entry.
+# Note: no ASCII closing parenthesis inside these comments -- the verifier's
+# regex is non-greedy and would truncate the array at the first one.
+$NotShippedFiles = @(
+    'docs/overview.html'
+)
+
 $EnvExamples = @(
     '.env.example'
     'frontend/.env.example'
@@ -116,6 +126,34 @@ function ConvertTo-ArchivePath {
 
     $relative = $Path.Substring($Root.Length).TrimStart('\', '/')
     return $relative.Replace('\', '/')
+}
+
+function Find-RunnablePython {
+    # `Get-Command` only proves that a command shim exists. Windows' App
+    # Execution Alias leaves python.exe / python3.exe entries under WindowsApps
+    # even when no interpreter is installed behind them; invoking that path then
+    # fails with "system cannot find the path". That exact false positive used to
+    # delete an otherwise valid package during the post-build EOL check.
+    #
+    # Prefer `python` so an activated virtualenv wins. Every candidate still has
+    # to execute a tiny program before it is selected; a dead alias is skipped and
+    # the launcher (`py`) remains a valid fallback on a normal Windows install.
+    foreach ($candidate in @('python', 'py', 'python3')) {
+        $command = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $command) { continue }
+
+        try {
+            & $command.Source -c 'import sys; raise SystemExit(0)' *> $null
+            if ($LASTEXITCODE -eq 0) { return $command.Source }
+        }
+        catch {
+            # A discovered but non-runnable WindowsApps alias is not Python.
+            # Keep looking instead of treating discovery as successful.
+        }
+    }
+
+    return $null
 }
 
 function Test-NameMatchesAny {
@@ -151,6 +189,17 @@ function Test-ImageUnderImageFreeDir {
     }
     foreach ($part in $parts[0..($parts.Count - 2)]) {
         if ($ImageFreeDirs -contains $part) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-NotShippedFile {
+    param([Parameter(Mandatory = $true)][string]$ArchivePath)
+
+    foreach ($pattern in $NotShippedFiles) {
+        if (($ArchivePath -eq $pattern) -or ($ArchivePath -like "*/$pattern")) {
             return $true
         }
     }
@@ -229,6 +278,9 @@ function Get-DeliveryFiles {
             if (Test-ForbiddenFile -ArchivePath $relative) {
                 continue
             }
+            if (Test-NotShippedFile -ArchivePath $relative) {
+                continue
+            }
             if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "Refusing to package file reparse point: $relative"
             }
@@ -305,6 +357,15 @@ try {
             Write-Error "Forbidden content found in delivery package: $path" -ErrorAction Continue
             $failed = $true
         }
+        # Verified after packing for the same reason as the forbidden list: an
+        # exclusion rule that silently stopped matching produces a fat package
+        # and no signal at all. Different wording on purpose -- this one is not
+        # an incident, and an over-heavy warning teaches people to ignore it.
+        elseif (Test-NotShippedFile -ArchivePath $path) {
+            Write-Error "Not-shipped file found in delivery package: $path" -ErrorAction Continue
+            Write-Host '   it belongs in the repo, just not in the package -- fix the exclusion list'
+            $failed = $true
+        }
     }
     # Same reasoning as the Bash side: "required file missing" has two very
     # different causes -- the file was genuinely excluded, or the archive listing
@@ -344,11 +405,7 @@ try {
     # is clean, the Windows one carries CRLF" -- the very scenario the gate
     # exists to prevent.
     $eolChecker = Join-Path $Root 'tools/normalize_eol.py'
-    $python = $null
-    foreach ($candidate in @('python3', 'python', 'py')) {
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($found) { $python = $found.Source; break }
-    }
+    $python = Find-RunnablePython
 
     if (-not $python -or -not (Test-Path -LiteralPath $eolChecker)) {
         # Fail closed, do not skip. Skipping ships a CRLF package that prints
@@ -358,7 +415,7 @@ try {
         # and the delivery self-check; missing it on the packing box is an
         # environment problem, not grounds for silent passage.
         Write-Error 'Cannot run the line-ending check; refusing to emit a package.' -ErrorAction Continue
-        if (-not $python) { Write-Host '   no python3/python/py on PATH' }
+        if (-not $python) { Write-Host '   no runnable python/py/python3 on PATH' }
         if (-not (Test-Path -LiteralPath $eolChecker)) { Write-Host "   missing $eolChecker" }
         $failed = $true
     }

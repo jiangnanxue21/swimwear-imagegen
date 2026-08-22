@@ -66,6 +66,8 @@ def test_an_unknown_kind_is_rejected_not_silently_ignored():
     try:
         build_query(kind="evaluatoin")
     except FilterRejected:
+        # 吞的是**期望中的那一个**:下面的 `else` 在它没抛时失败。
+        # `tests/pure/` 不许 import pytest,所以没有 `pytest.raises`。
         pass
     else:
         raise AssertionError("认不出的 kind 被静默放行了")
@@ -118,6 +120,7 @@ def test_a_broken_timestamp_is_a_400_not_a_500():
     try:
         parse_ts("昨天")
     except FilterRejected:
+        # 同上:这一段断言的是"它必须拒绝",`else` 负责在它放行时失败。
         pass
     else:
         raise AssertionError("认不出的时间被接受了")

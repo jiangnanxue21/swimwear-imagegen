@@ -450,6 +450,9 @@ export default function SpuCreatePage() {
         <Button
           type="text"
           danger
+          aria-label={
+            colours.length <= 1 ? '至少要保留一个颜色,这一行不能删' : '删掉这个颜色'
+          }
           icon={<DeleteOutlined />}
           // 最后一行不许删:一个 SPU 至少要有一个颜色(后端 min_length=1),
           // 删到零行的话"下一步"按钮会灰掉而没有任何提示说明为什么
@@ -554,7 +557,7 @@ export default function SpuCreatePage() {
           {cameFromWorkbench && (
             <Button onClick={() => navigate('/workbench')}>回商品工作台</Button>
           )}
-          <Button onClick={() => navigate('/workbench-spus')}>去 SPU 聚合页</Button>
+          <Button onClick={() => navigate('/workbench-spus')}>查看按款汇总</Button>
           <Button
             onClick={() => {
               setCreated(null)

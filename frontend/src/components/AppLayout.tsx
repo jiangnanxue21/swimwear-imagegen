@@ -38,6 +38,7 @@ import { authApi } from '../api/auth'
 import { describeError } from '../api/client'
 import { brandVars, layoutMax } from '../theme'
 import ColdStartBanner from './ColdStartBanner'
+import EnvironmentBanner from './EnvironmentBanner'
 import SpendAlertBanner from './SpendAlertBanner'
 import ErrorBoundary from './ErrorBoundary'
 import { useIdentity } from '../hooks/useIdentity'
@@ -175,7 +176,7 @@ export default function AppLayout({ groups }: Props) {
         {/* 顶栏两个模式下都是深色,所以这里用的是 onHeader 而不是 surface ——
             surface 在暗色下会翻成深色,那会让标题变成深底上的深字 */}
         <span style={{ color: brandVars.onHeader, fontWeight: 600, letterSpacing: '0.02em' }}>
-          服装上架平台
+          商品运营中心
         </span>
         <span style={{ flex: 1 }} />
 
@@ -227,11 +228,9 @@ export default function AppLayout({ groups }: Props) {
               // 非会话模式下没有"退出"这个动作可做。给一个点了什么都不会
               // 发生的菜单项,比不给更糟。
               //
-              // 这里原来写的是"凭据在 localStorage 里,清掉它是设置页的事" ——
-              // **那句话已经不成立**:localStorage 口令链在 PRD §26/§27 里整个
-              // 退役了。今天走到这一支的有两种部署,两种都确实没有可退的东西:
-              // 免登录模式(没登录过)与只配 Header 口令(浏览器根本没进来,
-              // 那一档的解释由 `ColdStartBanner` 与 `/login` 负责说)
+              // 走到这一支的有两种部署,两种都确实没有可退的东西:免登录模式
+              // (没登录过)与只配 Header 口令(浏览器根本没进来,那一档的解释
+              // 由 `ColdStartBanner` 与 `/login` 负责说)
               ...(sessionAuth
                 ? [
                     { key: 'logout-divider', type: 'divider' as const },
@@ -305,8 +304,22 @@ export default function AppLayout({ groups }: Props) {
             {/* 冷启动引导(P5)。放在 Content 里而不是 Header 上:它要跟着内容
                 一起滚动,而且在设置页会自己隐藏 —— 见 ColdStartBanner 的注释 */}
             <ColdStartBanner />
-            {/* 预算告警(A23)。排在冷启动之后:后端连不上时先说那件事,
-                「预算快满了」在一个连不上的系统里不是当务之急 */}
+            {/* 环境真实性(任务 6 / 4.1 节 F)。**这一条曾经从这里掉过。**
+
+                掉了之后没有任何东西报错:组件还在、它自己的注释还写着
+                「沉默在这里等于默认回答了"是真的"」,而它一次都没有被渲染过。
+                两处测试仍然按"外壳顶部那三条横幅"写着 ——
+                `tests/component/browser-login.test.tsx` 把三条都 mock 掉,
+                `tests/e2e/smoke.spec.ts` 还在给 `/api/environment` 铺桩并解释
+                这个组件在 ErrorBoundary 外面 —— 它们描述的是一个当时已经不成立
+                的事实,于是这件事在两侧都是绿的。
+
+                现在 `tests/component/system-status-channels.test.tsx` 的「外壳顶部的三条横幅」钉住三条都在。
+
+                排在冷启动之后、预算之前:后端连不上时先说那件事,
+                而「界面上的产出是假的」比「预算快满了」要紧 */}
+            <EnvironmentBanner />
+            {/* 预算告警(A23) */}
             <SpendAlertBanner />
             {/* 子页面从这里出来(A11 之后 AppLayout 是布局路由,不再收 children)。
                 边界挂在这里而不是更外面:一页崩了侧栏还在,运营能自己走去别的页面,

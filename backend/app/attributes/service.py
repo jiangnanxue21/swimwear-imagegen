@@ -73,7 +73,7 @@ from app.models.attribute import (
 )
 from app.models.product import Product
 from app.models.spu import ColorVariant
-from app.services import audit
+from app.services import audit, prompt_service
 
 logger = get_logger(__name__)
 
@@ -229,6 +229,17 @@ def run_extraction(
     #
     # 但**必须**排在逐图循环之前:排在后面等于先把钱花完再问「这次是不是重复
     # 请求」,而幂等键要挡的正是双击和网络重发。
+    configure_prompt = getattr(extractor, "configure_prompt_template", None)
+    if callable(configure_prompt):
+        # 必须早于 _run_identity：Prompt 版本是幂等身份的一部分，先算键再注入会
+        # 让新旧模板共用同一把键，编辑后仍复用旧识别结果。
+        from app.extractors.schema import EXTRACTION_PROMPT_KEY
+
+        prompt_content, _prompt_version = prompt_service.get_active_content(
+            session, EXTRACTION_PROMPT_KEY
+        )
+        configure_prompt(prompt_content)
+
     identity = _run_identity(
         product=product,
         extractor=extractor,

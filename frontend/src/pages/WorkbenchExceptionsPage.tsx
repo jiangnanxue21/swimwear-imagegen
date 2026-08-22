@@ -20,17 +20,23 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  Button, Card, Collapse, Empty, Input, Space, Switch, Table, Tag, Tooltip,
+  App, Button, Card, Collapse, Empty, Input, Space, Switch, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ReloadOutlined } from '@ant-design/icons'
+import { CopyOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import ErrorNotice from '../components/ErrorNotice'
-import { batchApi, type ExceptionEntry, type ExceptionSection } from '../api/batch'
+import {
+  batchApi, saveBlob,
+  type ExceptionEntry, type ExceptionGroup, type ExceptionSection,
+} from '../api/batch'
 import { FLOW_STEP_LABEL, ISSUE_LEVEL_LABEL, STEP_TAB } from '../api/workbench'
 import { brandVars, fontScale } from '../theme'
 import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { safeFileName, toCsv } from '../utils/csv'
+import { formatDate } from '../utils/datetime'
+import { msg } from '../i18n/msg'
 
 const SOURCE_LABEL: Record<string, string> = {
   flow: '状态判定',
@@ -39,6 +45,7 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export default function WorkbenchExceptionsPage() {
   useDocumentTitle('异常与驳回')
+  const { message } = App.useApp()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   /** 输入框里的字。与已生效的 `search` 分开:敲字不该每个字符打一次接口,
@@ -132,9 +139,52 @@ export default function WorkbenchExceptionsPage() {
   const sections = query.data?.sections ?? []
   const summary = query.data?.summary ?? {}
 
+  /**
+   * 复制成一行一个。
+   *
+   * 不加逗号也不加引号:这份东西的去处是聊天窗口和工单,一行一个是那两处
+   * 最好读的形状,也是粘回 Excel 一列的形状。要逗号分隔的人自己能替换,
+   * 反过来不成立。
+   *
+   * `navigator.clipboard` 在非 HTTPS 且非 localhost 的部署上不存在
+   * (`docs/DEPLOYMENT.md` 里那种内网 IP 直连的场景),所以失败要说出来 ——
+   * 静默失败的表现是"点了没反应",而运营会以为自己复制成功了,粘出来是空的。
+   */
+  const copySkus = async (group: ExceptionGroup) => {
+    const text = group.entries.map((row) => row.sku).join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success(msg(`已复制 ${group.entries.length} 个 SKU`))
+    } catch {
+      message.warning(
+        msg('这个浏览器不允许后台复制(通常是没走 HTTPS)。可以改用「CSV」下载。'),
+      )
+    }
+  }
+
+  const exportGroup = (section: ExceptionSection, group: ExceptionGroup) => {
+    const blob = toCsv(
+      ['SKU', '款号', '流程步骤', '级别', '问题', '下一步', '定位', '来源'],
+      group.entries.map((row) => [
+        row.sku,
+        row.spu,
+        FLOW_STEP_LABEL[row.step] ?? row.step,
+        ISSUE_LEVEL_LABEL[row.level]?.text ?? row.level,
+        row.message,
+        row.hint ?? '',
+        row.ref ?? '',
+        SOURCE_LABEL[row.source] ?? row.source,
+      ]),
+    )
+    // 文件名带上分组身份与日期:运营一天可能导四五组,全叫 exceptions.csv
+    // 的话下载目录里分不出哪个是哪个
+    const stamp = formatDate(Date.now())
+    saveBlob(blob, `异常-${safeFileName(section.label)}-${safeFileName(group.code)}-${stamp}.csv`)
+  }
+
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="异常与驳回" subtitle="按「步骤 → 问题码」分组:十几件都缺背面图,一眼可见" />
+      <PageHeader title="异常与驳回" subtitle="按流程步骤和问题类型分组，快速发现重复出现的异常" />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>
         <Space wrap>
@@ -217,6 +267,47 @@ export default function WorkbenchExceptionsPage() {
                     <span className="mono" style={{ color: brandVars.slate, fontSize: fontScale.meta }}>
                       {group.code}
                     </span>
+                  </Space>
+                ),
+                /*
+                 * 分组级的两个带走动作。
+                 *
+                 * 这一页把「十几件都是缺背面图」这个判断做出来了,而运营看完之后
+                 * 的下一步**常常不在系统里**:补图要发给摄影,改尺码表要发给商品部。
+                 * 在此之前那一步只能逐行手抄 SKU —— 一个页面把结论算出来了,
+                 * 却让人用手把它搬出去。
+                 *
+                 * 两个动作对应两种去处:贴进群里用「复制」,发工单或对账用 CSV。
+                 * `extra` 里的按钮要 `stopPropagation` —— 它挂在 Collapse 的标题行上,
+                 * 不拦的话点复制会顺带把这一组折叠起来。
+                 */
+                extra: (
+                  <Space size={4} onClick={(event) => event.stopPropagation()}>
+                    <Tooltip title={`复制这 ${group.count} 件的 SKU,一行一个`}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        /* 显示的是「复制 SKU」,可读名字要带上是哪一组:
+                           一页上有十几个同名按钮时,屏幕阅读器逐个念过去
+                           全是「复制 SKU」,分不出自己停在哪一组 */
+                        aria-label={`复制「${group.message}」这一组的 SKU`}
+                        onClick={() => copySkus(group)}
+                      >
+                        复制 SKU
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title="导出这一组的清单(SKU / 款号 / 问题 / 下一步 / 定位)">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<DownloadOutlined />}
+                        aria-label={`导出「${group.message}」这一组的 CSV`}
+                        onClick={() => exportGroup(section, group)}
+                      >
+                        CSV
+                      </Button>
+                    </Tooltip>
                   </Space>
                 ),
                 children: (

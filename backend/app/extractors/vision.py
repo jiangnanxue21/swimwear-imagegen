@@ -46,6 +46,7 @@ from app.core.logging import get_logger
 from app.extractors import call_accounting
 from app.extractors.base import ImageExtractionResult
 from app.extractors.schema import (
+    EXTRACTION_PROMPT_TEMPLATE,
     EXTRACTION_SCHEMA_VERSION,
     ExtractionParseError,
     api_ready_schema,
@@ -93,10 +94,10 @@ EXTRACTION_FORMAT_NAME = f"attribute_extraction_v{EXTRACTION_SCHEMA_VERSION}"
 #: 识别提示词版本:**内容派生**(PRD BE-306)。校准分箱按 (字段 × 模型 × Prompt)
 #: 查(§6.3),所以版本必须跟着措辞走。上一版是 `f"vision-{schema}.1"`,
 #: 「改一次提示词必须 bump 一次」全靠人记得 —— 这个坑在文案链路已经踩过
-#: 一次(copy_generator 旧注释),识别这边是同款。现在对默认拼装取内容哈希:
+#: 一次(copy_generator 旧注释),识别这边是同款。现在对带槽位的模板取内容哈希:
 #: 改一个字,版本必变;没改,恒等(AC-30 / AC-30b)。字段子集不进版本,
 #: 与旧行为一致 —— 旧常量同样不随 fields 变。
-_EXTRACTION_PROMPT_VERSION = content_version(build_extraction_prompt())
+_EXTRACTION_PROMPT_VERSION = content_version(EXTRACTION_PROMPT_TEMPLATE)
 
 #: 传进 `extract(options=...)` 的受众键。识别目标已按受众过滤(§18.3),
 #: 这个键让 Schema 与提示词里的**枚举取值**也按受众收窄 —— 泳裤的请求体里
@@ -409,6 +410,7 @@ class VisionAttributeExtractor:
         http_client: Any | None = None,
     ) -> None:
         self.config = config or ExtractorModelConfig.from_settings()
+        self.prompt_template = EXTRACTION_PROMPT_TEMPLATE
         self._storage = storage
         self._adapter = build_adapter(self.config)
         # 传输层与评分器是同一个类(M2):重试、退避、错误归类全在那边
@@ -431,7 +433,11 @@ class VisionAttributeExtractor:
         但没配 `EXTRACTOR_MODEL_NAME` 时,第一次调用本来就会以
         `NotConfiguredError` 失败,幂等在那之前就没有意义了。
         """
-        return str(self.config.model or ""), _EXTRACTION_PROMPT_VERSION
+        return str(self.config.model or ""), content_version(self.prompt_template)
+
+    def configure_prompt_template(self, content: str) -> None:
+        """由属性服务在建幂等键之前注入当前生效模板。"""
+        self.prompt_template = content
 
     @property
     def usage_provider(self) -> str:
@@ -544,7 +550,9 @@ class VisionAttributeExtractor:
         schema = api_ready_schema(
             build_extraction_schema(tuple(target_fields), audience=audience)
         )
-        prompt = build_extraction_prompt(tuple(target_fields), audience=audience)
+        prompt = build_extraction_prompt(
+            tuple(target_fields), audience=audience, template=self.prompt_template
+        )
 
         prepared = await self._prepare_image(image)
         request = await self._fit_request_to_budget(

@@ -87,14 +87,14 @@ test.beforeEach(async ({ page }) => {
  * 2026-08-11 第一次真的跑起来时,这三条用例全部红在
  * `getByText('商品展示图生产台')` 上 —— 那个字符串是 `useDocumentTitle` 的
  * `BASE_TITLE`,也就是**浏览器标签页上的标题**,它从来没有出现在页面里。
- * 页面上的那行字是 `AppLayout` 顶栏的「服装上架平台」。
+ * 当时页面上的那行字是 `AppLayout` 顶栏的「服装上架平台」。
  *
  * 所以现在两样都钉:标题(证明 `useDocumentTitle` 接上了)与顶栏可见文字
  * (证明外壳真的渲染出来了)。只钉标题是不够的 —— 一个整页
  * 「Unexpected Application Error」的页面标题一样是对的。
  */
-const SHELL_TEXT = '服装上架平台'
-const SHELL_TITLE = /商品展示图生产台/
+const SHELL_TEXT = '商品运营中心'
+const SHELL_TITLE = /服装商品运营平台/
 
 test('应用外壳能从构建产物里起来', async ({ page }) => {
   await page.goto('/')

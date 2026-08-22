@@ -437,13 +437,16 @@ def describe(session: Session, key: str) -> dict[str, Any]:
     # 版本号在 `evaluation_attempts` 里是**字符串**(那一列 String(32)),
     # 所以下面按 `str(row.version)` 取桶。两边形状不一致的话拿不到数,
     # 而拿不到数长得就像"这一版没跑过" —— 守卫钉着这一条
-    per_version = prompt_usage.version_stats(session, key)
+    surface = registry.surface_of(key)
+    usage_stats = bool(surface and surface.usage_stats)
+    per_version = prompt_usage.version_stats(session, key) if usage_stats else {}
     return {
         "key": key,
         "content": content,
         "version": version,
         "is_default": version is None,
         "default_content": default_content(key),
+        "usage_stats": usage_stats,
         # FE-305:防注入段单独送出去。**前端不许自己从 default_content 里切** ——
         # 切片的起止在 `vision_schema` 里由两个头尾常量定着,而那两个常量漂一个字,
         # 前端那份切法就会安静地切歪(import 时的 raise 只护着后端这一侧)。
@@ -463,14 +466,20 @@ def describe(session: Session, key: str) -> dict[str, Any]:
                 # 没有任何调用的版本给的是一份全零统计,**不是 None** ——
                 # 这一层答得出"这一版跑了 0 次"这件事本身。分不清"真的 0 次"
                 # 与"统计还没覆盖到"的责任在展示层,靠下面那个 stats_since
-                "stats": per_version.get(
-                    str(row.version), prompt_stats.PromptCallStats()
-                ).as_dict(),
+                "stats": (
+                    per_version.get(
+                        str(row.version), prompt_stats.PromptCallStats()
+                    ).as_dict()
+                    if usage_stats
+                    else None
+                ),
             }
             for row in list_versions(session, key)
         ],
         # 统计的起点。0059 执行之前的调用不带归属,所以更早的版本会偏少 ——
         # 界面拿它说「统计自 X 起」,而不是让一个跑过 500 次的老版本
         # 顶着「调用 0 次」冒充没人用过(迁移 0059 的模块文档)
-        "stats_since": iso_utc(prompt_usage.coverage_since(session)),
+        "stats_since": (
+            iso_utc(prompt_usage.coverage_since(session)) if usage_stats else None
+        ),
     }

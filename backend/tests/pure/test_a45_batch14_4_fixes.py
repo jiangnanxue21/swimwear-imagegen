@@ -6,7 +6,8 @@ A8/A9 那一轮的 18 条变异指向 `test_frontend_contract.py` 里的 15 个�
 那个模块后来被改写成契约比对(标签 / 枚举 / 路由 / 字段上限),15 个名字
 一个不剩。而变异脚本按 `rc != 0` 判定"响了",`getattr` 抛的 AttributeError
 恰好满足它 —— 于是 18 条**全部失效却报告"全部被抓住"**,直到 batch14-3
-的锚点审计把它挖出来(见 `REVIEW-A45-BATCH14-3.md` F7)。
+的锚点审计把它挖出来。那份批次评审文档已删,来路记在
+`backend/tools/audit_anchors.py` 顶部,口径见 `docs/DECISIONS.md` §3.107。
 
 退役那份脚本时,第四节记了账:18 行 / 15 个不重复的守卫名,主题**一条都没有**
 被别处接住。上一轮的探针判定说有 6 条还有人守,那是**误报** —— 逐条读过之后:
@@ -27,8 +28,8 @@ A8/A9 那一轮的 18 条变异指向 `test_frontend_contract.py` 里的 15 个�
 一律先过 `_code_only()` —— A8/A9 那一轮 12 个变异有 2 个没被抓住,两处
 都是"断言代码里用了 X"被**注释里**的 X 满足了。
 
-每条守卫都有对应变异(`tools/mutate_batch14_4.py`),且变异是**先写的** ——
-反过来做就是 batch13-3 / M11 的来路。
+每条守卫当年都有对应变异(`tools/mutate_batch14_4.py`,已删,口径见
+DECISIONS §3.107),且变异是**先写的** —— 反过来做就是 batch13-3 / M11 的来路。
 """
 from __future__ import annotations
 

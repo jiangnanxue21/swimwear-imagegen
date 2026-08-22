@@ -169,6 +169,13 @@ class PreparedRequest:
     body: Mapping[str, Any] = field(default_factory=dict)
     headers: Mapping[str, str] = field(default_factory=dict)
     idempotency_key: str | None = None
+    #: 这次请求的主体商品编码。**transport 不再去 body 里猜哪个 key 是它。**
+    #:
+    #: body 的键来自 spec,而 spec 是数据:真实的 `swimwear.yaml` 里那一格叫
+    #: `spu_code`,而 transport 曾经读的是 `header["spu"]` —— 一个哪份 spec 都
+    #: 不会产出的名字。表现不是报错,是 transport 拿到空串照常往下走,
+    #: 而手写 payload 的测试因为自己填了 `spu` 一路全绿。
+    spu: str = ""
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,10 @@ class PublishOperationRef:
     operation: PublishOperation
     channel_listing_id: str | None = None
     external_spu_id: str | None = None
+    #: 主体商品编码。属于运行期上下文,由 service 从 `Product` 带进来 ——
+    #: 映射层拿不到它(`_mapped_from_draft()` 是从落库的 payload 重建的,
+    #: 那份 payload 只有 header 与 rows)。
+    spu: str = ""
 
 
 @dataclass(frozen=True)

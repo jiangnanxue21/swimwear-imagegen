@@ -156,7 +156,7 @@ export const NAV: NavGroup[] = [
     adminOnly: true,
     label: '系统管理',
     items: [
-      { key: '/tasks', label: '生成任务(排障)', icon: <PictureOutlined /> },
+      { key: '/tasks', label: '生成任务（排障）', icon: <PictureOutlined /> },
       { key: '/ai-tests', label: 'AI 能力测试', icon: <ExperimentOutlined /> },
       { key: '/dashboard', label: '指标仪表盘', icon: <DashboardOutlined /> },
       { key: '/spend', label: '付费调用花费', icon: <WalletOutlined /> },

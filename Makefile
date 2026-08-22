@@ -1,4 +1,4 @@
-.PHONY: help init up down logs migrate revision seed test test-pure test-nodb smoke-optimized smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-guard-windows audit-dataclass-fields audit-migration-chain audit-columns audit-doc-refs fe-install fe-dev fe-test-pure fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
+.PHONY: help init up down logs migrate migrate-prod revision seed seed-images test test-pure test-nodb smoke-optimized smoke provider-smoke images-smoke baseline calibrate lint arch-check verify-delivery verify-sample-data verify-imports audit-anchors audit-guards audit-guard-windows audit-dataclass-fields audit-migration-chain audit-columns audit-doc-refs fe-install fe-dev fe-test-pure fe-check fe-build fe-e2e check check-offline p0-gate pack requeue cleanup secret-key worker-ping psql clean
 
 # `core.autocrlf=true` used to turn pack.sh into a mixed-CRLF script on Windows.
 # Route the documented make entrypoint to the native packer there; .gitattributes
@@ -32,10 +32,41 @@ logs: ## 跟踪后端日志
 migrate: ## 执行数据库迁移
 	docker compose exec backend alembic upgrade head
 
+# 生产路径复用**同一个入口**,不另写一条命令。
+#
+# `docker-compose.prod.yml` 里的 `migrate` service 已经把迁移从 backend 的启动
+# 命令里摘出去了(评审 B-03),三个长驻服务 `depends_on` 它跑完 —— 所以正常部署
+# 不需要手动跑这一条。它留给两种情况:只想升 schema 不想重启服务,以及
+# 部署卡在迁移那一步、要单独看它的输出。
+#
+# 用 `run --rm` 而不是 `up`:一次性作业跑完就该消失,留一个 Exited(0) 的容器
+# 在 `docker compose ps` 里,下一个人会以为它挂了。
+migrate-prod: ## 生产:单独跑一次迁移(复用 prod overlay 的 migrate service)
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm migrate
+
 revision: ## 生成迁移脚本 make revision M="add xxx"
 	docker compose exec backend alembic revision --autogenerate -m "$(M)"
 
-seed: ## 导入新结构 SPU / 颜色 / SKU 与素材(CSV 平表仅作解析回归样本)
+# ---------------------------------------------------------------- 样例图的前置闸
+#
+# 占位图是**生成物**,权威是 `sample-data/generate_images.py`,`.gitignore` 排除
+# `sample-data/images/`。也就是说一份全新 clone 里它不存在,而这是正常状态。
+#
+# 不加这道闸的话,缺图的表现是 seed 跑到一半报「某个 SKU 的素材找不到」——
+# 那句话离「你还没跑生成脚本」隔着一层,而收包的人多半会先去怀疑样例数据。
+# 先看一眼,缺就把该跑的命令原样打出来。
+seed-images: ## 确认样例占位图已生成(缺图时报出该跑哪一条命令)
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "if (Get-ChildItem -Path 'sample-data/images' -Filter '*.jpg' -ErrorAction SilentlyContinue) { exit 0 } else { Write-Host '!! sample-data/images/ 里没有占位图 —— 它是生成物,不入库'; Write-Host '   先跑:$(PYTHON) sample-data/generate_images.py'; exit 1 }"
+else
+	@ls sample-data/images/*.jpg >/dev/null 2>&1 || { \
+		echo "!! sample-data/images/ 里没有占位图 —— 它是生成物,不入库"; \
+		echo "   先跑:$(PYTHON) sample-data/generate_images.py"; \
+		exit 1; \
+	}
+endif
+
+seed: seed-images ## 导入新结构 SPU / 颜色 / SKU 与素材(CSV 平表仅作解析回归样本)
 	docker compose exec backend python -m app.scripts.seed_sample_data
 
 test: ## 容器内运行全部 pytest
@@ -90,7 +121,7 @@ test-nodb: ## 不碰真库的全部 pytest 用例(需已装 dev 依赖;不需要
 # CI 分叉。断言在 `python -O` 下会被整条跳过,所以这一步验的是
 # **守卫在优化模式下真的还在执行**,而不是"导入不报错"。
 smoke-optimized: ## CI 的 -O 冒烟(守卫在优化模式下真的执行;零外部依赖)
-	cd backend && $(PYTHON) -O -c "import app.workbench.batch, app.workflows.dispatch_policy"
+	cd backend && $(PYTHON) -O -c "import app.workbench.batch, app.workflows.dispatch_policy, app.workflows.publish_policy"
 
 lint: ## Ruff
 	cd backend && ruff check app tests
@@ -341,6 +372,45 @@ pack: ## 打交付包 make pack V=a20
 
 smoke: ## 生成链路冒烟:健康→素材→已授权模特→生成→评分→成品图→导出(不含审核后链路)
 	docker compose exec backend python -m app.scripts.smoke_test
+
+# ---------------------------------------------------------------- 真端点冒烟(评审 B-05)
+#
+# `make smoke` 走的是 Mock,不花钱也不出网 —— 它验的是**我们这边的链路**。
+# 这一条验的是另一件事:**这家 Provider 的真端点,今天还认我们发的报文吗**。
+#
+# 请求构造有测试、响应解析有测试,而真实往返零次 —— A42 那次事故就是
+# 「两侧的测试全绿,没有一条跨过中间那道缝」。字段大小写、错误体形状、
+# 限流头、分页语义,这几样只在真实往返里暴露。
+#
+# 两段管道不是绕远路:`run` 要 API Key 与出网,只能在容器里跑,而容器里没有
+# `docs/`;`record` 只要 python3,跑在宿主上才写得进台账。
+#
+# `--garment-url` 必须是**外部服务取得到**的地址 —— 容器内的 localhost 不算。
+# `-T` 不能省:不关掉 TTY 的话 stdout 里会混进控制字符,下游解析不了 JSON。
+# KIND 三选一:providers(出图)/ extractors(属性识别)/ evaluators(评分)。
+# **三类都要**,不只是出图那一类 —— PRD §14.3 的人工测试准入原话点的名是
+# 「真实抽取器与评分器」,而它们的闭环形状与出图不同(同步一次调用 vs 提交+轮询)。
+provider-smoke: ## 真端点冒烟(要真 Key、会花钱)make provider-smoke KIND=providers P=fashn URL=https://…
+	@test -n "$(KIND)" || (echo "要指定类目:KIND=providers|extractors|evaluators" && exit 2)
+	@test -n "$(P)" || (echo "要指定名字:make provider-smoke KIND=providers P=fashn URL=https://…" && exit 2)
+	@test -n "$(URL)" || (echo "要指定服装图 URL(外部服务取得到的地址)" && exit 2)
+	docker compose exec -T backend python -m tools.provider_smoke run $(KIND) $(P) --garment-url "$(URL)" \
+		| $(PYTHON) backend/tools/provider_smoke.py record
+
+# ---------------------------------------------------------------- 镜像冒烟(评审 B-01)
+#
+# CI 的 `images` job 原来只到 `docker build` 为止,而 B-01 那个缺陷**构建是会成功的** ——
+# `pip install -e` 扫到空包集不报错,只是装了个什么都没有的包。要让它变红,
+# 得真的起一个容器 `import` 一次。
+#
+# 这条与前端 Dockerfile 的 `nginx -t` 是同一个思路:把「起来之后才发现」
+# 变成「构建/冒烟失败」。Dockerfile 里已经有一份构建期自检,这里是它在
+# 编排侧的复核 —— 两处都在,因为它们失效的方式不同(那一份可能被人删掉,
+# 这一份可能因为 CI 没接线而不跑)。
+images-smoke: ## 构建两个镜像并起容器验一次 import(需 docker)
+	docker build -t swimwear-imagegen-backend:smoke backend
+	docker build -t swimwear-imagegen-frontend:smoke frontend
+	docker run --rm swimwear-imagegen-backend:smoke python -c "import app.main; print('import ok')"
 
 calibrate: ## 评分器校准:人工判定 vs 模型分档的一致率
 	docker compose exec backend python -m app.scripts.calibrate

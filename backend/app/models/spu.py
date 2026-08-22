@@ -175,19 +175,13 @@ class ColorVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: 两条路都会写它** —— batch23 只挂在 `confirm()` 时,自动确认出的颜色
     #: 这一列仍是空串,证据链在 `docs/DECISIONS.md` §3.54。
     #:
-    #: **那个字段叫 `primary_color`,不叫 `standard_color_name`。**
-    #: 这里原来写的是后者,而全仓没有那个字段 —— 照着它去找的人会找不到,
-    #: 然后得出"还缺前置"的结论。字段名定死在
+    #: **上游那个字段叫 `primary_color`。** 名字定死在
     #: `attributes/colour_projection.SOURCE_FIELD`,守卫钉着它真的在注册表里
-    #: 且真的是 VARIANT 层。
+    #: 且真的是 VARIANT 层 —— 写错名字的表现是照着它去找的人找不到,
+    #: 然后得出"还缺前置"的结论。
     #:
     #: 与 `products` 上那 8 个投影列同一套规矩和同一条 AST 守卫 ——
     #: `info` 里的标记是给那条扫描读的,注释读不到。
-    #:
-    #: (这里原来还留着一句「本批次只落列:写入点要等 owner_id 切 UUID」。
-    #: 那个前置在迁移 0046 就完成了,而这半句注释又多活了几批 ——
-    #: 正是这笔账躲过去的方式之一,见 §3.53 第三节。按硬规则 5 判定:
-    #: 过期的是注释,不是代码,故删。)
     display_name: Mapped[str] = mapped_column(
         String(128), nullable=False, default="", info={"projection": True}
     )

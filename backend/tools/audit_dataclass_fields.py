@@ -64,6 +64,12 @@ APP = BACKEND / "app"
 BASELINE: dict[str, int] = {
     "app/attributes/contracts.py": 4,
     "app/channels/registry.py": 1,
+    # `ResponseShape` 的三条路径恒为 None,不是遗漏:`publishOrEdit` 响应里
+    # review version / SKC / SKU 的层级尚未取证,而猜一条路径会让判定停在一个
+    # 错误的成功上。取证之后这个数会掉到 0,双向锁当场变红,提醒把这一行删掉 ——
+    # 于是这条基线同时是「形状还没取证」的第二个提醒。
+    # 第一个提醒是 `channels/shein/decode.py` 的 `SHAPE_SOURCED`。
+    "app/channels/shein/decode.py": 1,
     "app/evaluators/rules.py": 1,
     "app/listings/contracts.py": 2,
     "app/listings/copy_generator.py": 2,

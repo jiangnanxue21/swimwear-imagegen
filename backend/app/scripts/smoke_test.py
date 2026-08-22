@@ -273,9 +273,13 @@ class Smoke:
         for image in images.values():
             try:
                 head = self.client.get(image["url"])
-                reachable += 1 if head.status_code == 200 else 0
             except Exception:  # noqa: BLE001
+                # 冒烟脚本吞的是**这一张图取不到**,不是整轮冒烟失败:
+                # 下面那句 check 会把 `reachable/总数` 原样打出来,
+                # 差几张一眼看得见。抛出去反而会让后面几项一条都不跑。
                 pass
+            else:
+                reachable += 1 if head.status_code == 200 else 0
         self.check("成品图 URL 可访问", reachable == len(images), f"{reachable}/{len(images)}")
 
     def check_export_csv(self, product_id: str) -> None:

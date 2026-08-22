@@ -5,7 +5,18 @@
 | `products.csv` | 10 行 CSV 解析与旧素材命名回归样本。阶段 1 收口后导入要求 SPU / 颜色先存在，**不能再直接落库**。这里写「泳装」是如实描述这批样例的品类，不是系统边界 |
 | `spus.json` | **新结构**样例:SPU → 颜色 → SKU 三层,走 `POST /spus` 那条路。PRD §13 阶段 1 验收「可构造三颜色九 SKU 的 SPU」要的就是它 |
 | `generate_images.py` | 生成占位素材图。老结构每个 SKU 三张,新结构**每个颜色**三张 + 每个 SPU 一张通用图 |
-| `images/` | 生成结果,51 张 900×1200 JPEG |
+| `images/` | 生成结果,900×1200 JPEG。**不入库**,首次使用先跑上面那个脚本 |
+
+## 图不在库里,脚本才是权威
+
+这里原先同时躺着生成脚本和它的产物,而 README 又写着「首次需先生成占位图」——
+三者互相矛盾:图在库里、脚本在、指令说要跑脚本,收包的人无从判断哪边说了算。
+
+现在只有一条路:**跑脚本**。`.gitignore` 排除 `sample-data/images/`,
+`make seed` 在动手之前先确认图在不在,不在就报出该跑哪一条命令。
+
+条数不写在这里 —— 增删样例时写死的数字会静默过期。要当前口径的人跑
+`cd backend && python3 tools/verify_sample_data.py`。
 
 ## 两份样例并存,不是历史遗留
 
@@ -35,7 +46,7 @@
 缺陷会表现成「全都不过期」,而那看起来很像正常。
 
 ```bash
-python3 sample-data/generate_images.py    # 重新生成图片
+python3 sample-data/generate_images.py    # 首次必跑;之后要换一批图也跑它
 make seed                                  # 导入商品与素材(幂等,可重复执行)
 ```
 

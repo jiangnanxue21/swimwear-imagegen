@@ -64,7 +64,7 @@ from app.models.listing_copy import ContentPlan, ListingCopy, ListingDraft
 from app.models.listing_image import ListingImageItem, ListingImageSet
 from app.models.media_asset import MediaAsset
 from app.models.product import Product
-from app.services import audit, generation_service, product_service
+from app.services import audit, generation_service, product_service, prompt_service
 from app.workbench import audience_rules as audience_gate
 from app.workbench import flow as flow_rules
 from app.workbench import platform as pf
@@ -967,6 +967,19 @@ def serialize_flow(result: FlowResult) -> dict[str, Any]:
 # ==========================================================
 
 
+def _runtime_copy_generator(
+    session: Session, name: str | None = None
+) -> copy_generator.CopyGenerator:
+    """取生成器，并把当前生效的文案 Prompt 注入真实 LLM 消费方。"""
+    generator = copy_generator.get_generator(name)
+    if isinstance(generator, copy_generator.LLMCopyGenerator):
+        content, _version = prompt_service.get_active_content(
+            session, copy_generator.COPY_LLM_SYSTEM_PROMPT_KEY
+        )
+        generator.system_prompt_template = content
+    return generator
+
+
 def _content_plan_or_raise(
     session: Session, product: Product, *, actor: str
 ) -> ContentPlan:
@@ -1005,7 +1018,7 @@ def diagnose_copy(
         )
 
     rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
-    generator = copy_generator.get_generator(generator_name)
+    generator = _runtime_copy_generator(session, generator_name)
     try:
         draft = generator.generate(
             facts=plan.facts,
@@ -1198,7 +1211,7 @@ def generate_copy(
 
     plan = _content_plan_or_raise(session, product, actor=actor)
     rules = copy_service.resolve_rules(generic.CHANNEL, generic.SITE)
-    generator = copy_generator.get_generator()
+    generator = _runtime_copy_generator(session)
 
     previous_row = _current_copy(session, product.spu, colour)
     previous: dict[str, Any] | None = None

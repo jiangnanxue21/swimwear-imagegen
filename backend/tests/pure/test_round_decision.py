@@ -21,6 +21,7 @@ from app.evaluators.decision import (
     stable_fraction,
     systematic_problem_codes,
 )
+from app.evaluators.repair import RepairAction
 from app.evaluators.rules import DEFAULT_THRESHOLDS, GradingThresholds
 
 NO_SPOT_CHECK = GradingThresholds(spot_check_ratio=0.0)
@@ -110,6 +111,28 @@ def test_hard_fail_round_regenerates_instead_of_escalating():
     )
     assert decision.outcome is RoundOutcome.REGENERATE
     assert decision.repair_plan.change_model_template is True
+
+
+def test_round_decision_consumes_the_injected_repair_mapping():
+    custom = {
+        HardFailCode.STRAP_CHANGED.value: RepairAction(
+            prompt_additions=("活动补丁表要求保持肩带",),
+        )
+    }
+    decision = _round(
+        [
+            _verdict(
+                "c1",
+                Grade.C,
+                55.0,
+                hard_fail=True,
+                hard_fail_codes=(HardFailCode.STRAP_CHANGED.value,),
+            )
+        ],
+        repair_table=custom,
+    )
+    assert decision.repair_plan is not None
+    assert "活动补丁表要求保持肩带" in decision.repair_plan.prompt_additions
 
 
 def test_every_intermediate_round_regenerates():

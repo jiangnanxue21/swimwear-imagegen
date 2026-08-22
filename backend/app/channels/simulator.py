@@ -479,8 +479,8 @@ def submit(req: PreparedRequest, ctx: ChannelContext) -> SubmitResult:
         )
 
     body = dict(req.body)
-    header = body.get("header") if isinstance(body.get("header"), dict) else {}
-    spu = str(header.get("spu") or "")
+    # SPU 取自 `req.spu`,不从 body 里猜。理由见 `base.PreparedRequest.spu`
+    spu = str(req.spu or "")
     operation = body.get("operation") or PublishOperation.CREATE.value
 
     resp = simulate_submit(

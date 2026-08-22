@@ -101,6 +101,15 @@ _LEDGERS = {
     "HANDOVER.md",
 }
 
+#: `docs/notes/` 整个目录同属台账,理由和上面那四份**完全一样**,只是它的形状
+#: 是一目录而不是一文件:每一篇 note 记的都是"写下那天的事实",而 note 存在的
+#: 全部意义就是承载那些主文档不该再背的历史 —— 里面点名的脚本、批次文档、
+#: 过程文件本来就有一大半已经按规矩删掉了。
+#:
+#: 把它判成 ERROR 只会逼人去改档案,或者把整个目录塞进 _ALLOW,而后者等于
+#: 关掉这道门禁对文档目录的覆盖。降级成 WARN,和台账同档。
+_LEDGER_DIRS = ("docs/notes/",)
+
 #: 路径样式:已知顶层目录开头、以已知扩展名结尾。
 #: 刻意不认裸文件名(`foo.py`)—— 那种大多是在说"一个叫 foo 的东西",不是路径
 _PATH_RE = re.compile(
@@ -187,7 +196,8 @@ def collect() -> tuple[list[tuple[str, str, int]], list[tuple[str, str, int]]]:
         except (UnicodeDecodeError, OSError):
             continue
         rel = path.relative_to(PROJECT_ROOT).as_posix()
-        bucket = warns if rel in _LEDGERS else errors
+        is_ledger = rel in _LEDGERS or rel.startswith(_LEDGER_DIRS)
+        bucket = warns if is_ledger else errors
         lines = text.splitlines(keepends=True)
         for match in _PATH_RE.finditer(text):
             ref = match.group(1)

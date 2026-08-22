@@ -23,7 +23,8 @@ batch12-2 修的六条(EX-01 ~ EX-06)方向都对,但有四处**论证或收尾�
        QUEUED —— 而那时 `fetch_results` 已经返回,钱花了、图也生成了。
 
 这份守卫沿用上一轮的做法:能穷举的直接调,剩下的用 AST 钉结构。真正的
-行为验证仍然在 `docs/REVIEW-A45-BATCH12-3.md` 里那张 CI 表上。
+行为验证仍然在 CI 那一侧 —— 原来列着它的那份批次评审文档已删,口径见
+`docs/DECISIONS.md` §3.107。
 """
 from __future__ import annotations
 

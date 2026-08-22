@@ -69,7 +69,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_actor, db_session, require_operator
-from app.channels.simulator import is_simulated_external_id
+from app.channels.registry import is_simulated_channel
 from app.core.clock import iso_utc
 from app.core.enums import (
     UNRESOLVED_REJECTION_STATUSES,
@@ -274,7 +274,7 @@ def _assemble_facts(
     return pv.PublishFacts(
         listing_status=listing.status if listing else None,
         external_spu_id=listing.external_spu_id if listing else None,
-        simulated=is_simulated_external_id(listing.external_spu_id) if listing else False,
+        simulated=is_simulated_channel(listing.channel) if listing else False,
         draft_submittable=submittable,
         attempt_status=attempt.status if attempt else None,
         outbox_status=outbox.status if outbox else None,
@@ -347,7 +347,7 @@ def _listing_out(listing: ChannelListing, view: pv.PublishView) -> dict[str, Any
         "status": listing.status,
         "external_spu_id": listing.external_spu_id,
         "external_sku_ids": listing.external_sku_ids,
-        "simulated": is_simulated_external_id(listing.external_spu_id),
+        "simulated": is_simulated_channel(listing.channel),
         "last_platform_status": listing.last_platform_status,
         "last_polled_at": (
             iso_utc(listing.last_polled_at)

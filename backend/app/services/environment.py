@@ -111,6 +111,16 @@ def describe() -> dict[str, Any]:
             }
             for f in facets
         ],
+        # 每个渠道各一行,**不压成一个值**(PRD §8.1 SH-CFG-005)。
+        #
+        # 上面的 `channel` facet 回答的是"这一档整体可不可信",它只能有一个
+        # 档位;而运营要问的另一个问题是"SHEIN 现在到底接没接",那个问题在
+        # 单值上没有答案 —— `GENERIC=SIMULATOR` 与 `SHEIN=REAL` 并存时,
+        # 压成一个值必然要丢掉一半。所以这里追加一张逐渠道的表,
+        # 而不是改上面那一档的口径(改它会动前端已有的契约)。
+        #
+        # 每一格都来自注册表实际挂着什么,不是常量(硬规矩 4)。
+        "channels": describe_channels(),
         # 运行形态。影响可靠性,**不影响产出真实性**,所以不参与上面的判定 ——
         # 理由写在 core/environment.py 的模块注释里
         "deployment": {

@@ -666,4 +666,3 @@ class MultimodalClient:
             "api_style": self.config.api_style,
             "http_status": status,
         }
-

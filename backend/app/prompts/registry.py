@@ -24,11 +24,10 @@ PRD 点名沿用)。
 ## `editable` 的语义:消费链路会不会读库
 
 **不是"想不想让人改",是"改了会不会生效"。** `prompt_templates` 表谁都
-能写,但 8 处里只有评分两份(#1 #2)的消费链路走 `get_active_content`
-读库;其余 6 处的正文由代码拼装或直接引用常量,库里存一版新的,链路
-**一个字都不会读**。把这 6 处标成可编辑,得到的是「保存成功、毫无效果」——
-比男装那条"后端通、前端不可达"的死路(PRD 问题 A)更糟,因为它连报错
-都没有。所以 editable=False 的准确含义写在每一项的 consumers 里。
+能写，但只有完成消费接线的提示词才能标为 editable。当前登记的 8 处都已接入
+当前生效版本：自由正文、带固定槽位的模板、带固定代码键的 JSON 映射分别走各自
+的校验与消费路径。只翻布尔值而不接消费方，会得到「保存成功、毫无效果」——
+比不给入口更糟。
 
 ## 依赖约束
 
@@ -37,9 +36,12 @@ PRD 点名沿用)。
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum, StrEnum
 
 
 class Tier(StrEnum):
@@ -47,7 +49,7 @@ class Tier(StrEnum):
 
     FREE = "FREE"          # 全文 textarea;校验 = 现有 lint + 防注入段存在性
     TEMPLATE = "TEMPLATE"  # 措辞可改,必需槽位一个都不能少
-    MAPPING = "MAPPING"    # 键值映射;本轮只读(PRD §14.2 决议)
+    MAPPING = "MAPPING"    # 键值映射;正文是 JSON,键闭包由 key_source 校验
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,13 @@ class PromptSurface:
     default_ref: str | None
     required_slots: tuple[str, ...] = ()
     key_source: str | None = None
+    #: 提示词中心展示正文时使用的引用。多数项与 default_ref 相同；运行时构造器
+    #: 需要参数的项指向一个无参的代表性预览函数，避免页面只能展示 Python 源码。
+    preview_ref: str | None = None
+    #: 代表性预览不等于每次调用的最终正文，这句话必须随正文一起展示。
+    preview_note: str | None = None
+    #: 只有评分链路把调用逐次写进 evaluation_attempts；可编辑不等于有这份统计。
+    usage_stats: bool = False
     editable: bool = True
     ui_reachable: bool = True
     consumers: tuple[str, ...] = field(default_factory=tuple)
@@ -82,6 +91,7 @@ PROMPT_SURFACES: tuple[PromptSurface, ...] = (
         tier=Tier.FREE,
         default_ref="app.evaluators.vision_schema:DEFAULT_SYSTEM_PROMPT",
         editable=True,
+        usage_stats=True,
         ui_reachable=True,
         consumers=(
             "app/evaluators/vision_schema.py:prompt_key_for 选键",
@@ -95,6 +105,7 @@ PROMPT_SURFACES: tuple[PromptSurface, ...] = (
         tier=Tier.FREE,
         default_ref="app.evaluators.vision_schema:DEFAULT_SYSTEM_PROMPT_MEN",
         editable=True,
+        usage_stats=True,
         # PRD §14.1 / AC-24:a58 起前端可达 —— 提示词页从"写死女装"改成按路由 key
         # (`/prompts/:key`),两份提示词走的是同一段代码。a56 那行 `ui_reachable=False`
         # 写着「解锁条件 = FE-301 落地」,现在落了,所以这里翻转。
@@ -115,85 +126,115 @@ PROMPT_SURFACES: tuple[PromptSurface, ...] = (
         key="scoring_user_prompt",
         label="评分用户段",
         tier=Tier.TEMPLATE,
-        default_ref="app.evaluators.vision_schema:build_user_prompt",
+        default_ref="app.evaluators.vision_schema:SCORING_USER_PROMPT_TEMPLATE",
+        preview_ref="app.evaluators.vision_schema:preview_user_prompt",
+        preview_note=(
+            "代表性预览：FULL 深度、1 张参考图和示例商品元数据；"
+            "实际调用会按评分深度、图片数和商品数据动态展开。"
+        ),
         required_slots=(
+            "depth_instruction",
             "dimension_lines",
             "check_lines",
             "codes",
             "image_lines",
             "metadata_text",
         ),
-        editable=False,
+        editable=True,
         consumers=(
-            "app/evaluators/vision_schema.py:build_user_prompt 运行时拼装,不读库",
-            "editable=False 的原因:正文由 f-string 拼装而非模板串,维度/检查项清单"
-            "由 fact_consistency.FACT_CHECKS 单点供给 —— 模板化重构触及评分口径,"
-            "必须在能跑 AC-34 全量回归的环境里做",
+            "evaluation_service.py 每轮读取 prompt_templates 当前生效模板，"
+            "经 rule_set 注入视觉评分器",
+            "build_user_prompt 只替换登记在案的槽位；商品 JSON 中的花括号不会被误解析",
+            "维度/检查项清单仍由代码事实源动态展开，默认模板展开结果保持原评分口径",
         ),
     ),
     PromptSurface(
         key="scoring_depth_instructions",
         label="评分深度指令",
-        tier=Tier.TEMPLATE,
-        default_ref="app.evaluators.vision_schema:_DEPTH_INSTRUCTIONS",
-        editable=False,
+        tier=Tier.MAPPING,
+        default_ref="app.evaluators.vision_schema:SCORING_DEPTH_INSTRUCTIONS_DEFAULT",
+        key_source="app.evaluators.vision_schema:_DEPTH_INSTRUCTIONS",
+        preview_note="完整展示 FULL / QUICK 两档指令映射；运行时按评分深度选择其中一段。",
+        editable=True,
         consumers=(
-            "app/evaluators/vision_schema.py:_DEPTH_INSTRUCTIONS,按 EvaluationDepth 取,不读库",
-            "editable=False 的原因:与 scoring_user_prompt 同一条 —— 接库待 AC-34 环境",
+            "evaluation_service.py 每轮读取 JSON 版本并在任何付费评分调用前完成校验",
+            "vision_schema.py:build_user_prompt 按 EvaluationDepth 选择 FULL / QUICK 正文",
+            "MAPPING 体检校验合法 JSON、缺失档位和意外新增键",
         ),
     ),
     PromptSurface(
         key="extraction_prompt",
         label="属性识别提示词",
         tier=Tier.TEMPLATE,
-        default_ref="app.extractors.schema:build_extraction_prompt",
-        editable=False,
+        default_ref="app.extractors.schema:EXTRACTION_PROMPT_TEMPLATE",
+        preview_ref="app.extractors.schema:build_extraction_prompt",
+        required_slots=("field_lines",),
+        preview_note="代表性预览：按默认受众展开全部可识别字段；实际调用会按目标字段和商品受众缩小清单。",
+        editable=True,
         consumers=(
-            "app/extractors/schema.py:build_extraction_prompt 运行时拼装,不读库",
+            "attributes/service.py 每次识别前读取 prompt_templates 当前生效模板,"
+            "注入 VisionAttributeExtractor",
             "枚举清单由 core/enums.py 单点供给(schema.py 自述:手抄一份的话加一项时"
             "抄的那份不会跟着变)",
-            "editable=False 的原因:同上,模板化待 AC-34 环境;版本已改内容派生(BE-306)",
+            "{field_lines} 由目标字段与受众动态展开;版本按模板内容派生(BE-306)",
         ),
     ),
     PromptSurface(
         key="copy_llm_system_prompt",
         label="文案生成系统提示词",
-        tier=Tier.FREE,
+        tier=Tier.TEMPLATE,
         default_ref="app.listings.copy_generator:LLM_SYSTEM_PROMPT",
-        editable=False,
+        required_slots=(
+            "title_max",
+            "description_max",
+            "bullet_min",
+            "bullet_max",
+            "bullet_item_max",
+        ),
+        preview_note="系统 Prompt 原文；{title_max} 等槽位会在调用时由当前文案规则填入。",
+        editable=True,
         consumers=(
-            "app/listings/copy_generator.py:LLM 生成器直接引用常量,不读库",
+            "workbench/service.py 每次生成前读取 prompt_templates 当前生效版本,"
+            "注入 LLMCopyGenerator",
             "正文含 {title_max} 等运行参数槽位,数值由 CopyRules 注入 —— 提示词说 120"
             "而校验按 100 判的事故是这个设计防的",
-            "editable=False 的原因:消费链路不读库;接库时槽位校验一并做",
+            "TEMPLATE 层保存前会逐个检查必需槽位",
         ),
     ),
     PromptSurface(
         key="repair_prompt_additions",
         label="修复提示词补丁表",
         tier=Tier.MAPPING,
-        default_ref="app.evaluators.repair:REPAIR_TABLE",
+        default_ref="app.evaluators.repair:REPAIR_TABLE_DEFAULT",
         key_source="app.evaluators.repair:REPAIR_TABLE",
-        # PRD §14.2 决议:MAPPING 本轮只读。改它等于改修复策略,风险高于改措辞。
-        editable=False,
+        preview_note=(
+            "完整修复策略 JSON；键是问题代码，值中的 prompt_additions / "
+            "negative_prompt_additions 会进入下一轮出图提示词。"
+        ),
+        editable=True,
         consumers=(
-            "app/evaluators/repair.py:REPAIR_TABLE,问题代码 -> 修复动作",
-            "editable=False 的原因:PRD §14.2 决议本轮只读 —— "
-            "改它等于改修复策略,风险高于改措辞;键封闭性校验推迟",
+            "evaluation_service.py 每轮读取并解析当前生效 JSON，评分完成后的决策共用该快照",
+            "decision.py 将解析后的 RepairAction 映射传给 build_repair_plan",
+            "缺默认问题代码、字段类型错误或未知字段会在付费评分前失败关闭",
         ),
     ),
     PromptSurface(
         key="generation_prompt_compose",
         label="出图提示词拼装",
         tier=Tier.TEMPLATE,
-        default_ref="app.workflows.generation_plan:compose_prompt",
-        editable=False,
+        default_ref="app.workflows.generation_plan:GENERATION_PROMPT_TEMPLATE",
+        required_slots=("base_prompt", "scene_segment", "pose_segment", "angles_segment"),
+        preview_ref="app.workflows.generation_plan:preview_generation_prompt",
+        preview_note=(
+            "代表性预览：商品一致性基础 Prompt + 默认影棚 + 默认站姿 + 正反面；"
+            "实际正文会按任务、场景、姿势和角度动态拼装。"
+        ),
+        editable=True,
         consumers=(
-            "app/workflows/generation_plan.py:compose_prompt 把场景/姿势/角度并进提示词,"
-            "拼装结果全文落库(generations.prompt)",
-            "没有静态默认正文可言 —— default_ref 指向拼装函数本身;版本由"
-            "generation_service 对拼装结果取内容哈希(BE-306)",
-            "editable=False 的原因:正文是运行时拼装",
+            "generation_service.py 应用方案时读取 prompt_templates 当前生效模板,"
+            "由 compose_prompt 填入基础正文/场景/姿势/角度四个槽位",
+            "拼装结果全文落库(generations.prompt),版本继续按最终正文内容派生",
+            "TEMPLATE 层保存前会逐个检查必需槽位",
         ),
     ),
 )
@@ -229,10 +270,51 @@ def resolve_default(surface: PromptSurface) -> object | None:
     返回 None。解析失败**抛出**而不是吞掉:一个悬空的引用是登记错误,
     AC-23 的守卫就该在这里红。
     """
-    if surface.default_ref is None:
+    return _resolve_ref(surface.default_ref)
+
+
+def resolve_preview(surface: PromptSurface) -> object | None:
+    """解析一份能直接给人看的正文；无参构造器会在这里执行。"""
+    value = _resolve_ref(surface.preview_ref or surface.default_ref)
+    return value() if callable(value) else value
+
+
+def preview_text(surface: PromptSurface) -> str:
+    """把字符串、枚举映射和 dataclass 策略表统一变成人能读的正文。"""
+
+    def plain(item: object) -> object:
+        if dataclasses.is_dataclass(item) and not isinstance(item, type):
+            return {
+                one.name: plain(getattr(item, one.name))
+                for one in dataclasses.fields(item)
+            }
+        if isinstance(item, Enum):
+            return item.value
+        if isinstance(item, Mapping):
+            return {str(plain(key)): plain(val) for key, val in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [plain(one) for one in item]
+        return item
+
+    value = resolve_preview(surface)
+    if isinstance(value, str):
+        return value
+    return json.dumps(plain(value), ensure_ascii=False, indent=2, default=str)
+
+
+def mapping_keys(surface: PromptSurface) -> tuple[str, ...]:
+    """MAPPING 层必须保留的代码键；从领域事实源惰性派生，不在注册表手抄。"""
+    value = _resolve_ref(surface.key_source)
+    if not isinstance(value, Mapping):
+        return ()
+    return tuple(str(plain.value if isinstance(plain, Enum) else plain) for plain in value)
+
+
+def _resolve_ref(ref: str | None) -> object | None:
+    if ref is None:
         return None
-    module_path, _, attr = surface.default_ref.partition(":")
+    module_path, _, attr = ref.partition(":")
     if not module_path or not attr:
-        raise ValueError(f"default_ref 不是 module:attr 形状:{surface.default_ref!r}")
+        raise ValueError(f"提示词引用不是 module:attr 形状:{ref!r}")
     module = importlib.import_module(module_path)
     return getattr(module, attr)

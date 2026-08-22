@@ -319,8 +319,6 @@ def test_the_doc_map_says_the_same_number_as_its_own_table():
 
 # ============================================ 五、示例数据的条数:要么不写,要么是真的
 
-_SAMPLE_IMAGES = PROJECT_ROOT / "sample-data" / "images"
-
 #: 这几份是给「第一次接触」和「要部署」的人看的,条数一律不写死。
 _NO_SAMPLE_COUNT_DOCS = (
     PROJECT_ROOT / "README.md",
@@ -344,8 +342,8 @@ def test_the_general_docs_do_not_freeze_a_sample_data_count():
     所以这条不是「把 30 改成 51」(下次增删样例又会过期),是「这几份文档里
     不出现这个数」。要当前口径的人跑 `backend/tools/verify_sample_data.py`。
 
-    `LOCAL_MANUAL_TEST.md` 与 `sample-data/README.md` 不在名单里:前者是那条
-    教训的出处,里面的数字是引用旧文案;后者就贴着数据本身,由下一条钉真值。
+    `LOCAL_MANUAL_TEST.md` 不在名单里:它是那条教训的出处,里面的数字是引用
+    旧文案。`sample-data/README.md` 由下一条单独管 —— 它贴着数据本身,规矩不同。
     """
     for doc in _NO_SAMPLE_COUNT_DOCS:
         hit = _SAMPLE_TOTAL_CLAIM.search(_read(doc))
@@ -356,18 +354,40 @@ def test_the_general_docs_do_not_freeze_a_sample_data_count():
         )
 
 
-def test_the_sample_data_readme_states_the_real_image_count():
-    """`sample-data/README.md` 可以写数,但那个数必须是真的。
+def test_the_sample_data_readme_does_not_freeze_a_count_either():
+    """`sample-data/README.md` 也不许写死张数,并且要说清图从哪来。
 
-    它贴着数据本身,读者是「想知道这批样例怎么组织的」那个人,一个具体的数
-    对他有用。代价是它会过期 —— 所以由这条钉着它和文件树一致。
+    ## 它原来可以写数,现在不行了
+
+    上一版的判据是「贴着数据本身,写个具体数对读者有用,由守卫钉着它和文件树
+    一致」。那条判据的前提是**图在树里**。占位图改成生成物之后前提没了:
+    一份全新 clone 里 `sample-data/images/` 不存在,而「不存在」是正常状态 ——
+    守卫拿它和文件树比对,只会在最该跑的那台机器上炸。
+
+    所以这一份并进上面那条规矩:条数一律不写,要当前口径的人跑
+    `backend/tools/verify_sample_data.py`。换来的是这份 README 必须自己说清
+    图从哪来 —— 否则「目录里怎么什么都没有」这个问题没有落点。
     """
     readme = PROJECT_ROOT / "sample-data" / "README.md"
-    actual = len([p for p in _SAMPLE_IMAGES.iterdir() if p.is_file()])
-    declared = re.search(r"(\d+)\s*张\s*\d+×\d+", _read(readme))
-    assert declared, "sample-data/README.md 里那句「N 张 900×1200 JPEG」不见了"
-    assert int(declared.group(1)) == actual, (
-        f"sample-data/README.md 说 {declared.group(1)} 张,实际 {actual} 张。"
+    body = _read(readme)
+
+    hit = _SAMPLE_TOTAL_CLAIM.search(body)
+    assert hit is None, (
+        f"sample-data/README.md 又把条数写死了:「{hit.group(0)}」。"
+        "占位图是生成物,张数随 spus.json 增删而变,而没有任何东西会在它过期时报错。"
+    )
+    frozen = re.search(r"(\d+)\s*张\s*\d+×\d+", body)
+    assert frozen is None, (
+        f"sample-data/README.md 里还留着「{frozen.group(0)}」——"
+        "这个数在下一次增删样例时会静默过期。"
+    )
+    assert "generate_images.py" in body, (
+        "sample-data/README.md 没说图从哪来。图不入库,读者打开一个空目录时"
+        "必须能在这里读到该跑哪一条命令。"
+    )
+    assert "verify_sample_data.py" in body, (
+        "sample-data/README.md 不写条数,就得指出去哪问当前口径 —— "
+        "指向 backend/tools/verify_sample_data.py。"
     )
 
 

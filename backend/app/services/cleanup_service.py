@@ -35,7 +35,7 @@ from uuid import UUID
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.channels.simulator import is_simulated_external_id
+from app.channels.registry import is_simulated_channel
 from app.core.clock import iso_utc, utc_now
 from app.core.enums import PublishOperation, PublishStatus
 from app.core.errors import ErrorCode, ValidationError
@@ -307,10 +307,14 @@ def inventory(
     rows: list[ExternalListing] = []
     for listing, product in session.execute(stmt).all():
         has_id = bool((listing.external_spu_id or "").strip())
-        simulated = has_id and is_simulated_external_id(listing.external_spu_id)
-        # `include_simulated=False` 只筛掉**确定是模拟的**那些。
-        # 没有 ID 的不确定行无从判断真假,而"无从判断"恰恰是要人核对的理由
-        if simulated and not include_simulated:
+        # 判据是这一行的渠道现在挂着哪个 transport,不是外部 ID 的前缀
+        # (PRD §10.2 第 3 条)。前缀那条判据对**没有 ID 的行**答不了,
+        # 而那恰恰是最需要判断的一类
+        simulated = is_simulated_channel(listing.channel)
+        # `include_simulated=False` 只筛掉**有 ID 且确定是模拟的**那些。
+        # 没有 ID 的行一律留下:4.1 节 H 要的是数量一致,而一个被漏掉的
+        # 不确定项正是数量对不上的最常见来源
+        if simulated and not include_simulated and has_id:
             continue
         rows.append(_row(listing, product, simulated=simulated, has_id=has_id))
 
@@ -330,7 +334,9 @@ def _row(
         site=listing.site,
         spu=product.spu,
         sku=product.sku,
-        external_spu_id=str(listing.external_spu_id),
+        # `str(None)` 会得到字面量 "None" —— 它会出现在界面、接口和运营手里的
+        # 清单上,看起来像一个真的平台 ID。这一列的契约是"可以是空串"
+        external_spu_id=(listing.external_spu_id or "").strip(),
         status=listing.status,
         last_platform_status=listing.last_platform_status,
         test_batch_tag=listing.test_batch_tag,

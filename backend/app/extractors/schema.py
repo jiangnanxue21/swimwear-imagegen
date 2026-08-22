@@ -146,23 +146,12 @@ def api_ready_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def build_extraction_prompt(
-    fields: tuple[str, ...] | None = None,
-    *,
-    audience: Audience | None = None,
-) -> str:
-    """识别提示词。
+EXTRACTION_PROMPT_KEY = "extraction_prompt"
 
-    三条约束(§6.1):枚举值只能取 `core/enums.py` 的值、不问模型要
-    confidence 以外的任何决定、看不清必须进 `unreadable_fields`。
-
-    **不包含 `known`、不包含商品标题、不包含供应商描述** —— 这些都是锚定源。
-    模型看到 `{"primary_color": "NAVY"}` 之后就会把图判成 NAVY,
-    所谓交叉验证只是复读我们喂进去的答案。
-    """
-    names = tuple(fields or extractable_fields(audience))
-    enums = enum_definitions(audience)
-    lines = [
+#: 字段清单必须保留为运行时槽位：受众和本次目标字段会改变它。使用 replace 而非
+#: str.format，正文里的 JSON 花括号因此无需转义，运营也可以直接编辑示例 JSON。
+EXTRACTION_PROMPT_TEMPLATE = "\n".join(
+    (
         "你在看一张服装商品图片。请**只根据这张图片**判断下列属性。",
         "",
         "严格要求:",
@@ -202,14 +191,36 @@ def build_extraction_prompt(
         '{"fields":[],"unreadable_fields":[],"missing":[]}',
         "",
         "需要判断的字段:",
-    ]
+        "{field_lines}",
+    )
+)
+
+
+def build_extraction_prompt(
+    fields: tuple[str, ...] | None = None,
+    *,
+    audience: Audience | None = None,
+    template: str = EXTRACTION_PROMPT_TEMPLATE,
+) -> str:
+    """识别提示词。
+
+    三条约束(§6.1):枚举值只能取 `core/enums.py` 的值、不问模型要
+    confidence 以外的任何决定、看不清必须进 `unreadable_fields`。
+
+    **不包含 `known`、不包含商品标题、不包含供应商描述** —— 这些都是锚定源。
+    模型看到 `{"primary_color": "NAVY"}` 之后就会把图判成 NAVY,
+    所谓交叉验证只是复读我们喂进去的答案。
+    """
+    names = tuple(fields or extractable_fields(audience))
+    enums = enum_definitions(audience)
+    field_lines: list[str] = []
     for name in names:
         spec = REGISTRY[name]
         allowed = enums.get(name)
         suffix = f",取值:{'、'.join(allowed)}" if allowed else "(自由文本)"
         multi = ",可多值" if spec.multi_value else ""
-        lines.append(f"  - {name}{multi}{suffix}")
-    return "\n".join(lines)
+        field_lines.append(f"  - {name}{multi}{suffix}")
+    return template.replace("{field_lines}", "\n".join(field_lines))
 
 
 def normalize_value(field_name: str, raw: Any) -> str | None:

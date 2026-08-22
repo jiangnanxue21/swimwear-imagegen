@@ -122,7 +122,7 @@ export default function WorkbenchProductPage() {
   }, [headerTarget, tab])
 
   // 走查 P1-5:带上 SKU。同时开几个详情标签时,标签栏上四个
-  // 「商品展示图生产台」是分不出来的
+  // 「服装商品运营平台」是分不出来的
   useDocumentTitle(query.data?.product.sku)
 
   const stepOf = useMemo(() => {
@@ -247,7 +247,7 @@ export default function WorkbenchProductPage() {
                 size="small"
                 title={
                   blocking
-                    ? `${blocking} 条阻断问题,不解决走不到导出`
+                    ? `${blocking} 条阻断问题，解决后才能导出`
                     : `${pending} 条等你确认`
                 }
               >

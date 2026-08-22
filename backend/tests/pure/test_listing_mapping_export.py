@@ -178,6 +178,8 @@ def test_spec_rejects_an_unparseable_source_expression():
     try:
         load_spec_dict(raw, site="MAIN", category_id="swimwear")
     except ChannelSpecError:
+        # 吞的是**期望中的那一个**:下面的 `else` 在它没抛时失败。
+        # `tests/pure/` 不许 import pytest,所以没有 `pytest.raises`。
         pass
     else:
         raise AssertionError("非法 source 表达式应当在加载期被拒绝")

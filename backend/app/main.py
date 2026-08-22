@@ -261,7 +261,7 @@ def create_app() -> FastAPI:
     # 判据用 `is_production` 那一份,不在这里再写一遍字符串比较。
     docs_enabled = not settings.is_production
     app = FastAPI(
-        title="网站商品展示图自动生成系统",
+        title="服装商品运营平台",
         version="0.2.0",
         description="泳衣/服装商品展示图生产流水线。当前完成阶段 1-2(骨架 + 商品与素材)。",
         lifespan=lifespan,

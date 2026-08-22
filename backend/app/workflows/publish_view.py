@@ -78,7 +78,7 @@ class PublishDisplayStatus(StrEnum):
 DISPLAY_STATUS_LABELS: Mapping[str, str] = {
     PublishDisplayStatus.NOT_SUBMITTED: "未提交",
     PublishDisplayStatus.NEEDS_FIX: "待修复",
-    PublishDisplayStatus.DRY_RUN_DONE: "干跑完成(未提交)",
+    PublishDisplayStatus.DRY_RUN_DONE: "预览完成（未提交）",
     PublishDisplayStatus.QUEUED: "已排队",
     PublishDisplayStatus.IN_FLIGHT: "提交中",
     PublishDisplayStatus.PLATFORM_REVIEWING: "平台审核中",
@@ -121,7 +121,7 @@ class ActionCode(StrEnum):
 
 ACTION_LABELS: Mapping[str, str] = {
     ActionCode.SUBMIT: "提交",
-    ActionCode.DRY_RUN: "干跑",
+    ActionCode.DRY_RUN: "预览报文",
     ActionCode.POLL: "刷新状态",
     ActionCode.DELIST: "下架",
     # 措辞刻意不叫"重试":那两个字会让人以为点了就重新提交一次。

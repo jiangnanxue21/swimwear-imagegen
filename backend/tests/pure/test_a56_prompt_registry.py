@@ -17,9 +17,13 @@ from app.evaluators.vision_schema import (
     ANTI_INJECTION_BLOCK,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT_MEN,
+    SCORING_DEPTH_INSTRUCTIONS_KEY,
+    SCORING_USER_PROMPT_KEY,
     VISION_SYSTEM_PROMPT,
     VISION_SYSTEM_PROMPT_MEN,
 )
+from app.extractors.schema import EXTRACTION_PROMPT_KEY
+from app.listings.copy_generator import COPY_LLM_SYSTEM_PROMPT_KEY
 from app.prompts import registry
 from app.prompts.versioning import content_version
 from app.services.prompt_rules import KNOWN_KEYS, lint_prompt
@@ -59,12 +63,34 @@ def test_every_surface_answers_the_inventory_questions():
             )
 
 
-def test_the_mapping_tier_is_read_only_this_round():
-    """MAPPING 层本轮只读(PRD §14.2 决议)。改它等于改修复策略。"""
+def test_every_surface_has_a_human_readable_preview():
+    """登记不等于可用：提示词中心必须让人看到正文，而不只是 key 和代码路径。"""
+    for surface in registry.PROMPT_SURFACES:
+        preview = registry.resolve_preview(surface)
+        assert preview is not None, f"{surface.key} 没有可展示的正文"
+        assert registry.preview_text(surface).strip(), f"{surface.key} 的正文不能序列化展示"
+        if callable(registry.resolve_default(surface)):
+            assert isinstance(preview, str) and preview.strip(), (
+                f"{surface.key} 是动态构造器，却没有给出代表性展开结果"
+            )
+
+    generation = registry.surface_of("generation_prompt_compose")
+    assert generation is not None
+    rendered = registry.resolve_preview(generation)
+    assert isinstance(rendered, str)
+    assert "商业电商影棚" in rendered and "FRONT×1" in rendered
+
+
+def test_mapping_surfaces_are_editable_json_with_a_real_key_source():
+    """MAPPING 可以改值，但默认正文和固定键必须都可校验。"""
     for surface in registry.PROMPT_SURFACES:
         if surface.tier is registry.Tier.MAPPING:
-            assert not surface.editable, f"{surface.key} 是 MAPPING 却标了可编辑"
+            assert surface.editable, f"{surface.key} 的消费链路已经接库却仍不可编辑"
             assert surface.key_source, f"{surface.key} 没写 key_source"
+            default = registry.resolve_default(surface)
+            assert isinstance(default, str)
+            assert isinstance(json.loads(default), dict)
+            assert registry.mapping_keys(surface)
 
 
 def test_unreachable_surfaces_say_why():
@@ -86,13 +112,20 @@ def test_unreachable_surfaces_say_why():
 def test_editable_means_the_consumer_actually_reads_the_store():
     """`editable` 的语义 = 消费链路读库。两边不许分叉。
 
-    评分链路的两个用途常量(`vision_schema`)是唯一走
-    `get_active_content` 的消费方 —— `KNOWN_KEYS`(保存端点的准入)必须
-    恰好等于注册表的 editable 集合,且值与改造前逐字节相同:对其余 6 处
-    放行落库,得到的是「保存成功、毫无效果」。
+    保存端点准入必须恰好等于注册表 editable 集合；新增项还必须在下面列出，
+    避免只翻一个布尔值就制造「保存成功、消费方不读」的假编辑。
     """
     assert KNOWN_KEYS == registry.editable_keys()
-    assert KNOWN_KEYS == (VISION_SYSTEM_PROMPT, VISION_SYSTEM_PROMPT_MEN)
+    assert KNOWN_KEYS == (
+        VISION_SYSTEM_PROMPT,
+        VISION_SYSTEM_PROMPT_MEN,
+        SCORING_USER_PROMPT_KEY,
+        SCORING_DEPTH_INSTRUCTIONS_KEY,
+        EXTRACTION_PROMPT_KEY,
+        COPY_LLM_SYSTEM_PROMPT_KEY,
+        "repair_prompt_additions",
+        "generation_prompt_compose",
+    )
 
 
 def test_the_registry_only_depends_on_core():
@@ -142,11 +175,11 @@ def test_the_three_pipelines_derive_their_version_from_content():
     识别与文案在沙箱可直接行为验证;出图链路 import sqlalchemy,
     对它做源码断言 —— 这里断的是「接线存在」,不是行号形状。
     """
-    from app.extractors.schema import build_extraction_prompt
+    from app.extractors.schema import EXTRACTION_PROMPT_TEMPLATE
     from app.extractors.vision import _EXTRACTION_PROMPT_VERSION
     from app.listings.copy_generator import _LLM_PROMPT_VERSION, LLM_SYSTEM_PROMPT
 
-    assert _EXTRACTION_PROMPT_VERSION == content_version(build_extraction_prompt())
+    assert _EXTRACTION_PROMPT_VERSION == content_version(EXTRACTION_PROMPT_TEMPLATE)
     assert _LLM_PROMPT_VERSION == content_version(LLM_SYSTEM_PROMPT)
 
     # 「旧常量已删」用 AST 判模块级赋值名,不用源码子串 —— 讲述删除理由的
@@ -219,9 +252,27 @@ def test_a_template_missing_a_slot_is_named_not_hinted():
     )
 
 
-def test_the_mapping_lint_only_asks_if_it_parses():
-    """MAPPING 层本轮只验「结构可解析」,键封闭性推迟(§14.2)。"""
-    assert not lint_prompt("repair_prompt_additions", json.dumps({"A": "b"}))
+def test_mapping_lint_checks_json_and_the_code_owned_key_closure():
+    """MAPPING 值可改，删掉代码键或凭空造键都会被明确指出。"""
+    repair = registry.surface_of("repair_prompt_additions")
+    assert repair is not None
+    default = registry.resolve_default(repair)
+    assert isinstance(default, str)
+    assert not lint_prompt("repair_prompt_additions", default)
+
+    one_key = registry.mapping_keys(repair)[0]
+    missing = [w.code for w in lint_prompt(
+        "repair_prompt_additions", json.dumps({one_key: {}})
+    )]
+    assert "missing_mapping_keys" in missing
+
+    parsed = json.loads(default)
+    parsed["NOT_REGISTERED"] = {}
+    unexpected = [w.code for w in lint_prompt(
+        "repair_prompt_additions", json.dumps(parsed)
+    )]
+    assert "unexpected_mapping_keys" in unexpected
+
     bad = [w.code for w in lint_prompt("repair_prompt_additions", "{半截")]
     assert bad == ["invalid_json"]
     not_object = [w.code for w in lint_prompt("repair_prompt_additions", "[1,2]")]

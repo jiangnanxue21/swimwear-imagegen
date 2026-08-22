@@ -14,8 +14,10 @@ import { useWriteError } from '../hooks/useWriteError'
 import { saveBlob } from '../api/batch'
 import ErrorNotice from '../components/ErrorNotice'
 import {
-  ASSET_TYPE_LABEL, STATUS_LABEL, type Asset, type AssetType, type Product,
+  ASSET_TYPE_LABEL, AUDIENCE_LABEL, COMPLEXITY_LABEL, GARMENT_TYPE_LABEL,
+  PATTERN_TYPE_LABEL, STATUS_LABEL, type Asset, type AssetType, type Product,
 } from '../api/types'
+import { categoryLabel } from '../api/spus'
 import ProductFormModal from '../components/ProductFormModal'
 import TaskCreateModal from '../components/TaskCreateModal'
 import { generationApi } from '../api/generation'
@@ -281,9 +283,14 @@ export default function ProductDetailPage() {
         <Descriptions size="small" column={2} bordered>
           <Descriptions.Item label="商品名称" span={2}>{p.name}</Descriptions.Item>
           <Descriptions.Item label="SPU">{p.spu}</Descriptions.Item>
-          <Descriptions.Item label="类别">{p.category}</Descriptions.Item>
-          <Descriptions.Item label="服装类型">{p.garment_type}</Descriptions.Item>
-          <Descriptions.Item label="图案类型">{p.pattern_type}</Descriptions.Item>
+          <Descriptions.Item label="品类">{categoryLabel(p.category)}</Descriptions.Item>
+          <Descriptions.Item label="受众">{p.audience ? AUDIENCE_LABEL[p.audience] : '待确认'}</Descriptions.Item>
+          <Descriptions.Item label="服装类型">
+            {GARMENT_TYPE_LABEL[p.garment_type] ?? p.garment_type}
+          </Descriptions.Item>
+          <Descriptions.Item label="图案类型">
+            {PATTERN_TYPE_LABEL[p.pattern_type] ?? p.pattern_type}
+          </Descriptions.Item>
           <Descriptions.Item label="主颜色">{p.primary_color || '—'}</Descriptions.Item>
           <Descriptions.Item label="辅助颜色">
             {p.secondary_colors.length ? p.secondary_colors.join(' / ') : '—'}
@@ -291,7 +298,9 @@ export default function ProductDetailPage() {
           <Descriptions.Item label="肩带">{p.strap_type}</Descriptions.Item>
           <Descriptions.Item label="领口">{p.neckline_type}</Descriptions.Item>
           <Descriptions.Item label="背部样式">{p.back_style}</Descriptions.Item>
-          <Descriptions.Item label="复杂度">{p.complexity}</Descriptions.Item>
+          <Descriptions.Item label="复杂度">
+            {COMPLEXITY_LABEL[p.complexity] ?? p.complexity}
+          </Descriptions.Item>
           <Descriptions.Item label="材质" span={2}>{p.material || '—'}</Descriptions.Item>
           {p.notes && <Descriptions.Item label="备注" span={2}>{p.notes}</Descriptions.Item>}
         </Descriptions>

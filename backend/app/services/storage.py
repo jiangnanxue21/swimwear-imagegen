@@ -587,15 +587,15 @@ def build_storage(
         # 不做"除了 local 都算生产"的推断。
         try:
             from app.core.config import settings as _settings
-
+        except ImportError:  # 被裁剪过的运行环境:读不到配置就不做这个判断
+            pass
+        else:
             if _settings.is_production:
                 raise ConfigError(
                     "生产环境不允许使用本地文件存储(STORAGE_BACKEND=local):"
                     "容器重建会丢掉全部素材与导出文件,而数据库里的引用还在。"
                     "请配置 S3 兼容存储,或把 APP_ENV 改成非生产值。"
                 )
-        except ImportError:  # 被裁剪过的运行环境:读不到配置就不做这个判断
-            pass
         return LocalObjectStorage(base_dir, public_base_url, api_prefix)
     if backend == "s3":
         # 配置在这里读而不是在类里读:类保持可注入,便于测试

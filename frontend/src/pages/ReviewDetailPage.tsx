@@ -86,7 +86,7 @@ export default function ReviewDetailPage() {
     enabled: Boolean(id),
   })
 
-  useDocumentTitle(query.data ? `审核 ${query.data.product_sku}` : '图片人工审核')
+  useDocumentTitle(query.data ? `审核 ${query.data.product_sku}` : '候选图人工审核')
   const rules = useQuery({ queryKey: ['rule-sets'], queryFn: evaluationApi.ruleSets })
   const providers = useQuery({ queryKey: ['providers'], queryFn: providersApi.list })
 

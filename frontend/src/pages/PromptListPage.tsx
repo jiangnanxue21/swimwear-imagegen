@@ -1,7 +1,7 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Alert, Card, Space, Table, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Input, Space, Table, Tooltip, Typography } from 'antd'
 
 import { promptsApi } from '../api/prompts'
 import { isAuthError } from '../api/client'
@@ -25,14 +25,10 @@ const { Text, Paragraph } = Typography
  * 也答不出"这个 key 的默认值还解析得出来吗"。a56 把那份盘点变成了机器可读的
  * 注册表(`app/prompts/registry.py`)并开了 `GET /prompts`,这一页是它的消费方。
  *
- * ## 不可编辑的项照样列出来,而且要说清为什么
+ * ## 可编辑性由真实消费链路决定
  *
- * 8 处里只有评分两份的消费链路会读库。其余 6 处的正文由代码拼装或引用常量,
- * 库里存一版新的,链路**一个字都不会读** —— 给它们开编辑入口,得到的是
- * 「保存成功、毫无效果」,比不给入口更伤人,因为它连报错都没有。
- *
- * 但**不给入口不等于不列出来**:一个运营看不见的提示词,出问题时没有人会想到
- * 它的存在。所以这里全部列出,不可编辑的那些原样显示注册表里写的原因。
+ * 可编辑性以消费链路是否读取版本库为准。现在登记的 8 处都已完成运行时接线；
+ * TEMPLATE 保留代码填充槽位，MAPPING 保留代码键，但二者的措辞和值都能版本化编辑。
  *
  * ## 「近 N 天调用」这一列(a70 补齐,FE-301 至此完整)
  *
@@ -51,7 +47,7 @@ const { Text, Paragraph } = Typography
 const TIER_LABEL: Record<PromptTier, string> = {
   FREE: '全文可改',
   TEMPLATE: '模板(槽位固定)',
-  MAPPING: '键值映射(只读)',
+  MAPPING: '键值映射(键固定)',
 }
 
 /** 分组顺序 = 可改的排前面。运营打开这一页是来改东西的,不是来读架构的。 */
@@ -60,7 +56,7 @@ const TIER_ORDER: PromptTier[] = ['FREE', 'TEMPLATE', 'MAPPING']
 const TIER_NOTE: Record<PromptTier, string> = {
   FREE: '整段正文可以改。保存前会跑一遍体检,但不拦截。',
   TEMPLATE: '措辞可以改,必需槽位一个都不能少 —— 少一个,拼出来的提示词会缺一整块上下文。',
-  MAPPING: '问题代码到修复动作的映射。改它等于改修复策略,风险高于改措辞,本轮只读。',
+  MAPPING: 'JSON 的值可以编辑；FULL / QUICK 等代码键必须保留，体检会指出缺失或意外新增的键。',
 }
 
 function reasonOf(surface: PromptSurface): string | null {
@@ -80,6 +76,13 @@ export default function PromptListPage() {
     retry: (count, err) => !isAuthError(err) && count < 2,
   })
   const needsLogin = query.isError && isAuthError(query.error)
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([])
+
+  const togglePreview = (key: string) => {
+    setExpandedKeys((current) => (
+      current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+    ))
+  }
 
   // 统计起点先转成人读得懂的形式再交给判定层 —— 那一层不该知道时区与格式。
   // 后端给 null(还没有任何带归属的留痕)时原样传 null,不要变成 "—":
@@ -112,7 +115,7 @@ export default function PromptListPage() {
       title: '当前生效',
       width: 160,
       render: (_: unknown, row: PromptSurface) => {
-        if (!row.editable) return <Text type="secondary">由代码拼装</Text>
+        if (!row.editable) return <Text type="secondary">代码策略（只读）</Text>
         return row.active_version == null ? (
           <BrandTag tone="sand">内置默认</BrandTag>
         ) : (
@@ -124,8 +127,8 @@ export default function PromptListPage() {
       title: recentColumnTitle(query.data?.stats_window_days),
       width: 210,
       render: (_: unknown, row: PromptSurface) => {
-        // `stats` 只有 editable 的项带 —— 其余几处的链路不读库,调用不经过
-        // 评分留痕。`recentLabel` 对 undefined 给「不统计」而不是「0 次」
+        // `stats` 只给真实写入 evaluation_attempts 的评分项。可编辑的文案/出图
+        // 也不能拿一个假 0 冒充“没人用过”。
         const display = recentLabel(row.stats, statsSince)
         const body = (
           <Text type={display.tone === 'muted' ? 'secondary' : undefined}>{display.text}</Text>
@@ -163,13 +166,28 @@ export default function PromptListPage() {
         )
       },
     },
+    {
+      title: '操作',
+      width: 150,
+      render: (_: unknown, row: PromptSurface) => (
+        row.editable && row.ui_reachable ? (
+          <Link to={`/prompts/${row.key}`}>
+            <Button type="primary" size="small">查看并编辑</Button>
+          </Link>
+        ) : (
+          <Button size="small" onClick={() => togglePreview(row.key)}>
+            {expandedKeys.includes(row.key) ? '收起正文' : '查看正文'}
+          </Button>
+        )
+      ),
+    },
   ]
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <PageHeader
         title="提示词"
-        subtitle="全仓 8 处提示词的盘点。能改的进详情页改,不能改的写明为什么"
+        subtitle="每一处都能查看正文；运行时真正读取版本库的提示词可以直接编辑"
       />
 
       {needsLogin && (
@@ -192,12 +210,11 @@ export default function PromptListPage() {
       <Alert
         type="info"
         showIcon
-        message="「不可编辑」的意思是改了不会生效,不是不重要"
+        message="提示词已统一接入版本库，可以查看、编辑和回滚"
         description={
           <Paragraph style={{ marginBottom: 0 }}>
-            这 8 处里只有评分用的两份会在运行时读数据库。其余几处的正文由代码拼装,
-            存一版新的进库,链路<Text strong>一个字都不会读</Text> —— 所以这里不给编辑入口,
-            而不是给一个保存成功却毫无效果的按钮。要改它们,改代码。
+            评分用户段会保留运行时槽位；评分深度指令和修复补丁表以 JSON 编辑并校验固定键。
+            每次评分或生成都会读取当前生效版本，历史版本可随时查看和切回。
           </Paragraph>
         }
       />
@@ -216,6 +233,24 @@ export default function PromptListPage() {
               pagination={false}
               columns={columns}
               dataSource={rows}
+              expandable={{
+                expandedRowKeys: expandedKeys,
+                onExpandedRowsChange: (keys) => setExpandedKeys(keys.map(String)),
+                rowExpandable: (row) => Boolean(row.content_preview),
+                expandedRowRender: (row) => (
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    {row.preview_note && <Text type="secondary">{row.preview_note}</Text>}
+                    <Input.TextArea
+                      aria-label={`${row.label}正文`}
+                      value={row.content_preview}
+                      readOnly
+                      autoSize={{ minRows: 8, maxRows: 28 }}
+                      spellCheck={false}
+                      style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
+                    />
+                  </Space>
+                ),
+              }}
             />
           </Space>
         </Card>

@@ -2595,6 +2595,18 @@ def _load_bytes(item) -> bytes:
         try:
             result_provider = get_provider(provider_name)
         except ValidationError:
+            # **忽略是安全的,因为这条路径只增不减信任。**
+            #
+            # 拿不到 Provider 时 `allowed_hosts` 保持上面那一行取出来的原值,
+            # 也就是配置里的白名单 —— 下面 `check_download_url` 照常按它校验。
+            # 换句话说这个分支的全部作用是「不给这次结果域名补充额外信任」,
+            # 而默认拒绝的姿态没有被削弱。
+            #
+            # 不改成告警的理由:能走到这里的是**候选图 metadata 里的 provider 名
+            # 认不出来**,而那个名字由适配器写入、不是厂商响应透传。它认不出来
+            # 通常意味着某个 Provider 被下线或改名,而这件事在别处已经有更准的
+            # 出口(创建任务时就会被挡下)。在下载这一步再报一次,只会把一条
+            # 已经被处理过的配置问题伪装成一次下载失败。
             pass
         else:
             allowed_hosts = result_provider.result_download_allowed_hosts(

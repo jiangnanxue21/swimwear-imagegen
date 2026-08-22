@@ -21,8 +21,9 @@
 而回归里更常见的恰恰是后者 —— 一次重构顺手把一个看起来多余的条件去掉,
 测试全绿,而重复扣费在三个月后的账单上出现。
 
-真正的行为验证在 `docs/REVIEW-A45-BATCH12-2.md` 第 E 节列的那六组故障注入
-测试里,它们需要真 PostgreSQL,跑在 CI 上。
+真正的行为验证是那六组故障注入测试,它们需要真 PostgreSQL,跑在 CI 上。
+(列出它们的那份批次评审文档已删 —— 口径与结论去处见
+`docs/DECISIONS.md` §3.107。)
 """
 from __future__ import annotations
 

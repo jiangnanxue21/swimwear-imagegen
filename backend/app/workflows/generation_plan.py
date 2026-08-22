@@ -67,6 +67,13 @@ PLAN_FINGERPRINT_VERSION = "v2"
 #: 路人/文字/水印。把 token 花在这些可见约束上，比堆审美词更稳定。
 DEFAULT_SCENE_KEY = "STUDIO_CLEAN"
 DEFAULT_POSE_KEY = "NATURAL_STANDING"
+GENERATION_PROMPT_KEY = "generation_prompt_compose"
+
+#: 四个槽位的值都已经带好分隔符，模板编辑不会承担“空场景是否多一个分号”的逻辑。
+#: 使用 replace 而不是 str.format：运营正文里合法出现 JSON 花括号时不能炸掉任务。
+GENERATION_PROMPT_TEMPLATE = (
+    "{base_prompt}{scene_segment}{pose_segment}{angles_segment}"
+)
 
 SCENE_PROMPT_PROFILES: dict[str, str] = {
     "STUDIO_CLEAN": (
@@ -389,12 +396,10 @@ def budget_verdict(
     预估。两个都用 Decimal:金额用 float 比较会在边界上给出
     "已花 9.999999999 < 上限 10" 这种放行,而那正是上限存在的意义所在。
 
-    ## `estimated=None` 是「估不出来」,不是「零」(2026-08-11 评审)
+    ## `estimated=None` 是「估不出来」,不是「零」
 
-    这里原来写的是 `plan = _decimal(estimated) or Decimal(0)` —— 于是 None、
-    0、和一个解析不出来的值全部塌成 0。而调用方
-    (`generation_service.plan_budget_verdict`)当时**连 `estimated` 都没传**,
-    所以这道闸实际执行的是:
+    把 None、0 与解析不出来的值一起塌成 0(`_decimal(estimated) or Decimal(0)`)
+    会让这道闸执行成:
 
         已花 9.9,上限 10,本次预计 5   ->   9.9 < 10   ->   放行
 
@@ -719,6 +724,7 @@ def compose_prompt(
     scene: Any = None,
     pose: Any = None,
     angles: Iterable[AngleRequirement] = (),
+    template: str = GENERATION_PROMPT_TEMPLATE,
 ) -> str | None:
     """把方案的场景 / 姿势 / 角度并进提示词。
 
@@ -746,24 +752,46 @@ def compose_prompt(
     `build_idempotency_key` 里被归一成同一个值,但在 `GenerationTask.prompt`
     列上不是 —— 一个是"没写",一个是"写了个空的"。
     """
-    parts: list[str] = []
     head = _text(base_prompt)
-    if head:
-        parts.append(head)
+    has_previous = bool(head)
     scene_text = _text(scene)
+    scene_segment = ""
     if scene_text:
-        parts.append(_scene_prompt(scene_text))
+        scene_segment = (";" if has_previous else "") + _scene_prompt(scene_text)
+        has_previous = True
     pose_text = _text(pose)
+    pose_segment = ""
     if pose_text:
-        parts.append(_pose_prompt(pose_text))
+        pose_segment = (";" if has_previous else "") + _pose_prompt(pose_text)
+        has_previous = True
     wanted = tuple(angles)
+    angles_segment = ""
     if wanted:
-        parts.append(
+        angles_segment = (";" if has_previous else "") + (
             "拍摄角度:" + "、".join(f"{a.angle}×{a.count}" for a in wanted)
         )
-    if not parts:
+    if not any((head, scene_segment, pose_segment, angles_segment)):
         return base_prompt if base_prompt is None else head
-    return ";".join(parts)
+    return (
+        template.replace("{base_prompt}", head)
+        .replace("{scene_segment}", scene_segment)
+        .replace("{pose_segment}", pose_segment)
+        .replace("{angles_segment}", angles_segment)
+    )
+
+
+def preview_generation_prompt() -> str:
+    """提示词中心用的代表性出图正文，不参与生产任务构造。"""
+    preview = compose_prompt(
+        "保持商品与参考图一致，准确还原颜色、图案、结构和覆盖面积；"
+        "服装主体完整清晰，不添加不存在的部件、文字、水印或配饰",
+        scene=DEFAULT_SCENE_KEY,
+        pose=DEFAULT_POSE_KEY,
+        angles=normalize_angles({ImageAngle.FRONT.value: 1, ImageAngle.BACK.value: 1}),
+    )
+    if not preview:  # 固定输入不应得到空值；不用 assert，避免 python -O 剥掉守卫。
+        raise RuntimeError("代表性出图提示词构造为空")
+    return preview
 
 
 # ---------------------------------------------------------------- 小工具

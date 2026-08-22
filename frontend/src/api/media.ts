@@ -9,6 +9,19 @@ export type MediaRole =
 
 export type MediaStatus = 'PENDING' | 'READY' | 'QUARANTINED' | 'FAILED' | 'DELETED'
 
+/**
+ * 素材生命周期文案。放在接口层，避免不同页面各自翻译同一状态。
+ * `QUARANTINED` 说“已隔离”而不是“不合规”：预检可能误判，隔离只表示
+ * 暂时拦下等待复核。
+ */
+export const MEDIA_STATUS_LABEL: Record<MediaStatus, { text: string; color: string }> = {
+  READY: { text: '可用', color: 'green' },
+  PENDING: { text: '待处理', color: 'default' },
+  QUARANTINED: { text: '已隔离', color: 'orange' },
+  FAILED: { text: '入库失败', color: 'red' },
+  DELETED: { text: '已删除', color: 'default' },
+}
+
 export interface MediaAsset {
   id: string
   product_id: string

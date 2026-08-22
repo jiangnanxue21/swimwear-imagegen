@@ -196,6 +196,9 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
         # 图片排除必须真的接在**枚举与复验共用**的那条判定上。
         # 只声明数组、不接线的话,数组比对那一段照样通过 —— 而包里还有那张图。
         "Test-ImageUnderImageFreeDir",
+        # 同上,换成「不随包」那一组:数组声明了而没有人读它,
+        # 表现是 Windows 打出来的包比 Linux 的胖一截,两边都打印 OK。
+        "Test-NotShippedFile",
     )
     missing = [marker for marker in required_markers if marker not in windows_body]
     if missing:
@@ -232,6 +235,9 @@ def check_the_pack_script_excludes_and_then_verifies() -> None:
         "IMAGE_FREE_DIRS": "ImageFreeDirs",
         "IMAGE_EXTENSIONS": "ImageExtensions",
         "FORBIDDEN_FILES": "ForbiddenFiles",
+        # 「不随包」这一组。它比禁品轻,但**分叉的表现一模一样**:
+        # 一边排掉了、另一边没有,而两台机器各自跑的时候都显示 OK。
+        "NOT_SHIPPED_FILES": "NotShippedFiles",
         "ENV_EXAMPLES": "EnvExamples",
         "REQUIRED": "Required",
     }
@@ -253,6 +259,162 @@ def check_backend_dockerignore_excludes_the_key_directory() -> None:
     for pattern in (".secrets/", ".env"):
         if pattern not in body:
             raise Failure(f"backend/.dockerignore 没排除 {pattern}")
+
+
+# ---------------------------------------------------------------- 两条出口的一致性
+#
+# H-1 暴露的模式是通用的:凡「不该出去的东西」都有两条出口 —— `git clone`
+# 与交付包 —— 而现有三道拦截只对**凭据类**做了两侧核对。图片类、日志类当时
+# 只有单侧:`tools/pack.sh` 排掉了 `data/` 的图片,`.gitignore` 一条规则都没有,
+# 于是 GitHub 的 Download ZIP 里躺着两张共 11 MB 的 JPG,而三道门禁全绿。
+#
+# 下面两条把核对补成双向。它们读的是同一份 `tools/pack.sh` 声明,所以
+# 「改一边忘了另一边」这件事从此会当场变红,而不是等下一次有人去量包体积。
+
+
+def _pack_sh_array(name: str) -> list[str]:
+    """从 `tools/pack.sh` 里读一个 shell 数组的字面量。
+
+    刻意不 import、不执行 —— 和 `audit_anchors.py` 的口径同一条:审计要能在
+    被审对象自己有问题时照样给出答案。
+    """
+    script = PROJECT_ROOT / "tools" / "pack.sh"
+    body = script.read_text(encoding="utf-8")
+    match = re.search(rf"^{re.escape(name)}=\((.*?)\n\)", body, re.DOTALL | re.MULTILINE)
+    if not match:
+        raise Failure(f"tools/pack.sh 里找不到 {name} 数组 —— 两条出口的核对失去了依据")
+    return shlex.split(match.group(1), comments=True, posix=True)
+
+
+def check_the_two_exits_declare_the_same_image_extensions() -> None:
+    """`.gitignore` 的 `data/` 图片扩展名集合 == `pack.sh` 的 `IMAGE_EXTENSIONS`。
+
+    ## 为什么是集合相等,不是「gitignore 至少覆盖了」
+
+    单向包含挡不住真正会发生的那个错:有人往 `IMAGE_EXTENSIONS` 加一种新格式
+    (`.jxl`),两条出口只改了打包那一条。此时 `.gitignore` 仍然是 pack.sh 的
+    子集,单向检查照样绿,而那种图从此可以进 git。反过来也一样 —— gitignore
+    多一种而 pack 少一种,表现是交付包胖了而没有人知道为什么。
+
+    两份清单要么同源,要么迟早分叉。这里没有第三种状态可选。
+    """
+    extensions = set(_pack_sh_array("IMAGE_EXTENSIONS"))
+    image_free_dirs = _pack_sh_array("IMAGE_FREE_DIRS")
+
+    body = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    problems: list[str] = []
+    for directory in image_free_dirs:
+        declared = set(re.findall(rf"^{re.escape(directory)}/\*\.([A-Za-z0-9]+)\s*$", body, re.MULTILINE))
+        missing = sorted(extensions - declared)
+        extra = sorted(declared - extensions)
+        if missing:
+            problems.append(
+                f".gitignore 里 {directory}/ 少了这几种:{missing} —— "
+                f"pack.sh 拦得住交付包,拦不住 git clone 与 Download ZIP"
+            )
+        if extra:
+            problems.append(
+                f".gitignore 里 {directory}/ 多了这几种:{extra} —— "
+                f"pack.sh 的 IMAGE_EXTENSIONS 没有它们,交付包会照样带出去"
+            )
+    if problems:
+        raise Failure(
+            "两条出口的图片清单分叉了。改一边必须同步另一边:\n  "
+            + "\n  ".join(problems)
+        )
+
+
+#: 打包侧声明了、而 `.gitignore` **不该**有对应规则的条目,以及为什么。
+#:
+#: 一条没有理由的豁免会长大 —— 下一个被这道检查拦住的人最省事的做法就是把
+#: 自己那条加进来。写理由这件事本身是闸:写不出理由的时候人会回去改规则。
+_PACK_RULES_WITHOUT_A_GITIGNORE_RULE: dict[str, str] = {
+    "docs/overview.html": (
+        "它是仓库内容,必须被 git 跟踪 —— 不随包只是体积取舍。"
+        "给它加 .gitignore 规则会让这份图册在下一次 clone 里消失"
+    ),
+}
+
+
+def check_every_pack_rule_has_a_gitignore_counterpart() -> None:
+    """`pack.sh` 的单文件禁品与不随包清单,`.gitignore` 要有语义等价的规则。
+
+    ## 判据是「git 那条出口有没有人管」,不是字面相同
+
+    两种语法本来就不一样(`-x` 的 glob 与 gitignore 的 pattern),所以比字面
+    没有意义。这里比的是**这个东西在 git 那一侧有没有被声明过**:
+    不含 `/` 的按 basename 找,含 `/` 的按整条路径找。
+
+    找不到时有两条出路,而两条都要人做判断:补一条 gitignore 规则,或者进
+    上面那张豁免表并写清为什么。**不接受整批豁免** —— 那等于把这道检查关掉,
+    而它要防的正是"只在一条出口上修了"这件事本身。
+    """
+    body = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    rules = {
+        line.strip().lstrip("/")
+        for line in body.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    def declared(entry: str) -> bool:
+        candidates = {entry, entry.rstrip("/"), f"{entry}/"}
+        if "/" not in entry:
+            # gitignore 里不含斜杠的 pattern 本来就是任意层级匹配,
+            # 所以 `.claude/settings.local.json` 这种路径锚定的写法**不算**
+            # 等价 —— 它只盖住一个目录,而 pack.sh 那侧盖住全树。
+            return bool(candidates & rules)
+        return bool(candidates & rules)
+
+    missing: list[str] = []
+    for name in ("FORBIDDEN_FILES", "NOT_SHIPPED_FILES"):
+        for entry in _pack_sh_array(name):
+            if entry in _PACK_RULES_WITHOUT_A_GITIGNORE_RULE:
+                continue
+            if not declared(entry):
+                missing.append(f"{entry}(来自 pack.sh 的 {name})")
+
+    stale = sorted(
+        entry
+        for entry in _PACK_RULES_WITHOUT_A_GITIGNORE_RULE
+        if entry not in set(_pack_sh_array("FORBIDDEN_FILES")) | set(_pack_sh_array("NOT_SHIPPED_FILES"))
+    )
+    if stale:
+        raise Failure(
+            "豁免表里有条目已经不在 pack.sh 的清单里,它现在什么都不豁免:\n  "
+            + "\n  ".join(stale)
+        )
+    if missing:
+        raise Failure(
+            "这些东西只在交付包那一条出口上被拦着,git 那条原样漏着:\n  "
+            + "\n  ".join(missing)
+            + "\n补一条 .gitignore 规则,或者进 _PACK_RULES_WITHOUT_A_GITIGNORE_RULE 并写清理由。"
+        )
+
+
+def check_no_one_time_mutation_scripts_are_back() -> None:
+    """`backend/tools/` 下不许再出现 `mutate_*` 前缀的文件。
+
+    ## 防的是回潮,不是防变异验证
+
+    变异验证本身没有被否定 —— 它抓过失锚、抓过"守卫在说假话",这些记在
+    `docs/DECISIONS.md` §3.107 里。被否定的是**把跑完的一次性脚本留在树里**:
+    39 份 `mutate_*` 加 4 份复核脚本,产出早已固化进源码,对后续开发者是纯噪音,
+    而每一份都还带着一组会过期的锚点。
+
+    清退容易,不回潮难:下一轮做变异验证的人最自然的动作就是再往这里放一份。
+    所以口径写成规矩(交付后即删,考古走 git 历史),规矩配一条会响的检查。
+    """
+    tools = BACKEND / "tools"
+    offenders = sorted(p.name for p in tools.glob("mutate_*") if p.is_file())
+    if (tools / "recheck").exists():
+        offenders.append("recheck/")
+    if offenders:
+        raise Failure(
+            "backend/tools/ 下又有一次性脚本了:\n  "
+            + "\n  ".join(offenders)
+            + "\n按 DECISIONS §3.107,变异与复核脚本随对应批次交付后即删,"
+            "不另建 archive 目录 —— git 历史就是归档。"
+        )
 
 
 # ================================================================ 门禁接线
@@ -351,6 +513,8 @@ def check_ci_runs_every_gate() -> None:
         "audit_column_writers.py": "列写入点审计（每一列都答得出谁写它）",
         "verify_delivery.py": "交付卫生（本文件）",
         "docker build": "生产镜像构建",
+        # 构建绿不等于镜像能用:B-01 那个缺陷构建是会成功的
+        "docker run --rm swimwear-imagegen-backend": "生产镜像起容器冒烟(import app.main)",
     }
     missing = [f"{cmd}（{why}）" for cmd, why in required.items() if cmd not in ci]
     if missing:
@@ -1353,6 +1517,55 @@ def check_the_decision_log_has_no_duplicate_section_numbers() -> None:
         raise Failure("docs/DECISIONS.md 里一节都没有 —— 这条门禁失去了对象")
 
 
+def check_the_decision_index_covers_every_section() -> None:
+    """`docs/DECISIONS.md` 头部的索引必须和正文的 §条目一一对上。
+
+    ## 为什么索引要有人盯着
+
+    这份文档七千多行、顺序追加、无目录,查一条决策只能全文搜索。加一份手写目录
+    能解决今天的问题,而它会在下一条决策写进来时**静默过期** —— 过期不会有任何
+    东西报错,它只是让读者以为自己看全了(这份文档自己的写作规矩第一条说的就是
+    这件事)。
+
+    所以索引是**产物**,正文是权威,`backend/tools/gen_decisions_index.py` 负责
+    生成,这条负责说「分叉了」。分工与 `tools/normalize_eol.py` 一样。
+
+    比的是编号集合,不是字面 —— 标题里改个错别字不该让门禁变红,而**漏索引一条**
+    和**索引一条已经删掉的**都会。
+    """
+    doc = PROJECT_ROOT / "docs" / "DECISIONS.md"
+    body = doc.read_text(encoding="utf-8")
+    begin, end = "<!-- DECISIONS_INDEX:BEGIN -->", "<!-- DECISIONS_INDEX:END -->"
+    if begin not in body or end not in body:
+        raise Failure(
+            "docs/DECISIONS.md 里找不到索引标记。索引由 "
+            "backend/tools/gen_decisions_index.py 生成,标记是它的落点 —— "
+            "标记没了,索引就退回成一份手写目录,而手写目录会静默过期。"
+        )
+    head_len = body[: body.index(end)].count("\n") + 1
+    if head_len > 150:
+        raise Failure(
+            f"索引结束在第 {head_len} 行,超出文件头 150 行。"
+            "它得在打开文件就看得见的地方,否则查一条决策还是得全文搜索。"
+        )
+    block = body.split(begin, 1)[1].split(end, 1)[0]
+    indexed = set(re.findall(r"^\|\s*§([0-9]+(?:\.[0-9]+)*)\s*\|", block, re.MULTILINE))
+    in_body = set(re.findall(r"^##\s+§([0-9]+(?:\.[0-9]+)*)", body, re.MULTILINE))
+    missing = sorted(in_body - indexed, key=lambda s: [int(x) for x in s.split(".")])
+    stale = sorted(indexed - in_body, key=lambda s: [int(x) for x in s.split(".")])
+    if missing or stale:
+        detail = []
+        if missing:
+            detail.append("正文有、索引里没有:" + "、".join(f"§{n}" for n in missing))
+        if stale:
+            detail.append("索引里有、正文没有:" + "、".join(f"§{n}" for n in stale))
+        raise Failure(
+            "决策索引和正文分叉了:\n  "
+            + "\n  ".join(detail)
+            + "\n跑 `cd backend && python3 tools/gen_decisions_index.py` 重新生成,不要手工补。"
+        )
+
+
 def check_every_column_can_say_who_writes_it() -> None:
     """每一列都要回答「谁写它」——判定在 `tools/audit_column_writers.py`。
 
@@ -1397,6 +1610,15 @@ CHECKS = [
     (".gitignore 覆盖每一类密钥", check_gitignore_covers_every_class_of_secret),
     ("打包脚本先排除再复验", check_the_pack_script_excludes_and_then_verifies),
     ("backend/.dockerignore 排除密钥目录", check_backend_dockerignore_excludes_the_key_directory),
+    (
+        "两条出口的图片清单不分叉",
+        check_the_two_exits_declare_the_same_image_extensions,
+    ),
+    (
+        "打包侧禁品在 git 那侧也有规则",
+        check_every_pack_rule_has_a_gitignore_counterpart,
+    ),
+    ("一次性脚本没有回潮", check_no_one_time_mutation_scripts_are_back),
     ("每条前端门禁脚本都有人调用", check_every_frontend_gate_script_is_invoked),
     ("CI 覆盖每一条门禁", check_ci_runs_every_gate),
     ("CI 的 pytest 有 PostgreSQL + Redis", check_ci_backs_pytest_with_redis),
@@ -1410,6 +1632,7 @@ CHECKS = [
     ("迁移链单一 head", check_the_migration_chain_has_a_single_head),
     ("交付源码、迁移与测试都已被 Git 跟踪", check_every_migration_and_db_test_is_tracked_by_git),
     ("决策日志编号不重复", check_the_decision_log_has_no_duplicate_section_numbers),
+    ("决策索引覆盖每一条", check_the_decision_index_covers_every_section),
     ("阶段标记:结算不跑到落码前面", check_stage_markers_are_consistent),
     ("欠账守卫都在还款日之内", check_no_debt_guard_is_past_its_due_stage),
     ("落地的模块真的被接线了", check_every_wired_module_is_actually_called),

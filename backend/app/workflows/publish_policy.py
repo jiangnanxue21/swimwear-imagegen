@@ -35,6 +35,7 @@ from app.core.enums import (
     PublishStatus,
 )
 from app.core.errors import ErrorCode
+from app.workflows import delivery_evidence
 
 #: 一条 Outbox 记录最多投递几次。比派发 Outbox 的 10 次少,因为这里每一次
 #: 都真的打在平台上:失败重试会累进平台的风控与限流配额,而派发失败只是
@@ -49,6 +50,47 @@ MAX_BACKOFF_SECONDS = 300
 #: 否则租约会在调用还没返回时过期,另一个 worker 把同一次提交再发一遍 ——
 #: 那是这张表存在的意义的反面。
 LEASE_SECONDS = 180
+
+#: 一次真实渠道调用(submit / poll)的**总**超时上限,秒。真实 transport 的
+#: HTTP 客户端必须拿它当总预算,而不是各自写一个数。
+#:
+#: ## 为什么它现在就得存在,而不是等第一个真实渠道落地
+#:
+#: `channels/registry.py` 顶部把这件事论证得很完整:今天唯一的发送端是
+#: Simulator(同步返回、不发真实外部调用),所以「调用挂住超过租约」不可达;
+#: **第一个真实 HTTP transport 进那张表的那一刻它变可达** —— 调用挂住 >180 秒
+#: → `publish_service.claim_due()` 判定 worker 崩了 → 同一份报文、同一把幂等键
+#: 发第二遍。§3.19 论证的是「不会重复创建」,不覆盖「结果不会被回写」。
+#:
+#: 在此之前这条只是那段注释里的一句话,而注释的防线是「希望改的人读到它」。
+#: 守卫需要一个真实的常量作对象 —— 这就是那个对象。配套的反向断言在
+#: `tests/pure/test_transport_timeout_invariant.py`:`_TRANSPORTS` 里任何
+#: `is_simulator=False` 的条目,其实现模块必须引用这个名字。于是第一个真实
+#: transport 不认这条超时时**当场变红**,而不是上线之后重复提交。
+#:
+#: 取 60 而不是贴着租约取 179:两者之间要留下退避与一次重试的余地,
+#: 而那个余地由下面的 `LEASE_HEADROOM_FACTOR` 说出来,不靠读数的人心算。
+TRANSPORT_TIMEOUT_SECONDS = 60
+
+#: 租约相对单次调用超时要留几倍余量。
+#:
+#: 2 的含义是:一次调用挂满超时之后,租约里还剩下同样长的一段时间用来退避、
+#: 记账、把结论写回库。取 1(即只要求 timeout < lease)守不住这些 ——
+#: 调用刚好挂满时租约已经贴着到期,回写会撞上另一个 worker 的重新领取。
+LEASE_HEADROOM_FACTOR = 2
+
+# 用 `if ... raise` 而不是 `assert`:模块级 assert 在 `python -O` 下被整条剥离,
+# 而那正是生产(`tests/pure/test_a44_batch5_fixes.py` 有一条门禁禁止 app/ 下
+# 出现模块级 assert,理由就是这个)。写法与 `workbench/batch.py` 的
+# CLAIM_CHUNK 断言一致 —— **常量与不变量必须在同一个模块**,不然 assert
+# 看不见它,而那正是这条从前只能是注释的原因。
+if TRANSPORT_TIMEOUT_SECONDS * LEASE_HEADROOM_FACTOR >= LEASE_SECONDS:  # pragma: no cover
+    raise RuntimeError(
+        "单次渠道调用的超时上限必须显著小于发布租约:调用挂满超时之后,"
+        "租约里还要有余量完成退避与结论回写。否则租约会在调用还没返回时过期,"
+        "`claim_due()` 把这行当成 worker 崩了重新发出 —— 同一份报文、"
+        "同一把幂等键发第二遍,而三道防线只保证不重复创建,不保证结果被回写"
+    )
 
 #: 平台状态字符串 -> 本地状态机。翻译放在这里,不放在 Adapter 里:
 #: 每个渠道各译一次的话,「平台说 REVIEWING 我们记成什么」会有 N 个答案。
@@ -87,6 +129,10 @@ class Outcome:
     retry_after_seconds: int | None = None
     error_code: str | None = None
     error_message: str | None = None
+    #: 这一次投递的 typed 证据(P-06)。默认 UNKNOWN —— 大多数结论与"发没发出去"
+    #: 无关,而**默认值必须是最保守的那一档**:填错方向的代价是重复创建。
+    #: service 在结果事务里 append-only 落它,不覆盖历史行。
+    delivery_evidence: str = delivery_evidence.UNKNOWN
 
     @property
     def succeeded(self) -> bool:
@@ -288,8 +334,30 @@ def classify_transport_failure(
     *,
     operation: PublishOperation | str,
     error: str = "",
+    evidence: str = delivery_evidence.UNKNOWN,
 ) -> Outcome:
-    """连接中断 / 超时 —— 我们**不知道**平台收到了没有。
+    """连接中断 / 超时 —— 我们**通常**不知道平台收到了没有。
+
+    ## `evidence` 那一档:知道的时候不要说不知道(P-06)
+
+    默认 `UNKNOWN`,行为与本参数存在之前逐字一致 —— 今天唯一的发送端是
+    Simulator,它不传这个参数,所以现网路径一个字节都没变。
+
+    只有 `NO_REQUEST_BYTES_SENT` 会**放宽**处置:第一个字节都没写出去时平台
+    不可能收到,于是连 CREATE 都可以自动重发。这一档的结论形状照 429 那条:
+
+        attempt_status = IN_FLIGHT   这次尝试还没有结论 —— 平台压根没参与
+        listing_status = None        本地状态一个字都不动
+        retriable      = True        包括 CREATE
+
+    用 `IN_FLIGHT` 而不是 `ABORTED`/`FAILED`,是因为后两者都在
+    `publish_service.TERMINAL_ATTEMPT_STATUSES` 里:那会让 `reused_terminal`
+    判真,界面显示"这件事死了",而 Outbox 其实排着下一次重试。
+    重试用尽时 `settle_exhausted()` 会把 IN_FLIGHT 收成 SUBMIT_FAILED ——
+    一次都没发出去的提交,结论是失败,这是准确的。
+
+    `REQUEST_BYTES_SENT` 不放宽:字节上了线就有可能被处理,这与 UNKNOWN 同档。
+    它仍然值得单独记一笔 —— 排障时"发出去了没等到回音"和"连不上"是两件事。
 
     ## 为什么创建和其它操作分开处理
 
@@ -306,6 +374,22 @@ def classify_transport_failure(
     「防重复」退化成了「拖慢一切,然后被绕过」。
     """
     op = PublishOperation(str(operation).upper())
+    proof = delivery_evidence.coerce(evidence)
+
+    if delivery_evidence.proves_not_sent(proof):
+        return Outcome(
+            attempt_status=PublishAttemptStatus.IN_FLIGHT.value,
+            listing_status=None,
+            retriable=True,
+            error_code=ErrorCode.PUBLISH_RESULT_UNKNOWN.value,
+            error_message=(
+                f"{op.value} 没有发出去({error or '连接阶段失败'})。"
+                + delivery_evidence.describe(proof)
+                + ",本地状态不变,已排入重试。"
+            ),
+            delivery_evidence=proof,
+        )
+
     resendable = op is not PublishOperation.CREATE
     return Outcome(
         attempt_status=PublishAttemptStatus.UNKNOWN.value,
@@ -320,6 +404,7 @@ def classify_transport_failure(
                 else "平台可能已经创建成功,**不自动重发** —— 先用同一个幂等键确认。"
             )
         ),
+        delivery_evidence=proof,
     )
 
 
@@ -362,6 +447,7 @@ def settle_exhausted(outcome: Outcome) -> Outcome:
             retriable=False,
             error_code=outcome.error_code,
             error_message=(outcome.error_message or "") + f"(已重试 {MAX_DELIVERY_ATTEMPTS} 次)",
+            delivery_evidence=outcome.delivery_evidence,
         )
     # UNKNOWN 用尽之后仍然是 UNKNOWN —— 那次调用确实不知道结果,
     # 重试次数用完不能把它改写成「失败」。历史不因为我们放弃了而改变
@@ -374,6 +460,7 @@ def settle_exhausted(outcome: Outcome) -> Outcome:
         platform_status=outcome.platform_status,
         error_code=outcome.error_code,
         error_message=outcome.error_message,
+        delivery_evidence=outcome.delivery_evidence,
     )
 
 

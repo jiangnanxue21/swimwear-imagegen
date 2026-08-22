@@ -100,7 +100,7 @@ describe('AI 能力测试页', () => {
   it('评分测试明确选任务、候选图并确认费用后才调用独立接口', async () => {
     renderPage()
     fireEvent.mouseDown(await screen.findByRole('combobox', { name: '生成任务' }))
-    fireEvent.click(await screen.findByText(/11111111 · mock · COMPLETED/))
+    fireEvent.click(await screen.findByText(/11111111 · mock · 已完成/))
 
     expect(await screen.findByRole('img', { name: '第 1 轮候选图 1 缩略图' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('radio', { name: '第 1 轮候选图 1' }))
@@ -116,7 +116,7 @@ describe('AI 能力测试页', () => {
     evaluationMocks.testCandidate.mockImplementation(() => new Promise(() => {}))
     renderPage()
     fireEvent.mouseDown(await screen.findByRole('combobox', { name: '生成任务' }))
-    fireEvent.click(await screen.findByText(/11111111 · mock · COMPLETED/))
+    fireEvent.click(await screen.findByText(/11111111 · mock · 已完成/))
     fireEvent.click(await screen.findByRole('radio', { name: '第 1 轮候选图 1' }))
     fireEvent.click(screen.getByText(/当前评分器如果是真实模型/))
     fireEvent.click(screen.getByRole('button', { name: /开始评分测试/ }))

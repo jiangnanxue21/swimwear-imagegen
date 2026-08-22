@@ -275,6 +275,27 @@ def build_items() -> list[Item]:
                     ROOT,
                     _docker,
                 ),
+                # **`docker build` 绿不等于镜像能用。**
+                #
+                # 评审 B-01 那个缺陷构建是会成功的:`pip install -e` 在 app/ 还
+                # 不存在时扫到空包集,不报错,只是装了个什么都没有的包。开发态
+                # 有 bind mount 盖着看不出来,而生产态 `!override` 掉了那个挂载。
+                #
+                # 少了这一条,P0-3 会在「镜像里根本 import 不了 app」的情况下
+                # 报通过 —— 而 PRD §14.3 的人工测试准入正是以这份清单为准。
+                # 一条绿着的门禁说着一件不一定成立的事,是本仓记过最多次的失效。
+                #
+                # 同一件事在 Makefile(`images-smoke`)与 ci.yml(images job)
+                # 各有一份。三处都要,因为它们失效的方式不同。
+                (
+                    "docker run backend import",
+                    [
+                        "docker", "run", "--rm", "swimwear-imagegen-backend:p0",
+                        "python", "-c", "import app, app.main",
+                    ],
+                    ROOT,
+                    _docker,
+                ),
             ],
             # docker 从 `blocked_by` 挪到了那两条命令各自的前提上:
             # 没有 node_modules 时四条 npm 一条都跑不了,那才是整条卡住;

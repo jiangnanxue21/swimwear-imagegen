@@ -89,9 +89,9 @@ export default function ProvidersPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="出图服务商" subtitle="各家出图服务的能力与配置状态(只读)" />
+      <PageHeader title="出图服务商" subtitle="查看各项出图服务的能力和配置状态（只读）" />
       <Card size="small" styles={{ body: { padding: 12 } }}>
-        这一页只读。密钥与模型在 <Link to="/settings">设置</Link> 页填写,
+        此页面仅供查看。密钥与模型请在 <Link to="/settings">设置</Link> 页填写，
         或写进 <span className="mono">.env</span> 后重启后端。两处都不会显示密钥明文。
       </Card>
       {/*

@@ -104,9 +104,8 @@ def list_prompts(
 ) -> dict:
     """注册表全量(PRD BE-302):8 处提示词的 key、层、可编辑性、消费方。
 
-    「可编辑」= 消费链路会读库,改了会生效;详见 `registry` 模块文档 ——
-    对其余 6 处这里如实标 False,而不是让保存成功但毫无效果。
-    editable 的项附上当前生效版本号。
+    「可编辑」= 消费链路会读版本库,改了会生效;详见 `registry` 模块文档。
+    editable 的项附上当前生效版本号；调用统计是另一项独立能力。
 
     ## 调用统计(FE-301 的近 7 天列)—— 这一段的来路值得记
 
@@ -137,15 +136,19 @@ def list_prompts(
             "required_slots": list(surface.required_slots),
             "consumers": list(surface.consumers),
             "has_static_default": surface.default_ref is not None,
+            "preview_note": surface.preview_note,
+            "usage_stats": surface.usage_stats,
         }
         if surface.editable:
-            _content, version = prompt_service.get_active_content(session, surface.key)
+            content, version = prompt_service.get_active_content(session, surface.key)
+            item["content_preview"] = content
             item["active_version"] = version  # None = 内置默认生效中
-            # 只给 editable 的那两份取统计。其余 6 处的消费链路**不读库**
-            # (`registry.editable` 的语义),它们的调用根本不经过
-            # `evaluation_attempts` —— 给它们查一次一定是 0,而界面上一个
-            # 「近 7 天 0 次」会被读成"没人用",实际是"这里压根不记这个数"
+        if surface.usage_stats:
+            # 只有评分链路写 evaluation_attempts。文案/出图即使可编辑，也不能
+            # 拿评分留痕里的 0 冒充“从未调用”。
             item["stats"] = prompt_usage.recent_stats(session, surface.key).as_dict()
+        if not surface.editable:
+            item["content_preview"] = registry.preview_text(surface)
         surfaces.append(item)
     return {
         "surfaces": surfaces,
@@ -226,9 +229,8 @@ def save_prompt(
     session: Session = Depends(db_session),
     actor: str = Depends(require_admin),
 ) -> dict:
-    # 只有消费链路会读库的 key 才许落库(registry.editable 的语义)。对其余
-    # 6 处放行的结果是「保存成功、毫无效果」—— 比 PRD 问题 A 那条"后端通、
-    # 前端不可达"的死路更糟,因为它连报错都没有。
+    # 只有消费链路会读库的 key 才许落库(registry.editable 的语义)。当前 8 处
+    # 都已接线；这个闸仍保留，防止以后登记第 9 处时只做 UI、制造假保存。
     if key not in registry.editable_keys():
         surface = registry.surface_of(key)
         raise HTTPException(

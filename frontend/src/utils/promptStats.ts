@@ -64,9 +64,9 @@ export function recentLabel(
   statsSince: string | null,
 ): StatsDisplay {
   if (stats == null) {
-    // 后端只给 editable 的项带 stats。其余几处的链路不读库,调用根本不经过
-    // 那张表 —— 说「不统计」而不是「0 次」,后者会被读成"没人用"
-    return { text: '不统计', hint: '这处提示词的消费链路不读库,调用不经过评分留痕', tone: 'muted' }
+    // 可编辑不等于有评分统计：文案/出图也读版本库，但不写 evaluation_attempts。
+    // 说「不统计」而不是「0 次」，后者会被读成“没人用”。
+    return { text: '不统计', hint: '这处提示词不写入评分调用留痕', tone: 'muted' }
   }
   if (stats.calls <= 0) {
     return {

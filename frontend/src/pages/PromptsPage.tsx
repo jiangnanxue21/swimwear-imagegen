@@ -66,6 +66,13 @@ export default function PromptsPage() {
     retry: (count, err) => !isAuthError(err) && count < 2,
   })
   const surface = surfaces.data?.surfaces.find((item) => item.key === promptKey)
+  // 目前逐次写 evaluation_attempts 的就是评分 Prompt。来源由后端注册表给，
+  // 不在动态路由页写死 key，否则新增第三个受众时又会漏掉一条路径。
+  const isSystemScoringPrompt = surface?.usage_stats === true
+  const isScoringPrompt = isSystemScoringPrompt
+    || promptKey === 'scoring_user_prompt'
+    || promptKey === 'scoring_depth_instructions'
+  const isMapping = surface?.tier === 'MAPPING'
   useDocumentTitle(surface ? `提示词 · ${surface.label}` : '提示词')
   const [draft, setDraft] = useState<string | null>(null)
   const [note, setNote] = useState('')
@@ -239,6 +246,9 @@ export default function PromptsPage() {
       title: '调用',
       width: 150,
       render: (_: unknown, row: PromptVersion) => {
+        if (!query.data?.usage_stats) {
+          return <Text type="secondary">不统计</Text>
+        }
         const display = versionStatsLabel(row.stats, statsSince)
         const body = (
           <Text type={display.tone === 'muted' ? 'secondary' : undefined}>{display.text}</Text>
@@ -372,9 +382,21 @@ export default function PromptsPage() {
       <Alert
         type="info"
         showIcon
-        message="这段提示词决定评分口径"
+        message={
+          isScoringPrompt
+            ? '这段提示词决定评分口径'
+            : isMapping
+              ? '这份 JSON 决定问题代码对应的自动修复动作'
+            : '保存后，新任务会读取这一版提示词'
+        }
         description={
-          <>
+          isMapping ? (
+            <Paragraph style={{ marginBottom: 0 }}>
+              可以修改每个固定键下面的文案和参数值，但不要删除或改名代码键。
+              保存前体检会指出缺失键、意外新增键和 JSON 语法问题；运行时还会校验字段类型。
+            </Paragraph>
+          ) : isSystemScoringPrompt ? (
+            <>
             <Paragraph style={{ marginBottom: 4 }}>
               它只影响<Text strong>模型怎么打分</Text>。总分、A/B/C/D 分档、是否自动通过
               仍然全部由后端计算,改这里不会绕过任何一条业务规则。
@@ -384,7 +406,19 @@ export default function PromptsPage() {
               即使这里删光了也不影响运行 —— 但模型会少很多上下文,判断质量会下降。
               <Text strong>改完请用人工审核样本重新校准阈值。</Text>
             </Paragraph>
-          </>
+            </>
+          ) : promptKey === 'scoring_user_prompt' ? (
+            <Paragraph style={{ marginBottom: 0 }}>
+              花括号槽位由代码按本次评分深度、商品数据和图片数量展开。
+              可以改槽位以外的措辞；删掉必需槽位会让模型缺少对应上下文，体检会明确指出。
+              <Text strong>改完请用人工审核样本重新校准阈值。</Text>
+            </Paragraph>
+          ) : (
+            <Paragraph style={{ marginBottom: 0 }}>
+              花括号槽位由运行时代码填入。保存前体检会指出缺失槽位；已创建任务保留
+              当时实际使用的正文和内容版本，不会被新版本追溯改写。
+            </Paragraph>
+          )
         }
       />
 
@@ -393,7 +427,7 @@ export default function PromptsPage() {
           type="warning"
           showIcon
           message="需要管理员身份才能查看提示词"
-          description="请登录管理员账号。旧版「在设置页填口令」的入口已随 localStorage 口令链一起移除(api/client.ts 382 行是现行口径),这里不再指路到一个不存在的输入框。"
+          description="请登录管理员账号后重试。此页面不再提供本地口令输入。"
         />
       )}
       {query.isError && !needsToken && (
@@ -432,7 +466,7 @@ export default function PromptsPage() {
         loading={query.isLoading}
         title={
           <Space>
-            <span>系统提示词</span>
+            <span>提示词正文</span>
             {query.data?.is_default ? (
               <Tag>内置默认</Tag>
             ) : (

@@ -129,7 +129,7 @@ export default function FlowHeader({
         </div>
 
         <Space size={16} align="start">
-          <Tooltip title="阻断问题:不解决就走不到导出。点击跳到第一条">
+          <Tooltip title="存在阻断问题，解决后才能导出。点击查看第一条">
             <div
               role="button"
               tabIndex={0}
@@ -272,4 +272,3 @@ export default function FlowHeader({
     </div>
   )
 }
-

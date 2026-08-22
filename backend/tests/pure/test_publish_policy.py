@@ -244,11 +244,25 @@ def test_giving_up_does_not_rewrite_an_unknown_into_a_failure():
 
 
 def test_the_simulator_flag_comes_from_the_registry_not_from_a_constant():
-    """`describe_extractors()` 曾经硬编码 configured: true —— 同一类错误。"""
+    """`describe_extractors()` 曾经硬编码 configured: true —— 同一类错误。
+
+    自 SHEIN 进注册表起,"已注册"不再蕴含"有发送端":它有 builder(抛
+    `ChannelNotReady`)而没有 transport。所以这条守卫按三档判,不再假设
+    `transport_for()` 一定取得到 —— 假设它取得到的写法会在第一个只有 builder
+    的渠道上变成 KeyError,而那是守卫自己崩掉,不是它发现了问题。
+    """
     rows = {row["channel"]: row for row in registry.describe_channels()}
     assert rows, "注册表是空的,前端状态条将无内容可显示"
     for row in rows.values():
-        assert row["is_simulator"] == registry.transport_for(row["channel"]).is_simulator
+        kind = registry.transport_kind(row["channel"])
+        assert row["transport_kind"] == kind
+        if kind == registry.TRANSPORT_NONE:
+            assert row["transport"] is None
+            assert row["is_simulator"] is False
+            continue
+        transport = registry.transport_for(row["channel"])
+        assert row["is_simulator"] == transport.is_simulator
+        assert row["transport"] == transport.name
 
 
 def test_an_unknown_channel_is_refused_rather_than_defaulted():

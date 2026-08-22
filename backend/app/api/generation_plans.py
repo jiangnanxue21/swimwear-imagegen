@@ -208,4 +208,3 @@ def _as_active(row):
         budget_cap=view.budget_cap,
         status="ACTIVE",
     )
-

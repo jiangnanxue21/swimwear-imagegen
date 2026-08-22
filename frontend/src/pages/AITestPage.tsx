@@ -11,7 +11,12 @@ import { evaluationApi } from '../api/reviews'
 import { isAuthError, readWriteError } from '../api/client'
 import { aiTestsApi } from '../api/aiTests'
 import { workbenchApi } from '../api/workbench'
-import { CANDIDATE_STATUS_LABEL, type AiTestRun, type Evaluation } from '../api/types'
+import {
+  CANDIDATE_STATUS_LABEL,
+  TASK_STATUS_LABEL,
+  type AiTestRun,
+  type Evaluation,
+} from '../api/types'
 import EvaluationDetail from '../components/EvaluationDetail'
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
@@ -187,7 +192,7 @@ export default function AITestPage() {
                   style={{ width: '100%', marginTop: 6 }}
                   options={(tasks.data?.items ?? []).map((item) => ({
                     value: item.id,
-                    label: `${item.id.slice(0, 8)} · ${item.provider} · ${item.status}`,
+                    label: `${item.id.slice(0, 8)} · ${item.provider} · ${TASK_STATUS_LABEL[item.status]?.text ?? item.status}`,
                   }))}
                   onChange={(value) => {
                     scoreTest.reset()
@@ -595,7 +600,7 @@ export default function AITestPage() {
               render: (v: number | null) => durationLabel(v),
             },
             {
-              title: 'token',
+              title: 'Token 用量',
               dataIndex: 'total_tokens',
               width: 90,
               // 0 与 null 不是一回事:Mock 评分器不消耗 token(0),

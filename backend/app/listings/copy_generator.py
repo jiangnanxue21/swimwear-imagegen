@@ -496,6 +496,7 @@ LLM_SYSTEM_PROMPT = """你是服装电商 Listing 文案助手。
 #: {title_max} 这些是运行参数,不是措辞 —— 参数由 CopyRules 注入,改参数
 #: 不该算「换了一版提示词」,改措辞才算。
 _LLM_PROMPT_VERSION = content_version(LLM_SYSTEM_PROMPT)
+COPY_LLM_SYSTEM_PROMPT_KEY = "copy_llm_system_prompt"
 
 
 @dataclass
@@ -517,6 +518,8 @@ class LLMCopyGenerator:
     max_retries: int = 2
     retry_base_seconds: float = 0.5
     rules: Any = None
+    #: 工作台每次调用前从提示词版本库注入；直接构造时仍使用代码默认值。
+    system_prompt_template: str = LLM_SYSTEM_PROMPT
     _client: Any = field(default=None, repr=False)
     _last_trace: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
@@ -551,13 +554,20 @@ class LLMCopyGenerator:
         from app.listings.copy_rules import CopyRules
 
         rules = self.rules or CopyRules()
-        system = LLM_SYSTEM_PROMPT.format(
-            title_max=rules.title_max,
-            description_max=rules.description_max,
-            bullet_min=rules.bullet_min,
-            bullet_max=rules.bullet_max,
-            bullet_item_max=rules.bullet_item_max,
-        )
+        try:
+            system = self.system_prompt_template.format(
+                title_max=rules.title_max,
+                description_max=rules.description_max,
+                bullet_min=rules.bullet_min,
+                bullet_max=rules.bullet_max,
+                bullet_item_max=rules.bullet_item_max,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValidationError(
+                "当前文案系统 Prompt 的花括号或槽位不合法;"
+                "请在提示词中心修正，或恢复内置默认",
+                code=ErrorCode.CONFIG_INVALID,
+            ) from exc
         payload: dict[str, Any] = {
             "locale": locale,
             "facts": dict(facts),
@@ -656,7 +666,7 @@ class LLMCopyGenerator:
             keywords=tuple(keywords),
             claims=tuple(claims),
             generator=self.name,
-            prompt_version=f"{self.model}:{_LLM_PROMPT_VERSION}",
+            prompt_version=f"{self.model}:{content_version(self.system_prompt_template)}",
         )
 
     def generate(

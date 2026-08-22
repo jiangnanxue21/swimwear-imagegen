@@ -390,6 +390,10 @@ EVENTS: dict[str, LogEvent] = dict(
         _e("settings.prompt_save_conflict", "提示词保存版本冲突"),
         _e("settings.prompt_rolled_back", "提示词已回滚"),
         _e("settings.key_generated", "生成了设置加密密钥文件"),
+        # 写主密钥失败之后连半成品文件都清不掉。写失败本身会抛出去,
+        # 这条记的是清理那一步 —— 磁盘上因此留下一个 0 字节的密钥文件,
+        # 而下一个进程读到它会报「文件存在但一直是空的」,指向的方向是错的
+        _e("settings.key_file_cleanup_failed", "半成品密钥文件未能清除"),
         _e("settings.key_migrated", "密钥已迁出对外目录"),
         _e("settings.legacy_key_readable", "旧密钥文件仍可被下载"),
         _e("settings.key_migration_failed", "密钥迁移失败"),
@@ -621,6 +625,15 @@ def parse_ts(value: str | None) -> datetime | None:
     try:
         return datetime.strptime(value, _TS_FORMAT)  # `%z` 匹配到才成功,恒为 aware
     except (TypeError, ValueError):
+        # **忽略是安全的,因为这里还有下一次尝试,而最终失败会如实返回 None。**
+        #
+        # 这一处符合本仓「日志绝不反噬业务」的既定约定:这个函数是**日志展示**
+        # 链路上的解析,它抛出去的话,一条格式不合的日志行会让整个运行日志页
+        # 打不开 —— 排障工具因为一条要排障的数据而失效。
+        #
+        # 而且它不是「假装解析成功了」:两次都不成时返回 None,调用方把这类
+        # 单独标出来(见上面 docstring 最后一段)。被吞掉的只有「第一种格式
+        # 没匹配上」这个中间结论,而那正是下面第二次尝试存在的理由。
         pass
     # 容一手 ISO 8601 的其他写法(第三方 handler 偶尔会写别的格式)
     try:

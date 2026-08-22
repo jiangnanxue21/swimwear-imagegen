@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Descriptions, Drawer, Empty, Image, Skeleton, Space, Table, Tag,
@@ -18,7 +18,8 @@ import {
 } from '../components/task/TaskScoringDiagnostics'
 import { isResultUnknown, readError, readWriteError } from '../api/client'
 import {
-  EVALUATION_OUTCOME_LABEL, MODE_LABEL, TASK_STATUS_LABEL, taskLiveness, taskPollInterval,
+  EVALUATION_OUTCOME_LABEL, GENERATION_ATTEMPT_STATUS_LABEL, MODE_LABEL,
+  REGENERATION_REASON_LABEL, TASK_STATUS_LABEL, taskLiveness, taskPollInterval,
   type Attempt, type Candidate, type Evaluation, type EvaluationAttempt,
 } from '../api/types'
 import { brandVars, fontScale, imageTile } from '../theme'
@@ -178,14 +179,28 @@ export default function TaskDetailPage() {
    * 真的没有评分的任务(FAILED / CANCELLED)不该被无限追问。
    */
   const status = query.data?.status
+
+  /*
+   * 两个 query handle 每次渲染都是新对象,写进依赖数组会让这个 effect 每渲染
+   * 一次就补拉一次 —— 而它想表达的是「依赖只跟状态走」。
+   *
+   * 这里原来配的是一条 `eslint-disable-next-line exhaustive-deps`。豁免能用,
+   * 但它盖住的是**整个依赖数组**:哪天补拉逻辑要看第三个变量,规则本该提醒的
+   * 那一次会被这条 disable 一起吞掉,而表现是「某些情况下不补拉」——
+   * 一个只在特定时序下出现、复现不了的缺陷。
+   *
+   * 改成 ref 之后依赖数组是诚实的:`[id, status]` 就是它真正依赖的全部,
+   * refetch 通过一个稳定引用取用。规则重新看得懂这个 effect,豁免因此不需要了。
+   */
+  const refetchRef = useRef({ evaluations, evaluationAttempts })
+  refetchRef.current = { evaluations, evaluationAttempts }
+
   useEffect(() => {
     // 触发条件是「机器不再写了」,不是「到终态了」——— MANUAL_REVIEW 恰恰是
     // 评分刚落库才进的状态,把它排除掉等于在最需要补拉的那一档上不补。
     if (!id || !status || taskLiveness(status) === 'LIVE') return
-    evaluations.refetch()
-    evaluationAttempts.refetch()
-    // 两个 query handle 每次渲染都是新对象;依赖只跟状态走
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    refetchRef.current.evaluations.refetch()
+    refetchRef.current.evaluationAttempts.refetch()
   }, [id, status])
 
   const retry = useMutation({
@@ -249,13 +264,17 @@ export default function TaskDetailPage() {
       dataIndex: 'status',
       render: (s: string, row) => (
         <Space size={4}>
-          <Tag color={s === 'SUCCEEDED' ? 'success' : s === 'FAILED' ? 'error' : 'default'}>{s}</Tag>
+          <Tag color={s === 'SUCCEEDED' ? 'success' : s === 'FAILED' ? 'error' : 'default'}>
+            {GENERATION_ATTEMPT_STATUS_LABEL[s] ?? s}
+          </Tag>
           {row.error_code && (
             <Tooltip title={row.error_message}>
               <Tag color="error" className="mono">{row.error_code}</Tag>
             </Tooltip>
           )}
-          {row.regeneration_reason && <Tag>{row.regeneration_reason}</Tag>}
+          {row.regeneration_reason && (
+            <Tag>{REGENERATION_REASON_LABEL[row.regeneration_reason] ?? row.regeneration_reason}</Tag>
+          )}
         </Space>
       ),
     },

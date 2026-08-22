@@ -29,7 +29,7 @@ import PageHeader from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 export default function WorkbenchSpuPage() {
-  useDocumentTitle('SPU 聚合')
+  useDocumentTitle('按款汇总')
   const [search, setSearch] = useState('')
   /** 输入框里的字。与已生效的 `search` 分开:敲字不该每个字符打一次接口,
       但两者必须能被同一个动作一起清掉(走查 P0-3:非受控输入框会说谎) */
@@ -219,7 +219,7 @@ export default function WorkbenchSpuPage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <PageHeader title="SPU 聚合" subtitle="按款式看:同一 SPU 下各 SKU 的进度与属性是否一致" />
+      <PageHeader title="按款汇总" subtitle="查看同一 SPU 下各 SKU 的进度和属性一致性" />
 
       <Card size="small" styles={{ body: { padding: 12 } }}>
         <Space wrap>
@@ -250,7 +250,7 @@ export default function WorkbenchSpuPage() {
 
       {query.isError && (
         <ErrorNotice
-          title="拉不到 SPU 聚合"
+          title="无法加载按款汇总"
           error={query.error}
           onRetry={() => query.refetch()}
         />
@@ -304,7 +304,7 @@ export default function WorkbenchSpuPage() {
           // 一句错得很有说服力的话,而运营照着它去导入一遍已经存在的商品。
           // 存量台账 `_UNBRANCHED_EMPTY_STATES` 的第三条到此还清
           emptyText: query.isError ? (
-            <Empty description="拉不到 SPU 聚合,点上方「刷新」再试一次。" />
+            <Empty description="无法加载按款汇总，请点击上方“刷新”重试。" />
           ) : (
             <Empty
               description={

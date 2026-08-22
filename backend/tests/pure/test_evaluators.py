@@ -21,8 +21,10 @@ from app.evaluators.registry import (
 from app.evaluators.repair import (
     FALLBACK_ACTION,
     REPAIR_TABLE,
+    REPAIR_TABLE_DEFAULT,
     apply_prompt_additions,
     build_repair_plan,
+    parse_repair_table,
 )
 from app.evaluators.rules import grade_candidate
 from app.evaluators.scoring import parse_evaluator_payload
@@ -132,6 +134,21 @@ def test_plan_serialises_to_plain_json_types():
     import json
 
     assert json.loads(json.dumps(data)) == data
+
+
+def test_versioned_repair_mapping_changes_the_real_plan():
+    """补丁表不是只在页面保存：解析后的活动值必须进入实际重生计划。"""
+    import json
+
+    payload = json.loads(REPAIR_TABLE_DEFAULT)
+    payload[HardFailCode.STRAP_CHANGED.value]["prompt_additions"] = ["活动版本里的肩带要求"]
+    active = parse_repair_table(json.dumps(payload, ensure_ascii=False))
+    plan = build_repair_plan(
+        grade=Grade.B,
+        problem_codes=[HardFailCode.STRAP_CHANGED.value],
+        repair_table=active,
+    )
+    assert plan.prompt_additions == ["活动版本里的肩带要求"]
 
 
 # ---------- 提示词合并 ----------

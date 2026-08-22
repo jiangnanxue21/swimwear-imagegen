@@ -679,6 +679,9 @@ def build_request(mapped: MappedListing, op: PublishOperationRef) -> PreparedReq
             "rows": [dict(r) for r in mapped.rows],
         },
         headers={"Content-Type": "application/json"},
+        # 原样透传,不从 header 里找。哪一格是 SPU 由 spec 决定,而 spec 是数据 ——
+        # 见 `PreparedRequest.spu` 的注释
+        spu=str(op.spu or ""),
         # 幂等键由调用方算好塞进 PublishOperationRef 之前的那一层 ——
         # 这里不算,因为算它需要 shop_id / site / 草稿指纹,
         # 而那些是运行期上下文,不属于"字段映射"这件事

@@ -190,4 +190,3 @@ def test_the_two_new_steps_are_not_free_points():
     assert empty.step_state(FlowStep.PLAN) is not StepState.DONE, (
         "空的方案视图判成了完成 —— 存量商品会凭空得到 10 分"
     )
-

@@ -53,13 +53,79 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?生产必须显式设置 POSTGRES_PASSWORD,不要用开发默认值}
       POSTGRES_DB: ${POSTGRES_DB:?生产必须显式设置 POSTGRES_DB}
 
+  # 迁移是一次性作业,不是某个长驻进程的开场白。
+  #
+  # ## 它换掉的是什么
+  #
+  # 原来 `backend` 的启动命令是 `alembic upgrade head && uvicorn ...`。单副本
+  # 时没问题,但把「schema 变更」绑在「进程启动」上有两个后果:
+  #
+  #   1. 扩到多副本(或遇上重启风暴)时,多个容器并发跑迁移。Alembic 有
+  #      version 表,**但没有跨进程锁** —— 并发升级的表现是随机失败或部分应用。
+  #   2. 回滚一次部署会连带触发一次迁移路径,而那通常不是回滚的人想要的。
+  #
+  # ## 为什么不是 `profiles: [migrate]`
+  #
+  # 评审给的两个选项里,profile 那个会砸掉「一条命令部署」:挂了 profile 之后
+  # `docker compose -f ... -f prod up -d` **不带**这个 service,而 worker 与 beat
+  # 照旧起来 —— 于是一个「并发迁移」被换成了一个更安静的「静默跑在旧表上」。
+  #
+  # 这里用的是第三种写法:不挂 profile,做成一次性 service,让三个长驻服务
+  # `depends_on` 它跑完。得到的性质和 profile 方案想要的一样 ——
+  #
+  #     迁移只执行一次     它是**一个 service**,`--scale backend=2` 复制的是 backend,不是它
+  #     不绑在进程启动上   backend 的 command 里已经没有 alembic
+  #     一条命令仍然可用   compose 会先跑完它再起后面三个
+  #
+  # 手动单独跑一次用 `make migrate-prod`,那条命令复用的正是这个 service。
+  #
+  # ## 有一种失败是**设计好的**,遇上时别当成部署系统坏了
+  #
+  # 迁移 0034 在库里已有重复 submit 计费流水时会**拒绝升级并列出重复项** ——
+  # PRD §13 阶段 P0 写明「那要求先人工对账,是刻意行为不是缺陷」。
+  #
+  # 改成一次性 service 之后,这条拒绝的**表现变了**,要说清楚:
+  #
+  #     改之前   backend 容器反复重启,postgres / redis / frontend 照常在,
+  #              那句拒绝淹在几十行启动日志里,而 `ps` 只显示 Restarting
+  #     改之后   migrate 退出非零 -> 后面三个服务**根本不被创建**,
+  #              而 compose 会把 migrate 的日志直接打在部署者的终端上
+  #
+  # 后者更响,也更早,方向是对的 —— 但第一次遇上的人看到的是「整套起不来」,
+  # 很容易读成部署坏了。真正该做的是:去看 migrate 的输出,按它列出的重复项
+  # 人工对账,对完再 `docker compose up -d`。数据库那边不需要回滚任何东西 ——
+  # 0034 是拒绝执行,不是执行了一半。
+  migrate:
+    build: ./backend
+    env_file: .env
+    environment:
+      <<: *browser-auth
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_LOCAL_DIR: /data/storage
+      SETTINGS_KEY_DIR: /data/secrets
+    command: alembic upgrade head
+    # 跑完就退出。不写这一行的话 compose 默认 `no` 也是对的,写出来是因为
+    # 「它退出是正常结束」这件事需要被下一个读的人看见 —— 一个 Exited(0)
+    # 的容器躺在 `docker compose ps` 里,很容易被当成挂了
+    restart: "no"
+    volumes:
+      - storage:/data/storage
+      - secrets:/data/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     # `environment` 按键合并,不是整段替换 —— 基座那四项(POSTGRES_HOST 等)
     # 原样保留,这里只是往上加三项
     environment: *browser-auth
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # 迁移已经摘出去了(见上面的 migrate)。这里只剩起进程这一件事
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # `depends_on` 按 service 名合并,基座那两项(postgres / redis 健康)保留
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports: !reset []
     # A45-#6:**`!reset` 不能省。**
     #
@@ -85,6 +151,13 @@ services:
     volumes: !override
       - storage:/data/storage
       - secrets:/data/secrets
+    # 基座里 worker 等的是 `backend: service_healthy`,而那条依赖当初的理由
+    # 写在基座的注释里:「迁移在 backend 启动命令里跑」。迁移搬走之后那个理由
+    # 不再成立,所以这里把依赖直接指向迁移本身 —— 否则 worker 的正确性
+    # 取决于「backend 恰好先起来过」,而那是一个巧合,不是一条约束
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   beat:
     environment: *browser-auth
@@ -92,6 +165,9 @@ services:
     volumes: !override
       - storage:/data/storage
       - secrets:/data/secrets
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   frontend:
     image: !reset null

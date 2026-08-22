@@ -28,7 +28,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.channels import generic, simulator
+from app.channels import generic, shein, simulator
 from app.channels.base import PreparedRequest, PublishOperationRef
 from app.listings.contracts import MappedListing
 
@@ -62,8 +62,12 @@ class ChannelResponse:
 
 
 #: 报文构造器。键是渠道名,与 `ChannelListing.channel` 落库的值一致。
+#: SHEIN 在这张表里,而它的 builder 抛 `ChannelNotReady`。理由见
+#: `channels/shein/__init__.py` 顶部:一个查不到的渠道和一个说不清的渠道,
+#: 在界面上长得一样,而前者会让人以为"还没开始做",后者会让人以为"做好了"。
 _BUILDERS: Mapping[str, Callable[[MappedListing, PublishOperationRef], PreparedRequest]] = {
     generic.CHANNEL: generic.build_request,
+    shein.CHANNEL: shein.build_request,
 }
 
 
@@ -75,9 +79,9 @@ def _simulator_submit(req: PreparedRequest, options: Mapping[str, Any]) -> Chann
     同一个 `simulate_submit`,所以行为不会分叉。
     """
     body = dict(req.body)
-    header = body.get("header") if isinstance(body.get("header"), dict) else {}
     resp = simulator.simulate_submit(
-        spu=str(header.get("spu") or ""),
+        # 见 `base.PreparedRequest.spu`:transport 不从 body 里认 SPU
+        spu=str(req.spu or ""),
         operation=body.get("operation") or "CREATE",
         idempotency_key=req.idempotency_key or "",
         body=body,
@@ -135,12 +139,33 @@ SIMULATOR = Transport(
 #: 所以真实 transport 的 submit/poll 实现里,**客户端的总超时必须钳在
 #: `publish_policy.LEASE_SECONDS` 之下**(留出退避与重试的余量),并确认目标平台的
 #: 幂等语义(它是否认 `Idempotency-Key`、认多久)。接入后要真跑已写未跑的
-#: `tests/test_publish_lease_concurrency_db.py`(7 条,需真库)。这条现在是**改动点
-#: 上的不变量**,不是守卫 —— 守卫需要一个真实的超时常量作对象,而那个常量此刻还不
-#: 存在;等它落地,把这条从注释升级成 audit-guards 能盯的反向断言。
+#: `tests/test_publish_lease_concurrency_db.py`(7 条,需真库)。
+#:
+#: ## 这条已经不是注释了
+#:
+#: 上面这段从前的结尾是「这条现在是**改动点上的不变量**,不是守卫 —— 守卫需要
+#: 一个真实的超时常量作对象,而那个常量此刻还不存在」。那个常量现在存在:
+#:
+#:     publish_policy.TRANSPORT_TIMEOUT_SECONDS        单次调用的总超时预算
+#:     publish_policy.LEASE_HEADROOM_FACTOR            租约要留几倍余量
+#:
+#: 两者与 `LEASE_SECONDS` 在同一个模块里,由那个模块的模块级 `if ... raise`
+#: 把关(不用 assert:`-O` 会剥掉它)。而**这张表**这一侧由
+#: `tests/pure/test_transport_timeout_invariant.py` 反向断言:下面
+#: `_TRANSPORTS` 中任何 `is_simulator=False` 的条目,其 submit/poll 的实现模块
+#: 必须引用 `TRANSPORT_TIMEOUT_SECONDS`。第一个真实 transport 不认这条时当场红,
+#: 而不是上线之后由一次重复提交来告诉我们。
+#: SHEIN **没有条目**:它还没有发送端。`transport_for()` 因此抛 KeyError,
+#: 而 `transport_kind()` 返回 `NONE` —— 状态页要显示的正是这个,不是一个
+#: 被默认成 Simulator 的假象。
 _TRANSPORTS: Mapping[str, Transport] = {
     generic.CHANNEL: SIMULATOR,
 }
+
+#: `transport_kind()` 的三个取值。
+TRANSPORT_SIMULATOR = "SIMULATOR"
+TRANSPORT_REAL = "REAL"
+TRANSPORT_NONE = "NONE"
 
 
 class UnknownChannelError(ValueError):
@@ -174,6 +199,31 @@ def transport_for(channel: str) -> Transport:
     return _TRANSPORTS[_resolve(channel)]
 
 
+def transport_kind(channel: str) -> str:
+    """这个渠道的发送端是哪一档。**判据是这张表,不是外部 ID 的前缀。**
+
+    `is_simulated_external_id()` 曾经承担这件事:它看 ID 是不是以 `SIM-` 开头。
+    那条判据在两处都不成立 —— 没有外部 ID 的行(CREATE 超时那一类)它答不了,
+    而真实平台完全可以发一个恰好以 SIM 开头的 ID。判据必须来自"这次是谁发的",
+    而那件事只有注册表知道(PRD §10.2 第 3 条)。
+    """
+    transport = _TRANSPORTS.get(_resolve(channel))
+    if transport is None:
+        return TRANSPORT_NONE
+    return TRANSPORT_SIMULATOR if transport.is_simulator else TRANSPORT_REAL
+
+
+def is_simulated_channel(channel: str) -> bool:
+    """这个渠道当前发出去的东西是模拟的吗。
+
+    **它回答的是"现在",不是"当时"。** 一行 listing 是在哪个 transport 下创建的,
+    要由行上的 environment/connection 列来记(PRD §12),那两列还不存在。
+    在它们落地之前,一次 transport 切换会让历史行的这一格跟着变 ——
+    这个残留缺口记在 `docs/` 的交付说明里,不在这里用一个更差的判据掩盖。
+    """
+    return transport_kind(channel) == TRANSPORT_SIMULATOR
+
+
 def describe_channels() -> list[dict[str, Any]]:
     """给 `GET /api/...` 与前端状态条用(4.1 节 F)。
 
@@ -188,14 +238,21 @@ def describe_channels() -> list[dict[str, Any]]:
     for name in known_channels():
         transport = _TRANSPORTS.get(name)
         try:
-            spec = generic.field_spec() if name == generic.CHANNEL else None
-            spec_complete: bool | None = (not spec.todos()) if spec else None
+            if name == generic.CHANNEL:
+                spec_complete: bool | None = not generic.field_spec().todos()
+            elif name == shein.CHANNEL:
+                spec_complete = shein.spec_complete()
+            else:
+                spec_complete = None
         except Exception:  # noqa: BLE001 - 见 docstring 最后一段
             spec_complete = None
         out.append(
             {
                 "channel": name,
                 "transport": transport.name if transport else None,
+                # 三档而不是一个布尔:`is_simulator=False` 同时表示"真实发送端"
+                # 与"根本没有发送端",而这两件事在状态页上是完全不同的一句话
+                "transport_kind": transport_kind(name),
                 "is_simulator": bool(transport and transport.is_simulator),
                 "spec_complete": spec_complete,
             }

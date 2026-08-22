@@ -1,7 +1,7 @@
 [project]
 name = "swimwear-imagegen-backend"
 version = "0.2.0"
-description = "网站商品展示图自动生成系统 - 后端"
+description = "服装商品运营平台 - 后端"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

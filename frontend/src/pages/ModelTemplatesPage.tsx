@@ -113,7 +113,7 @@ function LicenseFields() {
           默认 false 的含义是"没人核实过",对 UNVERIFIED 执行它会让存量模板
           全部停摆 —— 而那与迁移 0030 记的取向直接矛盾 */}
       <Form.Item name="allow_ai_dressing" valuePropName="checked" style={{ marginBottom: 4 }}>
-        <Checkbox>允许 AI 换装(本系统做的就是这件事;标为「已授权」后这一条会被强制执行)</Checkbox>
+        <Checkbox>允许 AI 换装（标记为“已授权”后，此限制将强制生效）</Checkbox>
       </Form.Item>
       <Form.Item name="allow_derivative_images" valuePropName="checked" style={{ marginBottom: 12 }}>
         <Checkbox>允许生成衍生图片</Checkbox>
@@ -478,8 +478,8 @@ export default function ModelTemplatesPage() {
         }
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: fontScale.meta }}>
-          授权状态一旦改成「已授权」,授权范围里的限制(是否允许 AI 换装、
-          禁止的品类)就会**开始强制执行** —— 在那之前它们只是记录。
+          授权状态改为“已授权”后，授权范围内的限制（是否允许 AI 换装、
+          禁止使用的品类）将开始强制执行；在此之前，这些内容仅作记录。
         </Typography.Paragraph>
         <Form form={editForm} layout="vertical" size="small">
           <Form.Item name="name" label="名称" rules={[{ required: true, message: '名称不能为空' }]}>

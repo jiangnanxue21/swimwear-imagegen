@@ -64,6 +64,17 @@ export function formatDate(value: DateInput, fallback = EMPTY_TIME): string {
   return parse(value)?.format('YYYY-MM-DD') ?? fallback
 }
 
+/**
+ * `14:32:05`。只给「这一屏的数据取回来的时刻」用。
+ *
+ * 不省成相对时间(「1 分钟前」):相对时间要么定时重渲染,要么它自己会过期 ——
+ * 一个用来回答\"我看的数还新不新\"的标签,过期之后说的正好是反话。
+ * 也不带日期:它旁边就有刷新按钮,跨天的陈旧数据在这一页不存在。
+ */
+export function formatClock(value: DateInput, fallback = EMPTY_TIME): string {
+  return parse(value)?.format('HH:mm:ss') ?? fallback
+}
+
 /** `3 小时前`。只用来做补充信息,不单独出现 —— 相对时间没法用来对账。 */
 export function formatRelative(value: DateInput, fallback = EMPTY_TIME): string {
   return parse(value)?.fromNow() ?? fallback

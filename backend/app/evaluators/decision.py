@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -20,7 +21,7 @@ from app.core.enums import (
     ReviewReason,
     TaskStatus,
 )
-from app.evaluators.repair import RepairPlan, build_repair_plan
+from app.evaluators.repair import RepairAction, RepairPlan, build_repair_plan
 from app.evaluators.rules import GradingThresholds
 
 
@@ -117,6 +118,7 @@ def decide_round(
     thresholds: GradingThresholds,
     task_key: str = "",
     provider_exhausted: bool = False,
+    repair_table: Mapping[str, RepairAction] | None = None,
 ) -> RoundDecision:
     """决定本轮结束后任务的去向。"""
     if not verdicts:
@@ -127,6 +129,7 @@ def decide_round(
             max_rounds=max_rounds,
             thresholds=thresholds,
             provider_exhausted=provider_exhausted,
+            repair_table=repair_table,
             extra_reason="本轮没有可评分的候选图",
         )
 
@@ -155,6 +158,7 @@ def decide_round(
         max_rounds=max_rounds,
         thresholds=thresholds,
         provider_exhausted=provider_exhausted,
+        repair_table=repair_table,
     )
 
 
@@ -165,6 +169,7 @@ def _no_winner(
     max_rounds: int,
     thresholds: GradingThresholds,
     provider_exhausted: bool,
+    repair_table: Mapping[str, RepairAction] | None = None,
     extra_reason: str | None = None,
 ) -> RoundDecision:
     """本轮没有可自动通过的候选图。"""
@@ -193,6 +198,7 @@ def _no_winner(
             problem_codes=sorted(set(codes)),
             hard_fail_codes=hard_codes,
             allow_provider_switch=thresholds.allow_provider_switch and not provider_exhausted,
+            repair_table=repair_table,
         )
         reasons.append(
             f"第 {round_number}/{max_rounds} 轮无 A 档候选,淘汰全部候选并按修复策略重生"

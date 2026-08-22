@@ -52,25 +52,18 @@ export const apiClient = axios.create({
    * dev 走 vite proxy)下 axios 会因为这一行把 Cookie 带上,
    * **少了它,一次同源的 XHR 也不会携带凭据**。
    *
-   * ## 它**修不了**跨源部署 —— 这一段原来说反了
+   * ## 它服务的是同源那一档,跨源修不了
    *
-   * 原文写的是:出问题的是 `VITE_API_BASE_URL` 指向另一个源的那种部署,
-   * Cookie 一次都不会发出去,表现是"登录成功了,然后立刻又要登录",
-   * 言下之意这一行把它修好了。**没有。** 后端那枚 Cookie 是
-   * `SameSite=Lax`(`backend/app/main.py` 的 `same_site="lax"`),
-   * 跨站 XHR 本来就不带它;`withCredentials` 管的是"要不要带",
-   * 不能让浏览器违反 SameSite。也就是说真配了跨源地址的部署会**精确复现**
-   * 那段注释声称已修复的症状。
+   * **同源反代是唯一受支持的会话部署形态。** 后端那枚 Cookie 是
+   * `SameSite=Lax`,跨站 XHR 本来就不带它,而 `withCredentials` 管的是
+   * "要不要带",它不能让浏览器违反 SameSite。跨源要可用得后端改
+   * `SameSite=None; Secure` 并配带 credentials 的 CORS,那是另一个安全权衡
+   * (`core/config.py` 里 `CORS_ORIGINS=*` 那一段写着:今天那个洞正是被 Lax
+   * 兜着的)。同样的话写在 `.env.example` 上。
    *
-   * 今天的结论只有一句:**同源反代是唯一受支持的会话部署形态。**
-   * 跨源要可用得后端改 `SameSite=None; Secure` 并配带 credentials 的 CORS,
-   * 那是另一个安全权衡(`core/config.py` 里 `CORS_ORIGINS=*` 那一段写着:
-   * 今天那个洞正是被 Lax 兜着的)。同样的话写在 `.env.example` 上。
+   * 为什么:`docs/notes/2026-08-10-samesite-lax-cross-origin.md`
    *
-   * 这一行本身仍然是必需的,只是它服务的是同源那一档。
-   *
-   * 这正是本仓 §3.43 那一族缺陷:上游全对,断在最后一跳,而两侧的测试都绿。
-   * 所以它有一条源码级守卫
+   * 它有一条源码级守卫
    * (`backend/tests/pure/test_a46_phase2_browser_login_seam.py` 的
    * `test_the_browser_actually_sends_the_session_cookie`)。
    */
@@ -146,14 +139,13 @@ function isAnonymousPath(url: string | undefined): boolean {
  *
  * ## 默认值是 `unknown`,不是三种模式里的任何一种
  *
- * 原来默认 `token`,理由是"多解释一句总比把人送进登不进去的登录页好"。
- * 那条理由在 `token` 只是"免登录"的同义词时成立;`token` 现在有了自己那句
- * **很重的**话(整个部署的浏览器都进不来),拿它当默认就变成了:
- * `/health` 还没回来的那一小段时间里,任何一个 401 都会声称服务器配错了。
+ * 第四个值不是三种模式之一,而是"还没问到" —— `/health` 回来之前,它的话只说
+ * 事实(登录态可能失效了),不对部署配置下任何结论。拿 `token` 当默认会让那一
+ * 小段时间里的任何一个 401 都声称服务器配错了,而 `token` 那句话很重:整个
+ * 部署的浏览器都进不来。
  *
- * 所以第四个值不是三种模式之一,而是"还没问到" —— 它的话只说事实
- * (登录态可能失效了),不对部署配置下任何结论。这与本仓反复出现的
- * "NULL 是不知道,0 是免费"是同一条:**不知道要能被表达出来。**
+ * 这与本仓反复出现的"NULL 是不知道,0 是免费"是同一条:
+ * **不知道要能被表达出来。**
  */
 type AuthMode = 'session' | 'dev' | 'token' | 'unknown'
 let authMode: AuthMode = 'unknown'
@@ -613,17 +605,13 @@ export function describeError(err: unknown, kind: RequestKind = 'read'): ErrorVi
  * 几个 `<Empty>`、`BatchActionBar` 的局部 state、`api/workbench.ts` 的透传)。
  * 判定一旦分成两份,toast 和面板会对同一次失败说两种话。
  *
- * ## 这里**刻意不写精确条数**(前端评审 P2-2)
+ * ## 这里**刻意不写精确条数**
  *
- * 这段注释的历史值得留着:先写「全站 100 多处」,被订正为「28 处(17 处
- * Alert、5 处 toast、6 处其它)」,并附上重数的命令 —— 也就是说作者明知道
- * 它会漂,还是把精确值写了回去。半年后实测 30 处。
+ * **一个没人守着的精确数字,每一次订正只是把下一次过期往后推。** 注释里的
+ * 数字和文档里的一样会漂,而且能漂进用户可见的文案 —— `timeoutPhrase` 上面
+ * 那一段记的就是三处写死的"30 秒"漂进运营文案的经过。
  *
- * **一个没人守着的精确数字,每一次订正只是把下一次过期往后推。** 本仓
- * 「会变的数字不写死」这条规矩一直只用在文档上,而 P1-1 那三处"30 秒"
- * 证明了注释里的数字同样会漂,而且能漂进用户可见的文案。
- *
- * 所以改成量级描述。真要数就现数一遍(得先滤掉注释行,本仓有几处注释
+ * 所以这里用量级描述。真要数就现数一遍(得先滤掉注释行,本仓有几处注释
  * 在正文里提到了这个函数名):
  *
  *     grep -rn 'readError(' frontend/src | grep -vE ':\s*\*|//'

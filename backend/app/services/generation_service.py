@@ -51,7 +51,13 @@ from app.prompts.versioning import content_version
 from app.providers._config import provider_setting
 from app.providers.base import GenerationMode
 from app.providers.registry import resolve
-from app.services import audit, generation_plan_service, model_template_service, spend
+from app.services import (
+    audit,
+    generation_plan_service,
+    model_template_service,
+    prompt_service,
+    spend,
+)
 from app.services.sorting import apply_order
 from app.workflows import generation_plan as gp
 from app.workflows import state_machine as sm
@@ -486,8 +492,15 @@ def create_task(
             else model_template_id
         )
         candidate_count = gp.governed_candidate_count(plan_view, fallback=candidate_count)
+        compose_template, _template_version = prompt_service.get_active_content(
+            session, gp.GENERATION_PROMPT_KEY
+        )
         prompt = gp.compose_prompt(
-            prompt, scene=plan_view.scene, pose=plan_view.pose, angles=plan_view.angles
+            prompt,
+            scene=plan_view.scene,
+            pose=plan_view.pose,
+            angles=plan_view.angles,
+            template=compose_template,
         )
 
     _assert_assets_are_usable(

@@ -171,6 +171,19 @@ FORBIDDEN_FILES=(
   'settings.local.json'
 )
 
+# 留在仓库里是对的,**只是不随交付包走**。
+#
+# 和上面那组的区别只有一条,而那一条要紧:`FORBIDDEN_FILES` 里的东西**出去了
+# 就是事故**(凭据、运行期日志、开发机绝对路径);这一组出去了什么也不会发生,
+# 它只是白占体积。混进上面那组会让"禁品"这个词贬值 —— 一份展示页和一把主密钥
+# 摆在同一张清单上,下一个人读到告警时不知道该按哪一种反应,而那两种反应
+# 一个是轮换密钥、一个是耸耸肩。
+#
+# 判据是「它能不能从仓库里的别的东西重新做出来」。能,就归这里。
+NOT_SHIPPED_FILES=(
+  'docs/overview.html'   # 架构图册的单文件展示版,由 docs/assets 的十四张图组装
+)
+
 # `.env.example` 是零凭据模板,解包后的配置契约与 `make init` 都依赖它。
 # 不能把 `.env.*` 当普通 basename glob:Info-ZIP 没有可靠的“排除但反选一个”语义。
 # 所以先排除整类,再只把这一个明确允许的文件补回；复验侧同样只豁免精确路径。
@@ -210,6 +223,10 @@ ext_any_case() {
 
 EXCLUDES=()
 FORBIDDEN=()
+# 「不随包」的复验模式单独一份。和 FORBIDDEN 共用一个数组的话,报错会说
+# 「交付包里出现禁止的内容」—— 对一份展示页那句话过重,而过重的告警会被
+# 学着忽略,连带下一次真的凭据告警一起。
+NOT_SHIPPED=()
 
 for d in "${FORBIDDEN_DIRS[@]}"; do
   # 四种形态都要排:根下的内容、根下的目录条目、子层级的内容、子层级的目录条目。
@@ -242,6 +259,11 @@ for f in "${FORBIDDEN_FILES[@]}"; do
     EXCLUDES+=( "$f" "*/$f" )
     FORBIDDEN+=( "(^|/)$(glob_to_re "$f")\$" )
   fi
+done
+
+for f in "${NOT_SHIPPED_FILES[@]}"; do
+  EXCLUDES+=( "$f" "*/$f" )
+  NOT_SHIPPED+=( "(^|/)$(glob_to_re "$f")\$" )
 done
 
 EXCLUDES+=( "$ENV_DOTFILE_GLOB" "*/$ENV_DOTFILE_GLOB" )
@@ -295,6 +317,21 @@ for pattern in "${FORBIDDEN[@]}"; do
     while IFS= read -r hit; do
       printf '     %s\n' "$hit"
     done <<< "$HITS"
+    FAILED=1
+  fi
+done
+
+# 「不随包」这一组同样要**打完再验一遍**。理由和禁品那组一模一样:只写排除
+# 规则的话,规则写错了没有任何征兆 —— 包照样生成,只是又胖了回去,而没有人
+# 会去查是哪个文件干的。
+for pattern in "${NOT_SHIPPED[@]}"; do
+  HITS="$(grep -E "$pattern" "$LISTING_WITHOUT_ENV_EXAMPLES_FILE" || true)"
+  if [ -n "$HITS" ]; then
+    echo "!! 交付包里出现不随包的文件(模式 $pattern):"
+    while IFS= read -r hit; do
+      printf '     %s\n' "$hit"
+    done <<< "$HITS"
+    echo "   它们留在仓库里是对的,只是不占交付体积 —— 修排除清单,别手工从包里删。"
     FAILED=1
   fi
 done

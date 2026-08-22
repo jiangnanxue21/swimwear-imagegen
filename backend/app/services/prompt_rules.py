@@ -20,13 +20,10 @@ from app.evaluators.vision_schema import (
 )
 from app.prompts import registry
 
-#: 可落库编辑的用途键。**值与改造前逐字节相同**((女, 男)),只是来源换成了
-#: 注册表的 `editable_keys()` —— 「哪些 key 改了会生效」从此只有一份答案
-#: (PRD BE-301;editable 的语义见 registry 模块文档)。守卫比对两边一致。
+#: 可落库编辑的用途键来自注册表；每一项都必须有真实消费方读取版本库。
 KNOWN_KEYS = registry.editable_keys()
-if KNOWN_KEYS != (VISION_SYSTEM_PROMPT, VISION_SYSTEM_PROMPT_MEN):
-    # `python -O` 会剥掉模块级 assert(本仓有守卫钉着这一条),用 raise。
-    raise AssertionError("注册表的 editable 集合与评分链路的用途常量分叉了")
+if not {VISION_SYSTEM_PROMPT, VISION_SYSTEM_PROMPT_MEN}.issubset(KNOWN_KEYS):
+    raise AssertionError("两份评分系统提示词从可编辑集合里消失了")
 
 MAX_PROMPT_CHARS = 20000
 
@@ -38,15 +35,13 @@ class PromptWarning:
 
 
 def default_content(key: str) -> str:
-    if key == VISION_SYSTEM_PROMPT:
-        from app.evaluators.vision_schema import DEFAULT_SYSTEM_PROMPT
-
-        return DEFAULT_SYSTEM_PROMPT
-    if key == VISION_SYSTEM_PROMPT_MEN:
-        from app.evaluators.vision_schema import DEFAULT_SYSTEM_PROMPT_MEN
-
-        return DEFAULT_SYSTEM_PROMPT_MEN
-    raise ValueError(f"未知的提示词用途:{key}")
+    surface = registry.surface_of(key)
+    if surface is None or not surface.editable:
+        raise ValueError(f"未知或不可编辑的提示词用途:{key}")
+    resolved = registry.resolve_default(surface)
+    if not isinstance(resolved, str) or not resolved.strip():
+        raise ValueError(f"可编辑提示词 {key} 没有文本默认值")
+    return resolved
 
 
 def lint_prompt(key: str, content: str) -> list[PromptWarning]:
@@ -68,7 +63,8 @@ def lint_prompt(key: str, content: str) -> list[PromptWarning]:
 
     # ---- 按层分派(PRD BE-304)。FREE 落到下面的既有规则;这两层先回答自己的问题。
     if surface.tier is registry.Tier.MAPPING:
-        # 本轮只读(§14.2),体检只做「结构可解析」:键封闭性推迟。
+        # 映射的值可以改，代码键不能悄悄删。必需键从 key_source 指向的领域
+        # 事实源派生，不在这里再抄一份 FULL/QUICK 或问题码清单。
         import json as _json
 
         try:
@@ -82,6 +78,25 @@ def lint_prompt(key: str, content: str) -> list[PromptWarning]:
                 warnings.append(
                     PromptWarning("invalid_json", "MAPPING 层的内容必须是 JSON 对象")
                 )
+            else:
+                expected = set(registry.mapping_keys(surface))
+                actual = {str(key) for key in parsed}
+                missing = sorted(expected - actual)
+                unexpected = sorted(actual - expected)
+                if missing:
+                    warnings.append(
+                        PromptWarning(
+                            "missing_mapping_keys",
+                            "缺少必需映射键:" + "、".join(missing),
+                        )
+                    )
+                if unexpected:
+                    warnings.append(
+                        PromptWarning(
+                            "unexpected_mapping_keys",
+                            "出现未登记映射键:" + "、".join(unexpected),
+                        )
+                    )
         return warnings
     if surface.tier is registry.Tier.TEMPLATE:
         # 「你能改措辞和排版,但槽位删掉就报警」—— 少一个槽位,拼装代码填不进去,

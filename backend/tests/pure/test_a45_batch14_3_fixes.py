@@ -390,13 +390,28 @@ def test_the_audit_reports_an_anchor_it_cannot_read_statically():
         assert code != 0 and "读不出来" in out, out
 
 
-def test_the_audit_refuses_to_pass_when_it_finds_nothing_to_audit():
-    """审计对象为空**不是通过**。一条命中都没有的不变式是绿着装样子。"""
+def test_the_audit_says_out_loud_when_it_has_nothing_to_audit():
+    """审计对象为空时**必须说出来**,但它不再当作失败。
+
+    ## 这条断言翻过一次面,理由要写清楚
+
+    原来的口径是「对象为空不是通过 —— 一条命中都没有的不变式是绿着装样子」。
+    那句话在变异脚本长期留在树里的前提下成立。口径后来改了(DECISIONS §3.107:
+    脚本随对应批次交付后即删,考古走 git 历史),于是**一次正常的清退会让
+    `make check-offline` 恒红** —— 而恒红的门禁会被人加 `|| true`,那比一条
+    宽松的门禁贵得多。
+
+    换来的要求是它不许静默:零脚本时必须在输出里明说这件事,并点名口径出处。
+    这条断言钉的就是"明说"这一半 —— 一个什么都不验、还什么都不说的审计,
+    才是真正的绿着装样子。
+    """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "project"
         (root / "backend" / "tools").mkdir(parents=True)
         code, out = _run_audit(root)
-        assert code != 0 and "一份变异脚本都没找到" in out, out
+        assert code == 0, out
+        assert "没有变异脚本" in out, out
+        assert "3.107" in out, "零脚本时必须点名口径出处,否则读者只看到一行空话"
 
 
 def test_the_audit_never_imports_the_scripts_it_audits():

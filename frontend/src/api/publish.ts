@@ -73,7 +73,10 @@ export interface ChannelListingRow {
   /** `ChannelListing.status` 原值。诊断用,界面主位显示 `display_status_label` */
   status: string
   external_spu_id: string | null
-  external_sku_ids: string[] | null
+  /** 平台侧 SKU ID 映射 `{ 本地 sku: 平台 sku_id }`。
+   *  后端是 JSONB 字典(`ChannelListing.external_sku_ids`),不是数组 ——
+   *  声明成 `string[]` 时 `.map()` 编译得过、运行期拿到的是对象 */
+  external_sku_ids: Record<string, string> | null
   /**
    * 这个外部 ID 是 Simulator 造的 —— **真实平台上并不存在这个商品**。
    *
@@ -149,6 +152,34 @@ export const PUBLISH_OPERATION_LABEL: Record<string, string> = {
   UPDATE: '更新商品',
   REPUBLISH: '重新上架',
   DELIST: '下架',
+}
+
+/** `PublishStatus`。仅用于诊断表格；主状态仍以服务端派生标签为准。 */
+export const PUBLISH_STATUS_LABEL: Record<string, string> = {
+  DRAFT: '草稿',
+  MAPPING: '映射中',
+  VALIDATING: '校验中',
+  VALIDATED: '校验通过',
+  VALIDATION_FAILED: '校验失败',
+  REVISING: '修订中',
+  DRY_RUN_VALIDATED: '预览校验通过',
+  DRY_RUN_COMPLETED: '预览完成',
+  UPLOADING_IMAGES: '上传图片中',
+  SUBMITTING: '提交中',
+  SUBMITTED: '已提交',
+  SUBMIT_RESULT_UNKNOWN: '提交结果未知',
+  SUBMIT_FAILED: '提交失败',
+  PLATFORM_REVIEWING: '平台审核中',
+  PLATFORM_REJECTED: '平台驳回',
+  LISTED: '已上架',
+  UPDATING: '更新中',
+  UPDATE_FAILED: '更新失败',
+  PAUSED: '已暂停',
+  DELISTING: '下架中',
+  DELISTED: '已下架',
+  REPUBLISHING: '重新上架中',
+  CANCELLED: '已取消',
+  ARCHIVED: '已归档',
 }
 
 /**
@@ -243,6 +274,11 @@ export interface CleanupRow {
   occupying: boolean
   delistable: boolean
   reason: string | null
+  /** **必须由人去平台后台核对的一行**:提交结果未知且没有外部 ID。
+   *  自动下架处理不了它,但它绝不能从清单上消失 */
+  needs_reconcile: boolean
+  /** 人拿着去平台后台找这件商品的线索。没有外部 ID 时它是唯一入口 */
+  locator: Record<string, unknown>
 }
 
 export interface CleanupReport {
@@ -251,6 +287,8 @@ export interface CleanupReport {
   real: number
   occupying: number
   not_delistable: number
+  /** 提交结果未知且没有外部 ID 的行数。`clean` 为真要求它也是 0 */
+  unreconciled: number
   /** **这次动手真的会排掉几行**(含模拟行)。和 `occupying` 不是一个口径 */
   to_queue: number
   to_skip: number

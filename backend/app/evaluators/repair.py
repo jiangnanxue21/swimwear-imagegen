@@ -11,10 +11,14 @@
 """
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.enums import Grade, HardFailCode, RegenerationReason
+
+REPAIR_PROMPT_ADDITIONS_KEY = "repair_prompt_additions"
 
 
 @dataclass(frozen=True)
@@ -181,6 +185,88 @@ REPAIR_TABLE: dict[str, RepairAction] = {
     ),
 }
 
+
+def _action_payload(action: RepairAction) -> dict[str, Any]:
+    return {
+        "change_seed": action.change_seed,
+        "change_model_template": action.change_model_template,
+        "switch_provider": action.switch_provider,
+        "prompt_additions": list(action.prompt_additions),
+        "negative_prompt_additions": list(action.negative_prompt_additions),
+        "provider_param_overrides": dict(action.provider_param_overrides),
+        "note": action.note,
+    }
+
+
+# 提示词中心编辑的是 JSON，而纯决策层消费的是 RepairAction。默认值从运行时表
+# 派生，避免为了 UI 手抄第二份很快就漂掉的补丁表。
+REPAIR_TABLE_DEFAULT = json.dumps(
+    {str(code): _action_payload(action) for code, action in REPAIR_TABLE.items()},
+    ensure_ascii=False,
+    indent=2,
+)
+
+
+def parse_repair_table(content: str) -> dict[str, RepairAction]:
+    """解析并校验版本库中的补丁表；默认键不允许被悄悄删掉。"""
+    try:
+        raw = json.loads(content)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("修复提示词补丁表必须是合法 JSON 对象") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("修复提示词补丁表必须是 JSON 对象")
+
+    required = {str(code) for code in REPAIR_TABLE}
+    missing = sorted(required - set(raw))
+    if missing:
+        raise ValueError(f"修复提示词补丁表缺少问题代码:{'、'.join(missing)}")
+
+    def string_list(code: str, field_name: str, value: object) -> tuple[str, ...]:
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"{code}.{field_name} 必须是字符串数组")
+        return tuple(value)
+
+    parsed: dict[str, RepairAction] = {}
+    allowed_fields = set(RepairAction.__dataclass_fields__)
+    for code, payload in raw.items():
+        if not isinstance(code, str) or not code.strip() or not isinstance(payload, dict):
+            raise ValueError("补丁表的键必须是非空问题代码，值必须是 JSON 对象")
+        unknown = sorted(set(payload) - allowed_fields)
+        if unknown:
+            raise ValueError(f"{code} 含未知字段:{'、'.join(unknown)}")
+
+        booleans: dict[str, bool] = {}
+        for field_name, default in (
+            ("change_seed", True),
+            ("change_model_template", False),
+            ("switch_provider", False),
+        ):
+            value = payload.get(field_name, default)
+            if not isinstance(value, bool):
+                raise ValueError(f"{code}.{field_name} 必须是布尔值")
+            booleans[field_name] = value
+
+        overrides = payload.get("provider_param_overrides", {})
+        if not isinstance(overrides, dict):
+            raise ValueError(f"{code}.provider_param_overrides 必须是 JSON 对象")
+        note = payload.get("note", "")
+        if not isinstance(note, str):
+            raise ValueError(f"{code}.note 必须是字符串")
+        parsed[code] = RepairAction(
+            **booleans,
+            prompt_additions=string_list(
+                code, "prompt_additions", payload.get("prompt_additions", [])
+            ),
+            negative_prompt_additions=string_list(
+                code,
+                "negative_prompt_additions",
+                payload.get("negative_prompt_additions", []),
+            ),
+            provider_param_overrides=tuple(overrides.items()),
+            note=note,
+        )
+    return parsed
+
 #: 表里没登记的问题代码走这个兜底:换 seed 重出一张
 FALLBACK_ACTION = RepairAction(note="未登记的问题代码,仅更换 seed 重试")
 
@@ -221,6 +307,7 @@ def build_repair_plan(
     problem_codes: list[str],
     hard_fail_codes: list[str] | None = None,
     allow_provider_switch: bool = True,
+    repair_table: Mapping[str, RepairAction] | None = None,
 ) -> RepairPlan:
     """按问题代码拼出确定性的修复计划。
 
@@ -240,8 +327,9 @@ def build_repair_plan(
     overrides: dict[str, Any] = {}
     notes: list[str] = []
 
+    active_table = repair_table if repair_table is not None else REPAIR_TABLE
     for code in codes:
-        action = REPAIR_TABLE.get(code, FALLBACK_ACTION)
+        action = active_table.get(code, FALLBACK_ACTION)
         plan.change_seed = plan.change_seed or action.change_seed
         plan.change_model_template = plan.change_model_template or action.change_model_template
         if action.switch_provider:

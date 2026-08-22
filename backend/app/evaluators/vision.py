@@ -35,8 +35,10 @@ from app.evaluators.base import ImageQualityEvaluator
 from app.evaluators.vision_schema import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT_MEN,
+    SCORING_USER_PROMPT_TEMPLATE,
     build_response_schema,
     build_user_prompt,
+    parse_depth_instructions,
     response_format_name,
 )
 from app.llm import endpoint_trust
@@ -77,6 +79,10 @@ DEPTH_KEY = "_evaluation_depth"
 #: 评分器跑在 Celery worker 里,让它自己连库会把评分层和数据库耦死,
 #: 也会让所有测试都需要一个数据库。
 PROMPT_KEY = "_system_prompt"
+#: 评分用户段与深度映射也由服务层从版本库取好再下发。保持与系统提示词同一条
+#: 通道，评分器仍然是可脱离数据库测试的纯消费方。
+USER_PROMPT_TEMPLATE_KEY = "_user_prompt_template"
+DEPTH_INSTRUCTIONS_KEY = "_depth_instructions"
 #: 本次评分的受众与规则包启用的硬错误码(PRD v2 §12.5 / §14.4)。
 #:
 #: 走 rule_set 传,与 PROMPT_KEY / DEPTH_KEY 同一条通道:evaluate() 的签名是
@@ -628,6 +634,8 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             product_metadata=product_metadata or {},
             reference_count=len(references),
             allowed_hard_fail_codes=allowed_codes,
+            template=self.user_prompt_template(rule_set),
+            depth_instructions=self.depth_instructions(rule_set),
         )
         request = await self._fit_request_to_budget(
             depth=depth,
@@ -707,6 +715,23 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
         if audience_from(rule_set) is Audience.MEN:
             return DEFAULT_SYSTEM_PROMPT_MEN
         return DEFAULT_SYSTEM_PROMPT
+
+    @staticmethod
+    def user_prompt_template(rule_set: dict | None = None) -> str:
+        value = (rule_set or {}).get(USER_PROMPT_TEMPLATE_KEY)
+        if isinstance(value, str) and value.strip():
+            return value
+        return SCORING_USER_PROMPT_TEMPLATE
+
+    @staticmethod
+    def depth_instructions(rule_set: dict | None = None) -> dict[EvaluationDepth, str] | None:
+        """服务层通常传已校验映射；直接调评分器时也接受版本库的 JSON 文本。"""
+        value = (rule_set or {}).get(DEPTH_INSTRUCTIONS_KEY)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            return parse_depth_instructions(value)
+        return None
 
     @staticmethod
     def _depth_from(rule_set: dict) -> EvaluationDepth:
@@ -1203,6 +1228,8 @@ class VisionModelImageQualityEvaluator(ImageQualityEvaluator):
             product_metadata=product_metadata or {},
             reference_count=max(1, reference_count),
             allowed_hard_fail_codes=enabled_codes_from(rule_set),
+            template=self.user_prompt_template(rule_set),
+            depth_instructions=self.depth_instructions(rule_set),
         )
         return f"{self.system_prompt(rule_set)}\n\n{user}"
 

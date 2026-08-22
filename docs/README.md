@@ -40,6 +40,8 @@
 | [`REVIEW.md`](REVIEW.md) | 要知道下一步该做什么 —— 施工方案,第 12 章任务表已标完成状态 |
 | [`AC-VERIFICATION.md`](AC-VERIFICATION.md) | 哪几条验收在本机真环境里真跑过、哪几条没有 |
 | [`REVIEW-A28-TRACKING.md`](REVIEW-A28-TRACKING.md) | a28 那份检视报告的阻断项现在还剩几条 |
+| [`REVIEW-CODE-ISSUES-2026-08-21.md`](REVIEW-CODE-ISSUES-2026-08-21.md) | 要知道代码层面还欠着什么 —— 按 B/F/X 编号的问题清单。全部条目关闭后删除 |
+| [`UPGRADING.md`](UPGRADING.md) | 要升级一个已在运行的部署:必须做的人工动作、会被挡下的操作、不报错的口径变更 |
 
 ## 验收与交接
 
@@ -48,15 +50,20 @@
 | [`../LOCAL_MANUAL_TEST.md`](../LOCAL_MANUAL_TEST.md) | 要在本机手工走一遍:启动、初始化、口令、浏览器登录六步验收、逐步操作 |
 | [`MANUAL-ACCEPTANCE.md`](MANUAL-ACCEPTANCE.md) | 要做发布候选的完整 UAT:人员分工、两套库、五个阶段的通过标准与证据要求 |
 | [`../HANDOVER.md`](../HANDOVER.md) | 最近一轮改了什么、验了什么、**哪些没验**。顶部是最新一轮 |
-| [`../CLAUDE.md`](../CLAUDE.md) | 用 agent 开工前。写的是约定与踩过的坑,不是目录说明 |
+| [`../CLAUDE.md`](../CLAUDE.md) | 用 agent 开工前。写的是约定与指针,不是目录说明 |
+| [`notes/README.md`](notes/README.md) | 想知道某个坑的全过程,或者查一轮历史快照与交接 |
+| [`STYLE.md`](STYLE.md) | 要写或改文档:五条可判定的写作约定 |
 
 ## 两类不在上表里的东西
 
-**历史台账与过程结论。** `docs/REVIEW-*.md` 与 `docs/MERGE-*.md` 是按批次留下的过程
-结论;`STATUS.md` / `DECISIONS.md` / `REVIEW.md` / `HANDOVER.md` 是**追加写**的台账。
-它们记的是「写下那天的事实」—— 里面引用的文件后来可能已经删掉,这不是错误:
-按规矩结论沉进 `DECISIONS.md`、原件删除,而台账保留当时的路径。所以路径体检
-(`backend/tools/audit_doc_refs.py`)对这四份只提示、不拦。
+**历史台账与档案。** `STATUS.md` / `DECISIONS.md` / `REVIEW.md` / `HANDOVER.md` 是
+**追加写**的台账,`docs/notes/` 是按日期归档的事故与轮次档案。它们记的是「写下那天
+的事实」—— 里面引用的文件后来可能已经删掉,这不是错误:按规矩结论沉进
+`DECISIONS.md`、原件删除,而台账保留当时的路径。所以路径体检
+(`backend/tools/audit_doc_refs.py`)对这四份与 `docs/notes/` 整个目录只提示、不拦。
+
+按批次留下的 `REVIEW-A*` / `MERGE-A*` 过程文档已经删除,逐份的结论去处记在
+`DECISIONS.md` §3.107;外部审计原件移入 `notes/`。
 
 **第三方文档存档。** `docs/vendor/fashn-skill/` 是 FASHN 官方文档的存档,
 不是本项目文档 —— 不计入地图,也不要改动;`PROVIDER-FASHN.md` 的实现依据全部指向它。

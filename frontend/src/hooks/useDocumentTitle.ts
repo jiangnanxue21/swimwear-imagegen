@@ -21,11 +21,11 @@
  */
 import { useEffect } from 'react'
 
-export const BASE_TITLE = '商品展示图生产台'
+export const BASE_TITLE = '服装商品运营平台'
 
 /**
  * @param title 页面名。传 `undefined` 表示还在加载,这时不改标题 ——
- *              先闪一下「undefined · 商品展示图生产台」再跳成正确值,
+ *              先闪一下「undefined · 服装商品运营平台」再跳成正确值,
  *              比晚 200ms 显示更糟
  */
 export function useDocumentTitle(title?: string | null): void {

@@ -249,8 +249,8 @@ def test_the_extraction_path_has_exactly_one_binding_for_its_asset_list():
     之后代码照跑,**用的是未过滤的那一份**。
 
     本批把未过滤取数移出了这个函数,于是 `assets` 只剩一个绑定点 ——
-    删掉它变成 NameError,第一次调用就炸。P1 因此退役(理由写在
-    `tools/mutate_batch14_7.py` 里),而"只剩一个绑定点"这条性质从此
+    删掉它变成 NameError,第一次调用就炸。P1 因此退役(理由当年写在
+    `tools/mutate_batch14_7.py` 里,该脚本已删),而"只剩一个绑定点"这条性质从此
     需要有人从正面钉住:**它一旦不成立,P1 那个洞就重新打开。**
 
     第二个绑定点长什么样不重要 —— 未过滤取数、缓存、兜底的空列表,

@@ -24,7 +24,7 @@ import {
   StarFilled, StarOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { mediaApi, type MediaAsset, type MediaRole } from '../../api/media'
+import { MEDIA_STATUS_LABEL, mediaApi, type MediaAsset, type MediaRole } from '../../api/media'
 import { IMAGE_ANGLE_LABEL, type ImageAngle } from '../../api/generationPlans'
 import {
   imageSetsApi,
@@ -1035,6 +1035,7 @@ export default function ImageSetTab({
                   <Tooltip title="上移一位">
                     <Button
                       size="small"
+                      aria-label="上移一位"
                       icon={<ArrowUpOutlined />}
                       disabled={index === 0}
                       onClick={() => move(index, index - 1)}
@@ -1043,6 +1044,7 @@ export default function ImageSetTab({
                   <Tooltip title="下移一位">
                     <Button
                       size="small"
+                      aria-label="下移一位"
                       icon={<ArrowDownOutlined />}
                       disabled={index === items.length - 1}
                       onClick={() => move(index, index + 1)}
@@ -1051,6 +1053,7 @@ export default function ImageSetTab({
                   <Tooltip title="把这张图再绑到另一个颜色上(同一张素材绑多个颜色是允许的)">
                     <Button
                       size="small"
+                      aria-label="把这张图再绑到另一个颜色上"
                       icon={<CopyOutlined />}
                       disabled={!coverage || coverage.required.length === 0}
                       onClick={() => duplicateForVariant(index)}
@@ -1062,6 +1065,7 @@ export default function ImageSetTab({
                     <Button
                       size="small"
                       danger
+                      aria-label="从这一版编排里移除（不删除素材）"
                       icon={<DeleteOutlined />}
                       onClick={() => remove(index)}
                     />
@@ -1090,7 +1094,9 @@ export default function ImageSetTab({
                   <figcaption>
                     <Space size={4} wrap style={{ marginBottom: 4 }}>
                       <Tag>{asset.role ? MEDIA_ROLE_LABEL[asset.role] : '未定角色'}</Tag>
-                      {blocked && <Tag color="error">{asset.status === 'QUARANTINED' ? '已隔离' : asset.status}</Tag>}
+                      {blocked && (
+                        <Tag color="error">{MEDIA_STATUS_LABEL[asset.status]?.text ?? asset.status}</Tag>
+                      )}
                     </Space>
                     <div>
                       {asset.width}×{asset.height}

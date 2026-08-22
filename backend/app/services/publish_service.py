@@ -204,6 +204,7 @@ def enqueue(
             operation=operation,
             channel_listing_id=str(listing.id),
             external_spu_id=listing.external_spu_id,
+            spu=product.spu,
         ),
     )
     key = build_publish_idempotency_key(

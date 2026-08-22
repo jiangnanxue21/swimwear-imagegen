@@ -37,7 +37,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  AuditOutlined, CloudUploadOutlined, ExperimentOutlined, ReloadOutlined,
+  AuditOutlined, CloudUploadOutlined, ExperimentOutlined, ReloadOutlined, SyncOutlined,
   SendOutlined, StopOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -46,6 +46,7 @@ import {
   PUBLISH_OPERATION_LABEL,
   PUBLISH_OUTBOX_STATUS_LABEL,
   PUBLISH_REJECTION_STATUS_LABEL,
+  PUBLISH_STATUS_LABEL,
   publishApi,
   type ChannelListingRow,
   type CleanupRow,
@@ -57,6 +58,7 @@ import { DRAFT_STATUS_LABEL, LOCATED_BY_LABEL, REJECTION_REASON_LABEL } from '..
 import BrandTag from '../components/BrandTag'
 import ErrorNotice from '../components/ErrorNotice'
 import PageHeader from '../components/PageHeader'
+import { msg } from '../i18n/msg'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useWriteError } from '../hooks/useWriteError'
 import { brandVars, fontScale, space } from '../theme'
@@ -102,7 +104,7 @@ const ACTION_ICON: Record<PublishAction, React.ReactNode> = {
 
 const ACTION_LABEL: Record<PublishAction, string> = {
   SUBMIT: '提交',
-  DRY_RUN: '干跑',
+  DRY_RUN: '预览报文',
   POLL: '刷新状态',
   DELIST: '下架',
   // 措辞不叫"重试"。那两个字会让人以为点了就重新提交一次,而这两个动作
@@ -288,6 +290,62 @@ export default function PublishPage() {
       message.success('已重新排队,等待投递')
       refresh()
     },
+    onError: onWriteError,
+  })
+
+  /**
+   * 逐条问一遍平台(§6.4 清单那一段的补齐)。
+   *
+   * ## 为什么这颗按钮值得存在
+   *
+   * 「刷新状态」是逐行的,而在途记录十几条时运营要点十几次、每次等一个来回。
+   * 这是**读**动作(`POST /publish/listings/{id}/poll` 只问平台不改意图),
+   * 多问一次没有任何副作用 —— 与提交、下架完全不同,所以它不需要确认框。
+   *
+   * ## 三个刻意的选择
+   *
+   *     只处理当前这一页    分页之外的记录不在屏幕上,一颗按钮动了看不见的东西
+   *                         是这一页最不该有的行为
+   *     谁能问由后端说了算  判据是 `allowed_actions` 里有没有 POLL,不是前端
+   *                         按状态自己挑(硬规则 4)。DEAD / 已下架的行不会被打扰
+   *     串行不并发          并发几十个请求会把平台的限流打出来,而限流回来的
+   *                         错误会被记进每一条 attempt —— 为了快几秒钟污染台账
+   *                         不划算
+   *
+   * 单条失败**不中断整轮**:剩下的仍然值得问。结束时给一句总结,
+   * 失败数不为零时用 warning —— 一句"已刷新"盖住三条失败是这一页最贵的谎。
+   */
+  /**
+   * 当前这一页里后端说可以刷新的行。
+   *
+   * 判据只有一条:`allowed_actions` 里有没有 `POLL`。不按 `display_status`
+   * 自己挑 —— 那等于在前端重写一遍"什么状态该问平台",而那份规则住在
+   * `workflows/publish_view.py`。
+   */
+  const pollable = (listQuery.data?.items ?? []).filter((row) =>
+    row.allowed_actions.includes('POLL'),
+  )
+
+  const pollAllMutation = useMutation({
+    mutationFn: async (rows: ChannelListingRow[]) => {
+      let ok = 0
+      let failed = 0
+      for (const row of rows) {
+        try {
+          await publishApi.poll(row.listing_id)
+          ok += 1
+        } catch {
+          failed += 1
+        }
+      }
+      return { ok, failed }
+    },
+    onSuccess: ({ ok, failed }) => {
+      if (failed) message.warning(msg(`问过 ${ok + failed} 条:${ok} 条成功,${failed} 条失败`))
+      else message.success(msg(`已问过平台 ${ok} 条`))
+      refresh()
+    },
+    // 整轮失败(比如登录态掉了)才走到这里:单条失败在上面被吞进计数了
     onError: onWriteError,
   })
 
@@ -509,9 +567,29 @@ export default function PublishPage() {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <PageHeader
         title="发布上架"
-        subtitle="提交到平台、跟踪状态、按批次清理测试商品。状态与可用动作全部由后端判定"
+        subtitle="提交商品到平台、跟踪审核状态，并按批次清理测试商品"
         extra={
           <Space>
+            <Tooltip
+              title={
+                pollable.length
+                  ? `逐条问一遍平台,只涉及当前这一页可刷新的 ${pollable.length} 条。这是读操作,不会改变任何提交`
+                  : '当前这一页没有可刷新的记录 —— 能不能刷新由后端的 allowed_actions 决定'
+              }
+            >
+              {/* 禁用态的按钮不触发 Tooltip,所以外面包一层 span(同 a69 对
+                  SpuCreatePage 那颗删除按钮的处理) */}
+              <span>
+                <Button
+                  icon={<SyncOutlined />}
+                  disabled={pollable.length === 0 || pollAllMutation.isPending}
+                  loading={pollAllMutation.isPending}
+                  onClick={() => pollAllMutation.mutate(pollable)}
+                >
+                  刷新全部在途（{pollable.length}）
+                </Button>
+              </span>
+            </Tooltip>
             <Button
               icon={<ReloadOutlined />}
               loading={listQuery.isFetching}
@@ -528,7 +606,9 @@ export default function PublishPage() {
           <Space direction="vertical" size={8} style={{ width: '100%' }}>
             <NoticeAlert notice={lastSubmit.notice} dryRun={lastSubmit.dry_run} />
             <Descriptions size="small" column={3} bordered>
-              <Descriptions.Item label="动作">{lastSubmit.operation}</Descriptions.Item>
+              <Descriptions.Item label="动作">
+                {PUBLISH_OPERATION_LABEL[lastSubmit.operation] ?? lastSubmit.operation}
+              </Descriptions.Item>
               <Descriptions.Item label="幂等键">
                 <span className="mono" style={{ fontSize: fontScale.meta }}>
                   {lastSubmit.idempotency_key ?? '—'}
@@ -540,8 +620,8 @@ export default function PublishPage() {
             </Descriptions>
             <Typography.Paragraph style={{ margin: 0 }}>
               <Typography.Text type="secondary" style={{ fontSize: fontScale.meta }}>
-                下面是这次**真正会发出去**的报文(已脱敏)。干跑的全部产出就是它;
-                正式提交也给,因为"我们到底发了什么"是出事之后第一个要问的问题。
+                下面是本次生成的报文（已脱敏）。预览时只生成、不发送；正式提交后也会保留，
+                便于核对实际发送的内容。
               </Typography.Text>
             </Typography.Paragraph>
             <Input.TextArea
@@ -568,7 +648,7 @@ export default function PublishPage() {
                   <Space wrap>
                     <Input
                       allowClear
-                      placeholder="渠道(如 SHEIN)"
+                      placeholder="渠道（如 SHEIN）"
                       style={{ width: 160 }}
                       value={channel}
                       onChange={(e) => {
@@ -859,8 +939,8 @@ export default function PublishPage() {
             style={{ marginBottom: space.md }}
             type="info"
             showIcon
-            message="先干跑一次"
-            description="干跑只构造报文、不发送。报文对了再取消勾选正式提交 —— 上架在平台上通常撤不回来。"
+            message="建议先预览报文"
+            description="预览只构造报文，不会发送。确认无误后再取消勾选并正式提交；平台上架通常不能立即撤回。"
           />
           <Form.Item
             name="shop_id"
@@ -877,7 +957,7 @@ export default function PublishPage() {
             <Input placeholder="如 uat-2026-08-03" />
           </Form.Item>
           <Form.Item name="dry_run" valuePropName="checked">
-            <Checkbox>干跑(不真的提交)</Checkbox>
+            <Checkbox>仅预览，不提交</Checkbox>
           </Form.Item>
           <Typography.Text type="secondary" style={{ fontSize: fontScale.meta }}>
             商品:<span className="mono">{submitFor}</span>
@@ -952,7 +1032,12 @@ function CleanupPanel() {
           </Space>
         ),
       },
-      { title: '状态', dataIndex: 'status', width: 150 },
+      {
+        title: '状态',
+        dataIndex: 'status',
+        width: 150,
+        render: (status: string) => PUBLISH_STATUS_LABEL[status] ?? status,
+      },
       {
         title: '占位',
         key: 'occupying',

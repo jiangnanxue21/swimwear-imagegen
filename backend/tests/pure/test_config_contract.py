@@ -127,6 +127,9 @@ def test_all_provider_keys_default_to_empty_so_app_starts_unconfigured():
                     try:
                         defaults[stmt.target.id] = ast.literal_eval(stmt.value)
                     except ValueError:
+                        # 同 `test_a45_batch18_lease_budget.py`:读不出字面量的字段跳过,
+                        # 而下面点名的那几个都是字面量 —— 真读不出来会在取用时 KeyError,
+                        # 不会静默用一个错的默认值。
                         pass
     for key in ("FASHN_API_KEY", "FAL_API_KEY", "COMFYUI_BASE_URL", "VISION_MODEL_API_KEY"):
         assert defaults.get(key) == "", f"{key} 默认值必须为空字符串"

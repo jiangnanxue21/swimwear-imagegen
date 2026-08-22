@@ -325,7 +325,7 @@ export default function WizardPage() {
           type="error"
           showIcon
           data-testid="wizard-blocking"
-          message={`${wizard.blocking.length} 条阻断,不解决走不到导出`}
+          message={`${wizard.blocking.length} 条阻断问题，解决后才能导出`}
           description={
             <Space direction="vertical" size={2}>
               {wizard.blocking.map((b) => (

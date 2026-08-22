@@ -483,4 +483,3 @@ def test_the_plan_step_landed_in_both_places_at_once():
         "`_PLAN_PENDING` 还留着 —— 它是一张欠条,账还了就该撕掉,"
         "留着的清单会让下一个人以为方案步还没接(§3.37)"
     )
-

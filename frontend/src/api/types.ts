@@ -511,6 +511,27 @@ export const MODE_LABEL: Record<GenerationMode, string> = {
   product_to_model: '商品转模特图',
 }
 
+/** 单次出图调用状态。数据库保留稳定编码，界面显示运营可读文案。 */
+export const GENERATION_ATTEMPT_STATUS_LABEL: Record<string, string> = {
+  SUBMITTED: '已提交',
+  RUNNING: '执行中',
+  SUCCEEDED: '成功',
+  FAILED: '失败',
+  TIMEOUT: '超时',
+  CANCELLED: '已取消',
+}
+
+/** 自动重新生成的原因。 */
+export const REGENERATION_REASON_LABEL: Record<string, string> = {
+  PROVIDER_ERROR: '服务商返回错误',
+  PROVIDER_TIMEOUT: '服务商响应超时',
+  DOWNLOAD_FAILED: '结果下载失败',
+  NO_CANDIDATE_RETURNED: '未返回候选图',
+  LOW_SCORE: '评分未达标',
+  HARD_FAIL: '命中硬性错误',
+  MANUAL_REQUEST: '人工要求重新生成',
+}
+
 export const MOCK_OUTCOMES = [
   { value: 'success', label: '成功(4 张候选)' },
   { value: 'fail', label: '生成失败' },
@@ -1031,7 +1052,7 @@ export interface PromptVersion {
    * 全零**不等于**"这一版没跑过":统计有起点(见 `PromptOverview.stats_since`),
    * 更早的调用不带归属。展示层要把这两件事分开说。
    */
-  stats: PromptCallStats
+  stats: PromptCallStats | null
 }
 
 export interface PromptOverview {
@@ -1041,6 +1062,8 @@ export interface PromptOverview {
   version: number | null
   is_default: boolean
   default_content: string
+  /** 是否有逐版本调用统计；目前只有评分链路写 evaluation_attempts */
+  usage_stats: boolean
   /**
    * 防注入段正文(FE-305)。`null` = 这处提示词没有这一段。
    *
@@ -1073,10 +1096,8 @@ export type PromptTier = 'FREE' | 'TEMPLATE' | 'MAPPING'
 /**
  * 注册表里的一处提示词(`GET /prompts`,BE-302)。
  *
- * `editable` 的语义是**消费链路会不会读库**,不是"想不想让人改" —— 8 处里
- * 只有评分两份走 `get_active_content`,其余 6 处的正文由代码拼装。把它们做成
- * 可编辑,得到的是「保存成功、毫无效果」,比不可编辑更伤人。所以列表页对
- * `editable=false` 的项只展示、不给入口,理由从 `consumers` 里原样读出来。
+ * `editable` 的语义是**消费链路会不会读版本库**,不是"想不想让人改"。
+ * 已接线的评分、文案和出图模板可编辑；尚未接线的项只展示正文与原因。
  *
  * **没有"近 7 天调用次数"这一列。** PRD FE-301 要它,而后端 `list_prompts`
  * 的文档写着「先不给一个算不准的数」—— 前端不推测状态(硬规则第 4 条),
@@ -1111,12 +1132,17 @@ export interface PromptSurface {
   required_slots: string[]
   consumers: string[]
   has_static_default: boolean
+  /** 当前生效正文，或动态 Prompt 的代表性展开结果。所有登记项都必须可查看 */
+  content_preview: string
+  /** 动态预览采用了哪些示例输入；静态正文可为 null */
+  preview_note: string | null
+  /** 是否有来自 evaluation_attempts 的真实调用统计 */
+  usage_stats: boolean
   /** 只有 editable 的项带这一列;null = 内置默认生效中 */
   active_version?: number | null
   /**
-   * 近 `stats_window_days` 天的调用统计(FE-301)。**只有 editable 的项带它** ——
-   * 其余 6 处的消费链路不读库,它们的调用根本不经过 `evaluation_attempts`,
-   * 查出来一定是 0,而界面上一个「近 7 天 0 次」会被读成"没人用"。
+   * 近 `stats_window_days` 天的调用统计(FE-301)。只有真实写入
+   * `evaluation_attempts` 的评分 Prompt 带它；可编辑的文案/出图也不能填假 0。
    */
   stats?: PromptCallStats
 }

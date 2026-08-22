@@ -80,6 +80,9 @@ def test_the_exact_batch10_audit_payload_crashes_without_json_safe():
     try:
         json.dumps(payload)
     except TypeError:
+        # 吞的是**期望中的那一个** —— 这一段在断言"它必须抛",
+        # 下面的 `else` 负责在它没抛时失败。`tests/pure/` 不许 import pytest
+        # (两个运行器都要跑得动),所以没有 `pytest.raises` 可用。
         pass
     else:
         raise AssertionError(
@@ -346,6 +349,26 @@ def test_packaging_entrypoints_are_pinned_to_lf():
     for relative in ("tools/pack.sh", "tools/pack.ps1", "Makefile"):
         payload = (PROJECT_ROOT / relative).read_bytes()
         assert b"\r" not in payload, f"{relative} 出现 CRLF/混合换行,Windows 打包会复发"
+
+
+def test_windows_packer_rejects_dead_python_command_shims():
+    """`Get-Command` 找得到 WindowsApps shim，不等于它背后真有解释器。"""
+    pack = _read(PROJECT_ROOT / "tools" / "pack.ps1")
+
+    assert "function Find-RunnablePython" in pack
+    finder = pack.split("function Find-RunnablePython", 1)[1].split("function ", 1)[0]
+    assert "@('python', 'py', 'python3')" in finder, (
+        "Windows 打包必须先尊重已激活虚拟环境里的 python，再退到 py/python3"
+    )
+    assert "-CommandType Application" in finder
+    assert "-c 'import sys; raise SystemExit(0)'" in finder, (
+        "只跑 Get-Command 会把不可执行的 WindowsApps 别名误认成 Python"
+    )
+    assert "$LASTEXITCODE -eq 0" in finder
+    assert "catch" in finder, "失效 shim 的启动异常必须留在候选循环内处理"
+
+    selection = pack.split("$eolChecker =", 1)[1]
+    assert "$python = Find-RunnablePython" in selection
 
 
 #: 行尾策略的**唯一实现**,从 `tools/normalize_eol.py` 载入。

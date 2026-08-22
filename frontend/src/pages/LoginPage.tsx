@@ -266,7 +266,7 @@ function Shell({ children }: { children: ReactNode }) {
           level={4}
           style={{ color: brandVars.ink, textAlign: 'center', marginBottom: space.lg }}
         >
-          服装上架平台
+          服装商品运营平台
         </Typography.Title>
         {children}
       </div>

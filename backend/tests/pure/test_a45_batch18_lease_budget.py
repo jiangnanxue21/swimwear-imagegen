@@ -68,6 +68,10 @@ def test_the_three_defaults_match_what_config_actually_declares():
                         try:
                             declared[stmt.target.id] = ast.literal_eval(stmt.value)
                         except ValueError:
+                            # 字面量读不出来的字段(表达式、函数调用)**跳过而不是失败**:
+                            # 这里只关心下面点名的那几个常量,而它们都是字面量。
+                            # 读不出来的进不了 `declared`,取用时会 KeyError,
+                            # 所以没有"静默用了错的值"这条路。
                             pass
     assert declared["EXTRACTOR_MODEL_TIMEOUT_SECONDS"] == b.DEFAULT_EXTRACT_TIMEOUT_SECONDS
     assert declared["EXTRACTOR_MODEL_MAX_RETRIES"] == b.DEFAULT_EXTRACT_MAX_RETRIES

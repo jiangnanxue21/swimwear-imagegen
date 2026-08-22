@@ -254,7 +254,7 @@ export const fontScale = {
    * (一格里的那个大数),没有理由差 2px。按用量合并到 20。
    */
   metric: 20,
-  /** 首页大数字。比 metric 大一档,只给「今日工作」那八张卡 */
+  /** 首页大数字。比 metric 大一档,只给「今日工作」的待办卡片 */
   metricLg: 26,
 } as const
 

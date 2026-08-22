@@ -70,7 +70,6 @@ function RuleSetPanel() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-    <PageHeader title="图片人工审核" subtitle="评分没过关的候选图。审的是单张图,不是整个图片集" />
       <Descriptions size="small" column={4} bordered>
         <Descriptions.Item label="规则集">
           {active.name} v{active.version}
@@ -133,7 +132,7 @@ function RuleSetPanel() {
 }
 
 export default function ReviewQueuePage() {
-  useDocumentTitle('图片人工审核')
+  useDocumentTitle('候选图人工审核')
 
   /**
    * 筛选与排序都住 URL 里(GAP-033)。这一页 4 项筛选 + 2 项排序,全在这张表里 ——
@@ -292,11 +291,15 @@ export default function ReviewQueuePage() {
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <PageHeader
+        title="候选图人工审核"
+        subtitle="复核需要人工判断的商品任务及其候选图"
+      />
       <Alert
         type="info"
         showIcon
-        message="审核对象是商品任务,不是每一张低分候选图"
-        description="低分与硬错误候选会被自动淘汰并重新生成;只有轮次(以及可用的服务商)都耗尽仍拿不到 A 档的任务,才会出现在这里。"
+        message="审核对象是商品任务，不是每一张低分候选图"
+        description="低分或命中硬性错误的候选图会被自动淘汰并重新生成；只有生成轮次和可用服务商都已用尽，仍未获得 A 档结果的任务，才会进入这里。"
       />
 
       <Card
